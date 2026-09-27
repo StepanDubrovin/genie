@@ -45,6 +45,26 @@ export function docsFilesSignature(docsRoot: string): string {
 }
 
 /**
+ * True when the lexical path `candidate` passes through a symlink inside `root`.
+ * `resolveDocPath` canonicalizes its result, which hides an in-root symlink alias
+ * (docs/alias.md → docs/real.md); this check rejects a save that would land on a
+ * page the caller did not name. Walks up to the docs root; returns false when the
+ * candidate is not inside it (containment is enforced elsewhere).
+ */
+export function passesThroughSymlink(root: string, candidate: string): boolean {
+  const canonicalRoot = path.resolve(root);
+  let current = path.resolve(candidate);
+  while (current !== canonicalRoot) {
+    if (!current.startsWith(canonicalRoot + path.sep)) return false;
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) return true;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+  return false;
+}
+
+/**
  * Atomic save: write a same-directory temp file, then rename over the target so
  * readers never observe a partially written page. Cleans the temp file on error.
  */

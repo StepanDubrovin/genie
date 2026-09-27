@@ -118,6 +118,10 @@ test("docs API serves tree, search and read with links, backlinks, stale reasons
     const link = source.json.links.find((item: any) => item.target === "auth");
     assert.equal(link.resolution, "resolved");
     assert.equal(link.targetPath, "auth.md");
+    // An empty heading parameter means "no heading", not a heading named "".
+    const emptyHeading = await call(h, "GET", "/api/docs/page?path=source.md&heading=");
+    assert.equal(emptyHeading.status, 200);
+    assert.match(emptyHeading.json.content, /Sources/);
 
     const broken = await call(h, "GET", "/api/docs/page?path=broken.md");
     assert.equal(broken.status, 200);
@@ -148,8 +152,14 @@ test("docs writes require X-Genie, reject traversal and symlink escapes, and sav
     // A save refreshes the index: the edited body replaces the old one.
     const edited = await call(h, "POST", "/api/docs/page", { body: { path: "guide.md", content: "# Guide\n\neditedneedle body\n" }, genie: true });
     assert.equal(edited.status, 200);
+    assert.match(edited.json.page.content, /editedneedle/);
+    assert.ok(Array.isArray(edited.json.page.backlinks));
     assert.equal((await call(h, "GET", "/api/docs/search?q=editedneedle")).json.results[0].path, "guide.md");
     assert.equal((await call(h, "GET", "/api/docs/search?q=initial")).json.results.length, 0);
+
+    // Empty content is refused rather than creating a blank page.
+    assert.equal((await call(h, "POST", "/api/docs/page", { body: { path: "empty.md", content: "   \n" }, genie: true })).status, 400);
+    assert.equal(fs.existsSync(path.join(root, "docs/empty.md")), false);
 
     assert.equal((await call(h, "POST", "/api/docs/page", { body: { path: "guide.md", content: "# Other\n", mode: "create" }, genie: true })).status, 409);
 
@@ -178,6 +188,17 @@ test("docs writes require X-Genie, reject traversal and symlink escapes, and sav
     fs.symlinkSync(path.join(outside, "dir"), path.join(root, "docs", "linked-dir"));
     assert.equal((await call(h, "POST", "/api/docs/page", { body: { path: "linked-dir/evil.md", content: "# Evil\n" }, genie: true })).status, 400);
     assert.equal(fs.existsSync(path.join(outside, "dir", "evil.md")), false);
+
+    // An in-docs symlink alias must not silently overwrite the file it points at.
+    write(root, "docs/real.md", "# Real\n\noriginal\n");
+    fs.symlinkSync(path.join(root, "docs", "real.md"), path.join(root, "docs", "alias.md"));
+    assert.equal((await call(h, "POST", "/api/docs/page", { body: { path: "alias.md", content: "# Hijacked\n" }, genie: true })).status, 400);
+    assert.equal(fs.readFileSync(path.join(root, "docs", "real.md"), "utf8"), "# Real\n\noriginal\n");
+
+    // Raw filesystem errors on the write path are client errors, not 500s.
+    fs.mkdirSync(path.join(root, "docs", "dir.md"), { recursive: true });
+    assert.equal((await call(h, "POST", "/api/docs/page", { body: { path: "dir.md", content: "# Directory\n" }, genie: true })).status, 400);
+    assert.equal((await call(h, "POST", "/api/docs/page", { body: { path: "bad\u0000.md", content: "# Nul\n" }, genie: true })).status, 400);
   } finally {
     await h.close();
   }

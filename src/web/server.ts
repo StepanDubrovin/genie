@@ -19,7 +19,7 @@ import { addMembers, deleteTeam, reapClosedTeams, removeMember, stopTeam } from 
 import { repoInfo } from "../tracker/fsutil.ts";
 import { type Actor, isMemberRole, MEMBER_ROLES, STATUSES, type Status, TASK_TYPES, type TaskType, isStatus, ARTIFACT_KINDS, type ArtifactKind } from "../tracker/model.ts";
 import { GenieError, type Tracker } from "../tracker/store.ts";
-import { atomicWriteFile, docsFilesSignature } from "./docs.ts";
+import { atomicWriteFile, docsFilesSignature, passesThroughSymlink } from "./docs.ts";
 
 const execFileAsync = promisify(execFile);
 const WEB_ROOT = path.join(PACKAGE_ROOT, "web", "dist");
@@ -359,7 +359,8 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
       if (section === "page" && method === "GET") {
         const docPath = (url.searchParams.get("path") ?? "").trim();
         if (!docPath) throw new HttpError(400, "missing docs path");
-        const heading = url.searchParams.get("heading") ?? undefined;
+        const headingParam = url.searchParams.get("heading");
+        const heading = headingParam ? headingParam : undefined;
         const rawMax = url.searchParams.get("maxChars");
         let maxChars: number | undefined;
         if (rawMax !== null) {
@@ -383,6 +384,7 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
         const content = body.content !== undefined ? String(body.content) : body.text !== undefined ? String(body.text) : undefined;
         if (!docPath) throw new HttpError(400, "missing docs path");
         if (content === undefined) throw new HttpError(400, "missing docs content");
+        if (content.trim().length === 0) throw new HttpError(400, "docs content must not be empty");
         const mode = body.mode === undefined || body.mode === "" ? "upsert" : String(body.mode);
         if (mode !== "create" && mode !== "update" && mode !== "upsert") throw new HttpError(400, `unknown docs mode ${mode}`);
         let file: string;
@@ -391,15 +393,22 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
         } catch (error) {
           throw new HttpError(400, error instanceof Error ? error.message : String(error));
         }
+        // Reject writing through an in-docs symlink alias; resolvePath canonicalizes it away otherwise.
+        const lexical = path.resolve(service.docsRoot, path.extname(docPath) ? docPath : `${docPath}.md`);
+        if (passesThroughSymlink(service.docsRoot, lexical)) throw new HttpError(400, "refusing to save through a symlinked docs path");
         const exists = fs.existsSync(file);
         if (mode === "create" && exists) throw new HttpError(409, "documentation page already exists");
         if (mode === "update" && !exists) throw new HttpError(404, "documentation page not found");
         const parsed = parseDoc(content, docPath);
         if (parsed.diagnostics.length) return send(res, 422, { error: "invalid documentation metadata", diagnostics: parsed.diagnostics });
-        atomicWriteFile(file, content);
+        try {
+          atomicWriteFile(file, content);
+        } catch (error) {
+          throw new HttpError(docsErrorStatus(error), error instanceof Error ? error.message : String(error));
+        }
         service.refresh();
         notifyDocsChanged(service);
-        return send(res, exists ? 200 : 201, { page: service.getPage(docPath), diagnostics: parsed.diagnostics });
+        return send(res, exists ? 200 : 201, { page: service.read(docPath, { wholePage: true }), diagnostics: parsed.diagnostics });
       }
 
       throw new HttpError(404, "not found");
