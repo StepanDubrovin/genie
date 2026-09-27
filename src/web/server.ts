@@ -11,11 +11,15 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
+import { DOC_STATUSES, DOC_TYPES, parseDoc, type DocStatus, type DocType } from "../docs/parser.ts";
+import { DocsService } from "../docs/service.ts";
 import { ORCHESTRATOR, TeamBus } from "../team/bus.ts";
 import { loadConfig, type MemberSpec, PACKAGE_ROOT } from "../team/config.ts";
 import { addMembers, deleteTeam, reapClosedTeams, removeMember, stopTeam } from "../team/ops.ts";
+import { repoInfo } from "../tracker/fsutil.ts";
 import { type Actor, isMemberRole, MEMBER_ROLES, STATUSES, type Status, TASK_TYPES, type TaskType, isStatus, ARTIFACT_KINDS, type ArtifactKind } from "../tracker/model.ts";
 import { GenieError, type Tracker } from "../tracker/store.ts";
+import { atomicWriteFile, docsFilesSignature, passesThroughSymlink } from "./docs.ts";
 
 const execFileAsync = promisify(execFile);
 const WEB_ROOT = path.join(PACKAGE_ROOT, "web", "dist");
@@ -33,6 +37,29 @@ interface Options {
   port: number;
   tailscale: boolean;
   open: boolean;
+}
+
+/** Options for the testable web app factory; startWebServer adds the bind/tailnet bits. */
+export interface WebAppOptions {
+  port: number;
+  /** Extra `host:port` entries accepted by the Host allowlist (tailnet names). */
+  hostnames?: string[];
+  /** Tailnet DNS name echoed by /api/meta. */
+  tailnet?: string;
+  /** Directory used to resolve the main checkout for docs; defaults to process.cwd(). */
+  cwd?: string;
+}
+
+export interface WebApp {
+  handler: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>;
+  close: () => void;
+}
+
+/** Map a docs-service failure onto an HTTP status: missing pages are 404, everything else is a bad request. */
+function docsErrorStatus(error: unknown): number {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/not found|not indexed/.test(message)) return 404;
+  return 400;
 }
 
 async function tailscaleInfo(): Promise<{ ip: string; dnsName: string; shortName: string }> {
@@ -87,17 +114,13 @@ async function readBody(req: http.IncomingMessage): Promise<Record<string, unkno
   }
 }
 
-export async function startWebServer(tracker: Tracker, opts: Options): Promise<void> {
+export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
   const bus = new TeamBus(tracker);
   const localUser = os.userInfo().username;
   const allowedHosts = new Set([`127.0.0.1:${opts.port}`, `localhost:${opts.port}`]);
-  const addresses = ["127.0.0.1"];
-  let tailnet: Awaited<ReturnType<typeof tailscaleInfo>> | undefined;
-  if (opts.tailscale) {
-    tailnet = await tailscaleInfo();
-    addresses.push(tailnet.ip);
-    for (const h of [tailnet.ip, tailnet.dnsName, tailnet.shortName]) if (h) allowedHosts.add(`${h}:${opts.port}`);
-  }
+  for (const host of opts.hostnames ?? []) if (host) allowedHosts.add(`${host}:${opts.port}`);
+  const tailnetName = opts.tailnet;
+  const docsCwd = opts.cwd ?? process.cwd();
 
   // Server-sent events: one data_version poll for all clients.
   const clients = new Set<http.ServerResponse>();
@@ -105,16 +128,22 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
   const broadcast = () => {
     for (const c of clients) c.write(`event: change\ndata: ${Date.now()}\n\n`);
   };
-  setInterval(() => {
+  const timers: NodeJS.Timeout[] = [];
+  timers.push(setInterval(() => {
     const v = tracker.db.dataVersion();
     if (v !== version) {
       version = v;
       broadcast();
     }
-  }, 700).unref();
-  setInterval(() => {
+  }, 700));
+  timers.push(setInterval(() => {
     for (const c of clients) c.write(": ping\n\n");
-  }, 20_000).unref();
+  }, 20_000));
+  for (const timer of timers) timer.unref();
+  const close = (): void => {
+    for (const timer of timers) clearInterval(timer);
+    timers.length = 0;
+  };
 
   // Teams keep running only while their task is open: closing a task here (or
   // anywhere) stops its team. Checked right after status changes and periodically.
@@ -127,7 +156,9 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
         }
       })
       .catch((err) => console.error(`genie web: reaping failed: ${err instanceof Error ? err.message : String(err)}`));
-  setInterval(reap, 20_000).unref();
+  const reapTimer = setInterval(reap, 20_000);
+  reapTimer.unref();
+  timers.push(reapTimer);
   void reap();
 
   async function actorFor(req: http.IncomingMessage): Promise<Actor> {
@@ -153,6 +184,35 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
     return { ...team, taskInfo: task, pending: Object.fromEntries(team.members.map((m) => [m.name, bus.pending(team.id, m.name)])) };
   }
 
+  // Docs API over the G-8 core service. The web serves the main checkout's docs
+  // (repoInfo(cwd).mainRoot), never an unmerged linked-worktree copy.
+  let docs: DocsService | undefined;
+  let docsSignature: string | undefined;
+  const docsService = (): DocsService => {
+    if (!docs) {
+      const base = repoInfo(docsCwd)?.mainRoot ?? docsCwd;
+      docs = new DocsService({ db: tracker.db, cwd: base, trackerDir: tracker.dir, docsRoot: loadConfig(tracker.dir).docs.root });
+    }
+    return docs;
+  };
+  /** Detection path for the docs-version poll: refresh the index when files changed. */
+  const docsChangeSignal = (service: DocsService): string => {
+    const signature = docsFilesSignature(service.docsRoot);
+    if (signature !== docsSignature) {
+      docsSignature = signature;
+      service.refresh();
+      version = tracker.db.dataVersion();
+      broadcast();
+    }
+    return signature;
+  };
+  /** Write path: the index was just refreshed explicitly, so only the signal changes. */
+  const notifyDocsChanged = (service: DocsService): void => {
+    docsSignature = docsFilesSignature(service.docsRoot);
+    version = tracker.db.dataVersion();
+    broadcast();
+  };
+
   async function api(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
     const method = req.method ?? "GET";
     const parts = url.pathname.split("/").filter(Boolean).slice(1); // drop "api"
@@ -169,7 +229,7 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
     if (parts[0] === "meta" && method === "GET") {
       const actor = await actorFor(req);
       const cfg = loadConfig(tracker.dir);
-      return send(res, 200, { ...tracker.meta(), counts: tracker.counts(), statuses: STATUSES, roles: MEMBER_ROLES, roleModels: cfg.roleModels ?? {}, types: TASK_TYPES, user: actor.name, tailnet: tailnet?.dnsName });
+      return send(res, 200, { ...tracker.meta(), counts: tracker.counts(), statuses: STATUSES, roles: MEMBER_ROLES, roleModels: cfg.roleModels ?? {}, types: TASK_TYPES, user: actor.name, tailnet: tailnetName });
     }
 
     if (parts[0] === "tasks") {
@@ -258,6 +318,102 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
       }
     }
 
+    if (parts[0] === "docs") {
+      const service = docsService();
+      const section = parts[1] ?? "";
+
+      // GET /api/docs/version — lightweight change signal an open UI can poll.
+      if (section === "version" && method === "GET") return send(res, 200, { version: docsChangeSignal(service) });
+
+      // GET /api/docs/tree — every page's metadata plus the per-file diagnostics (D1 badge data).
+      if (section === "tree" && method === "GET") {
+        const pages = service.list();
+        docsSignature = docsFilesSignature(service.docsRoot);
+        return send(res, 200, {
+          version: docsSignature,
+          pages,
+          diagnostics: pages.filter((page) => page.diagnostics.length).map((page) => ({ path: page.path, diagnostics: page.diagnostics })),
+        });
+      }
+
+      // GET /api/docs/search?q=&type=&status=&limit=
+      if (section === "search" && method === "GET") {
+        const query = url.searchParams.get("q") ?? "";
+        const type = url.searchParams.get("type") ?? "";
+        const status = url.searchParams.get("status") ?? "";
+        if (type && !DOC_TYPES.includes(type as DocType)) throw new HttpError(400, `unknown docs type ${type}`);
+        if (status && !DOC_STATUSES.includes(status as DocStatus)) throw new HttpError(400, `unknown docs status ${status}`);
+        const rawLimit = url.searchParams.get("limit");
+        let limit: number | undefined;
+        if (rawLimit !== null) {
+          limit = Number(rawLimit);
+          if (!Number.isFinite(limit) || limit < 1) throw new HttpError(400, `invalid docs limit ${rawLimit}`);
+        }
+        const results = query.trim()
+          ? service.search(query, { ...(type ? { type: type as DocType } : {}), ...(status ? { status: status as DocStatus } : {}), limit })
+          : [];
+        return send(res, 200, { query, results });
+      }
+
+      // GET /api/docs/page?path=&heading=&maxChars= — whole page by default, a section with `heading`.
+      if (section === "page" && method === "GET") {
+        const docPath = (url.searchParams.get("path") ?? "").trim();
+        if (!docPath) throw new HttpError(400, "missing docs path");
+        const headingParam = url.searchParams.get("heading");
+        const heading = headingParam ? headingParam : undefined;
+        const rawMax = url.searchParams.get("maxChars");
+        let maxChars: number | undefined;
+        if (rawMax !== null) {
+          maxChars = Number(rawMax);
+          if (!Number.isFinite(maxChars) || maxChars < 1) throw new HttpError(400, `invalid docs maxChars ${rawMax}`);
+        }
+        const limits = maxChars !== undefined ? { maxChars } : {};
+        try {
+          const page = heading !== undefined
+            ? service.read(docPath, { heading, ...limits })
+            : service.read(docPath, { wholePage: true, ...limits });
+          return send(res, 200, page);
+        } catch (error) {
+          throw new HttpError(docsErrorStatus(error), error instanceof Error ? error.message : String(error));
+        }
+      }
+
+      // POST /api/docs/page — create/save a page (X-Genie already enforced); validate metadata, write atomically, refresh.
+      if (section === "page" && method === "POST") {
+        const docPath = String(body.path ?? "").trim();
+        const content = body.content !== undefined ? String(body.content) : body.text !== undefined ? String(body.text) : undefined;
+        if (!docPath) throw new HttpError(400, "missing docs path");
+        if (content === undefined) throw new HttpError(400, "missing docs content");
+        if (content.trim().length === 0) throw new HttpError(400, "docs content must not be empty");
+        const mode = body.mode === undefined || body.mode === "" ? "upsert" : String(body.mode);
+        if (mode !== "create" && mode !== "update" && mode !== "upsert") throw new HttpError(400, `unknown docs mode ${mode}`);
+        let file: string;
+        try {
+          file = service.resolvePath(docPath);
+        } catch (error) {
+          throw new HttpError(400, error instanceof Error ? error.message : String(error));
+        }
+        // Reject writing through an in-docs symlink alias; resolvePath canonicalizes it away otherwise.
+        const lexical = path.resolve(service.docsRoot, path.extname(docPath) ? docPath : `${docPath}.md`);
+        if (passesThroughSymlink(service.docsRoot, lexical)) throw new HttpError(400, "refusing to save through a symlinked docs path");
+        const exists = fs.existsSync(file);
+        if (mode === "create" && exists) throw new HttpError(409, "documentation page already exists");
+        if (mode === "update" && !exists) throw new HttpError(404, "documentation page not found");
+        const parsed = parseDoc(content, docPath);
+        if (parsed.diagnostics.length) return send(res, 422, { error: "invalid documentation metadata", diagnostics: parsed.diagnostics });
+        try {
+          atomicWriteFile(file, content);
+        } catch (error) {
+          throw new HttpError(docsErrorStatus(error), error instanceof Error ? error.message : String(error));
+        }
+        service.refresh();
+        notifyDocsChanged(service);
+        return send(res, exists ? 200 : 201, { page: service.read(docPath, { wholePage: true }), diagnostics: parsed.diagnostics });
+      }
+
+      throw new HttpError(404, "not found");
+    }
+
     if (parts[0] === "teams") {
       const id = parts[1];
       if (!id && method === "GET") return send(res, 200, bus.list({ includeStopped: url.searchParams.get("all") === "1" }).map((t) => teamView(t.id)));
@@ -331,11 +487,24 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
     }
   };
 
+  return { handler, close };
+}
+
+export async function startWebServer(tracker: Tracker, opts: Options): Promise<void> {
+  const addresses = ["127.0.0.1"];
+  const hostnames: string[] = [];
+  let tailnet: Awaited<ReturnType<typeof tailscaleInfo>> | undefined;
+  if (opts.tailscale) {
+    tailnet = await tailscaleInfo();
+    addresses.push(tailnet.ip);
+    for (const h of [tailnet.ip, tailnet.dnsName, tailnet.shortName]) if (h) hostnames.push(h);
+  }
+  const app = createWebApp(tracker, { port: opts.port, hostnames, tailnet: tailnet?.dnsName, cwd: process.cwd() });
   await Promise.all(
     addresses.map(
       (host) =>
         new Promise<void>((resolve, reject) => {
-          const server = http.createServer((req, res) => void handler(req, res));
+          const server = http.createServer((req, res) => void app.handler(req, res));
           server.on("error", reject);
           server.listen(opts.port, host, () => resolve());
         }),
