@@ -216,6 +216,29 @@ const TERM_TOKEN = /[\p{L}\p{N}_]+/gu;
 const MIN_TERM_LENGTH = 3;
 const MIN_PAGE_BUDGET = 200;
 
+/**
+ * Closed-class function words (English + Russian) that carry no topical signal.
+ * This is a generic, language-level list, never a per-page denylist; tokens
+ * derived from the project name are damped on top of it. Kept short on purpose:
+ * only words that realistically occur in task text and page headings.
+ */
+const FUNCTION_WORDS = new Set([
+  // English articles, conjunctions, prepositions, pronouns and auxiliaries.
+  "the", "and", "for", "from", "into", "with", "without", "over", "under", "about",
+  "after", "before", "between", "through", "this", "that", "these", "those", "they", "them",
+  "their", "there", "you", "your", "its", "his", "her", "our", "who", "which",
+  "what", "are", "was", "were", "been", "has", "have", "had", "does", "did",
+  "can", "could", "may", "might", "must", "should", "will", "would", "not", "only",
+  "also", "then", "than", "when", "where", "while", "how", "all", "any", "some",
+  "more", "most", "other", "such", "same",
+  // Russian conjunctions, prepositions, pronouns and adverbs.
+  "или", "либо", "если", "чтобы", "что", "как", "чем", "для", "без", "под",
+  "над", "про", "при", "через", "между", "после", "перед", "кроме", "это", "этот",
+  "эта", "эти", "тот", "его", "ее", "её", "их", "они", "она", "оно",
+  "все", "где", "тут", "там", "тогда", "когда", "так", "тоже", "также", "ещё",
+  "еще", "уже", "только", "очень",
+]);
+
 function pathCandidates(corpus: string): string[] {
   const found = new Set<string>();
   for (const match of corpus.matchAll(PATH_CANDIDATE)) {
@@ -241,11 +264,68 @@ function termTokens(corpus: string, paths: string[]): string[] {
   return [...found];
 }
 
-function pageTermMatch(page: DocPage, token: string): boolean {
-  const wanted = normalizeTerm(token);
-  if (page.tags.some((tag) => normalizeTerm(tag) === wanted)) return true;
-  if (page.aliases.some((alias) => normalizeTerm(alias) === wanted)) return true;
-  return (page.title.match(TERM_TOKEN) ?? []).some((word) => normalizeTerm(word) === wanted);
+/**
+ * The one explicit term surface: the fields term matching is allowed to read.
+ * Title, summary, headings, tags and aliases only — body text is deliberately
+ * excluded so L1 stays cheap and predictable. Glossary pages are covered through
+ * these same fields (there is no separate glossary field).
+ */
+export function pageTermSurface(page: DocPage): string {
+  return [page.title, page.summary ?? "", ...page.headings, ...page.tags, ...page.aliases].join("\n");
+}
+
+/** Normalized tokens of a page's term surface, deduplicated. */
+function surfaceTokens(page: DocPage): Set<string> {
+  const tokens = pageTermSurface(page).match(TERM_TOKEN) ?? [];
+  const found = new Set<string>();
+  for (const token of tokens) {
+    if (token.length >= MIN_TERM_LENGTH) found.add(normalizeTerm(token));
+  }
+  return found;
+}
+
+function pageTermMatch(surface: Set<string>, token: string): boolean {
+  return surface.has(normalizeTerm(token));
+}
+
+/** Tokens from the project directory name and `package.json` name ("meta.project"). */
+function projectNameStopwords(projectRoot: string): Set<string> {
+  const names = [path.basename(projectRoot)];
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")) as { name?: unknown };
+    if (typeof pkg.name === "string" && pkg.name.trim()) names.push(pkg.name);
+  } catch { /* no readable package.json: the directory name still carries the project name */ }
+  const tokens = new Set<string>();
+  for (const name of names) {
+    for (const token of name.match(TERM_TOKEN) ?? []) {
+      if (token.length >= MIN_TERM_LENGTH) tokens.add(normalizeTerm(token));
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Damping rule for term matches, evaluated against the current index so it stays
+ * deterministic and needs no per-page blacklist:
+ *  - tokens derived from the project name (project directory or `package.json`
+ *    `name`) never select on their own — merely mentioning the project is not
+ *    evidence that a page is relevant;
+ *  - generic function words (see `FUNCTION_WORDS`) carry no topical signal;
+ *  - a term that occurs in more than half of the indexed pages (and in at least
+ *    two of them, since a single page is trivially ubiquitous) is dropped as
+ *    well.
+ * Damped terms are removed from the whole selection, so a page that matches only
+ * ubiquitous tokens is not selected on the term class and carries no fake reason.
+ */
+function discriminativeTerms(projectRoot: string, pages: DocPage[], surfaces: Map<string, Set<string>>, terms: string[]): string[] {
+  const damped = projectNameStopwords(projectRoot);
+  for (const word of FUNCTION_WORDS) damped.add(normalizeTerm(word));
+  for (const token of terms) {
+    if (damped.has(normalizeTerm(token))) continue;
+    const df = pages.reduce((count, page) => count + (pageTermMatch(surfaces.get(page.path) ?? new Set(), token) ? 1 : 0), 0);
+    if (df >= 2 && df * 2 > pages.length) damped.add(normalizeTerm(token));
+  }
+  return terms.filter((token) => !damped.has(normalizeTerm(token)));
 }
 
 function statusRank(page: DocPage): number {
@@ -261,14 +341,14 @@ interface Scored {
   termMatches: number;
 }
 
-function scorePage(page: DocPage, task: L1Task, paths: string[], terms: string[]): Scored | undefined {
+function scorePage(page: DocPage, task: L1Task, paths: string[], terms: string[], surface: Set<string>): Scored | undefined {
   const related = new Set(page.related.map((id) => id.trim().toUpperCase()));
   const wantedIds = [task.id, task.epicId].filter((id): id is string => !!id).map((id) => id.trim().toUpperCase());
   const relatedReasons = [...new Set(wantedIds.filter((id) => related.has(id)))].map((id) => `related ${id}`);
   const pathReasons = paths
     .filter((candidate) => matchesAnyGlob(page.paths, candidate) !== undefined || (page.paths ?? []).some((pattern) => matchesAnyGlob([candidate], pattern) !== undefined))
     .map((candidate) => `path match ${candidate}`);
-  const termMatches = terms.filter((token) => pageTermMatch(page, token));
+  const termMatches = terms.filter((token) => pageTermMatch(surface, token));
   if (!relatedReasons.length && !pathReasons.length && !termMatches.length) return undefined;
   // Deprecated pages only surface when explicitly related to the task.
   if (!relatedReasons.length && page.status === "deprecated") return undefined;
@@ -346,8 +426,10 @@ export function selectL1Pages(service: DocsService, task: L1Task): Scored[] {
   ].join("\n");
   const paths = pathCandidates(corpus);
   const terms = termTokens(corpus, paths);
+  const surfaces = new Map(pages.map((page) => [page.path, surfaceTokens(page)]));
+  const activeTerms = discriminativeTerms(service.projectRoot, pages, surfaces, terms);
   return pages
-    .map((page) => scorePage(page, task, paths, terms))
+    .map((page) => scorePage(page, task, paths, activeTerms, surfaces.get(page.path) ?? new Set()))
     .filter((scored): scored is Scored => scored !== undefined)
     .sort((a, b) =>
       a.rank - b.rank ||

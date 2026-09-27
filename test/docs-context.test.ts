@@ -18,6 +18,7 @@ import {
   L1_PAGE_UNITS,
   L1_TOTAL_UNITS,
   normalizeTerm,
+  pageTermSurface,
   publishExclusive,
   selectL1Pages,
   slugify,
@@ -219,6 +220,28 @@ test("real-repo L0 measurement stays under the target and reports units/chars/pa
   db.close();
 });
 
+// D4 before/after baseline is G-13's artifact #4 §7. These are the pilot's own
+// real-corpus examples, pinned here so the term-class fix cannot silently regress.
+test("real-repo L1 D4: heading task selects, project-name-only task and unrelated task select nothing", () => {
+  const db = new Db(":memory:");
+  const docs = new DocsService({ db, cwd: REPO_ROOT });
+
+  const russian = selectL1Pages(docs, { id: "G-95", title: "Надёжность доставки писем", description: "", plan: "", acceptance: [] });
+  assert.deepEqual(russian.map((item) => item.page.path), ["architecture.md"], "a Russian task whose words live in a heading now selects that page");
+  assert.deepEqual(russian[0].reasons, ["term match Надёжность"]);
+
+  const typo = selectL1Pages(docs, { id: "G-93", title: "Поправить опечатки в CHANGELOG", description: "В проекте genie поправить опечатки в CHANGELOG.", plan: "", acceptance: [] });
+  assert.deepEqual(typo, [], "merely naming the project no longer selects architecture/contract pages");
+
+  const architecture = selectL1Pages(docs, { id: "G-94", title: "Архитектура genie: обновить схему", description: "", plan: "", acceptance: [] });
+  assert.deepEqual(architecture.map((item) => item.page.path), ["architecture.md"], "genie is damped, Архитектура still selects");
+
+  const trackerTask = selectL1Pages(docs, { id: "G-96", title: "Tracker: add a new task status", description: "Touch src/tracker/model.ts and src/tracker/store.ts.", plan: "", acceptance: [] });
+  assert.deepEqual(trackerTask.map((item) => item.page.path), ["architecture.md", "decisions.md"], "a path task selects exactly its path pages; the function word \"and\" must not drag in the contract page");
+  console.log(`[G-23 measurement] G-95 -> ${russian.map((item) => `${item.page.path} (${item.reasons.join(", ")})`).join("; ") || "<none>"}; G-93 -> ${typo.length ? "unexpected pages" : "<none>"}; G-94 -> ${architecture.map((item) => item.page.path).join("; ") || "<none>"}`);
+  db.close();
+});
+
 // ---------------------------------------------------------------- 6. L1 rank determinism
 
 test("L1 selection ranks related > path > term deterministically and reports reasons", () => {
@@ -257,6 +280,11 @@ test("L1 tie-breaks prefer current over draft and exclude deprecated unless rela
   write(root, "docs/s-draft.md", fm("# Sessions\n\nDraft.", "title: Sessions\nstatus: draft\n"));
   write(root, "docs/s-deprecated.md", fm("# Sessions\n\nOld.", "title: Sessions\nstatus: deprecated\n"));
   write(root, "docs/s-related-deprecated.md", fm("# Legacy related\n\nOld related.", "title: Legacy related\nstatus: deprecated\nrelated: [G-9]\n"));
+  // Filler pages keep the shared term "Sessions" below the document-frequency
+  // damping threshold so this test still exercises the current > draft tie-break.
+  for (let index = 0; index < 3; index++) {
+    write(root, `docs/filler-${index}.md`, fm(`# Filler ${index}\n\nUnrelated.`, `title: Filler ${index}\nstatus: current\n`));
+  }
   const docs = service(root, tracker);
   const selected = selectL1Pages(docs, { id: "G-9", title: "Sessions", description: "", plan: "", acceptance: [] });
   const paths = selected.map((item) => item.page.path);
@@ -287,7 +315,68 @@ test("Russian term-only fixture: ё/е folds, inflections do not (non-stemmed FT
   tracker.db.close();
 });
 
-// ---------------------------------------------------------------- 8. over-clip L1 fixture
+// ---------------------------------------------------------------- 8. D4 term surface + damping
+
+test("term surface adds headings and summary but never body text", () => {
+  const root = tmp();
+  const tracker = createTracker(root);
+  write(root, "docs/headings.md", fm("# Архитектура\n\n## Надёжность команд\n\nТело страницы.", "title: Архитектура\nstatus: current\n"));
+  write(root, "docs/summary.md", fm("# Обзор\n\nТело страницы.", "title: Обзор\nsummary: Доставка писем\ntype: reference\nstatus: current\n"));
+  write(root, "docs/body-only.md", fm("# Тело\n\nОбычное вступление.\n\nсекретноеслово живёт только в теле.", "title: Тело\nstatus: current\n"));
+  write(root, "docs/english.md", fm("# Contract\n\n## Search and reads\n\nBody.", "title: Contract\nstatus: current\n"));
+  const docs = service(root, tracker);
+
+  const pages = docs.list();
+  const surface = (relative: string): string => pageTermSurface(pages.find((page) => page.path === relative)!);
+  assert.match(surface("headings.md"), /Надёжность команд/, "headings contribute terms");
+  assert.match(surface("summary.md"), /Доставка писем/, "summary contributes terms");
+  assert.doesNotMatch(surface("body-only.md"), /секретноеслово/, "body text is not part of the term surface");
+
+  const select = (title: string): string[] =>
+    selectL1Pages(docs, { id: "G-1", title, description: "", plan: "", acceptance: [] }).map((item) => item.page.path);
+  assert.deepEqual(select("надёжность"), ["headings.md"], "a heading word selects (ё/е folded, no stemming needed)");
+  assert.deepEqual(select("писем"), ["summary.md"], "a summary word selects");
+  assert.deepEqual(select("reads"), ["english.md"], "a content heading word still selects");
+  assert.deepEqual(select("and"), [], "generic function words are damped, so headings do not leak noise");
+  assert.deepEqual(select("секретноеслово"), [], "body-only text never selects");
+  tracker.db.close();
+});
+
+test("ubiquitous terms are damped by document frequency but rare terms still select", () => {
+  const root = tmp();
+  const tracker = createTracker(root);
+  for (let index = 0; index < 4; index++) {
+    write(root, `docs/widgets-${index}.md`, fm(`# Widgets ${index}\n\nBody.`, `title: Widgets ${index}\nstatus: current\n`));
+  }
+  write(root, "docs/gadget.md", fm("# Widgets and gadgets\n\n## Gadget\n\nDetails.", "title: Widgets and gadgets\nstatus: current\n"));
+  const docs = service(root, tracker);
+
+  assert.deepEqual(selectL1Pages(docs, { id: "G-1", title: "widgets", description: "", plan: "", acceptance: [] }), [], "a term on more than half of the pages does not select");
+  const mixed = selectL1Pages(docs, { id: "G-1", title: "gadget widgets", description: "", plan: "", acceptance: [] });
+  assert.deepEqual(mixed.map((item) => item.page.path), ["gadget.md"], "the rare term still selects, the damped one adds no pages");
+  assert.deepEqual(mixed[0].reasons, ["term match gadget"], "damped terms never appear as reasons");
+  tracker.db.close();
+});
+
+test("project-name tokens are damped below the document-frequency threshold", () => {
+  const root = tmp();
+  const tracker = createTracker(root);
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "acmeproj" }));
+  write(root, "docs/a.md", fm("# acmeproj overview\n\nBody.", "title: acmeproj overview\nstatus: current\n"));
+  write(root, "docs/b.md", fm("# acmeproj contract\n\nBody.", "title: acmeproj contract\nstatus: current\n"));
+  write(root, "docs/c.md", fm("# Release notes\n\n## Release\n\nBody.", "title: Release notes\nstatus: current\n"));
+  write(root, "docs/d.md", fm("# Other\n\nBody.", "title: Other\nstatus: current\n"));
+  const docs = service(root, tracker);
+
+  const typo = { id: "G-1", title: "Fix a typo", description: "acmeproj changelog", plan: "", acceptance: [] };
+  assert.deepEqual(selectL1Pages(docs, typo), [], "mentioning the project name alone selects nothing");
+  assert.equal(buildL1Context(docs, typo), undefined, "no L1 section is produced when nothing is relevant");
+  const genuine = selectL1Pages(docs, { id: "G-1", title: "Release acmeproj", description: "", plan: "", acceptance: [] });
+  assert.deepEqual(genuine.map((item) => item.page.path), ["c.md"], "a genuine rare term still selects");
+  tracker.db.close();
+});
+
+// ---------------------------------------------------------------- 9. over-clip L1 fixture
 
 function bigPage(title: string, sections: number, metadata: string): string {
   const body: string[] = [`# ${title}`];
