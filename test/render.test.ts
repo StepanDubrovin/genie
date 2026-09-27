@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { callText, preview, resultText, snippet, statusTone } from "../src/extension/render.ts";
+import { callText, preview, renderResult, resultText, snippet, statusTone } from "../src/extension/render.ts";
 
 test("genie_task call rows show the action and its target", () => {
   assert.equal(callText("genie_task", { action: "status", id: "G-2", status: "review" }), "genie_task status G-2 → review");
@@ -58,6 +58,8 @@ test("snippet collapses whitespace and clips long text", () => {
   assert.equal(snippet("  a\n b\tc  "), "a b c");
   assert.equal(snippet("abcdef", 4), "abc…");
   assert.equal(snippet("abc", 4), "abc");
+  assert.equal(snippet("a\u001b[31mb", 20), "a [31mb");
+  assert.ok(!snippet("a\u001b[31mb", 20).includes("\u001b"));
 });
 
 test("resultText joins text blocks and ignores non-text content", () => {
@@ -71,4 +73,29 @@ test("resultText joins text blocks and ignores non-text content", () => {
     }),
     "first\nsecond",
   );
+});
+
+test("result rendering strips control characters and truncates safely", () => {
+  const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as never;
+  const result = { content: [{ type: "text", text: "a\u001b[31mb\u0007c" }] };
+  const component = renderResult(result, { expanded: false, isPartial: false }, theme, { isError: false, expanded: false });
+  assert.deepEqual(component.render(40).map((l) => l.trimEnd()), ["✓ abc"]);
+});
+
+test("all seven genie tools register call and result renderers", async () => {
+  const { default: genie } = await import("../src/extension/index.ts");
+  const tools = new Map<string, { renderCall?: unknown; renderResult?: unknown }>();
+  const pi = {
+    on: () => () => {},
+    registerTool: (def: { name: string; renderCall?: unknown; renderResult?: unknown }) => tools.set(def.name, def),
+    registerCommand: () => {},
+  };
+  genie(pi as never);
+  const expected = ["genie_task", "team_spawn", "team_add_member", "team_send", "team_status", "team_set_status", "team_stop"];
+  assert.deepEqual([...tools.keys()].sort(), [...expected].sort());
+  for (const name of expected) {
+    const def = tools.get(name)!;
+    assert.equal(typeof def.renderCall, "function", `${name} renderCall`);
+    assert.equal(typeof def.renderResult, "function", `${name} renderResult`);
+  }
 });

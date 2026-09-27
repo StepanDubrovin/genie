@@ -5,7 +5,7 @@
 // `renderCallRow` / `renderResult` adapters are thin wrappers over Pi's
 // `Text` and `TruncatedText` components.
 
-import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { keyHint, keyText, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Text, TruncatedText, type Component } from "@earendil-works/pi-tui";
 
 export type Tone = "title" | "accent" | "text" | "muted" | "dim" | "warning" | "error" | "success";
@@ -35,7 +35,12 @@ function rec(value: unknown): Record<string, unknown> {
 }
 
 function str(value: unknown): string {
-  return typeof value === "string" ? value : "";
+  return typeof value === "string" ? sanitize(value) : "";
+}
+
+/** Replace control characters (newlines, tabs, ESC) with spaces so a row cannot distort. */
+function sanitize(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
 function arr(value: unknown): unknown[] {
@@ -44,7 +49,8 @@ function arr(value: unknown): unknown[] {
 
 /** Collapse whitespace and clip to `max` characters with an ellipsis. */
 export function snippet(value: unknown, max = 56): string {
-  const flat = (typeof value === "string" ? value : value == null ? "" : String(value)).replace(/\s+/g, " ").trim();
+  const raw = typeof value === "string" ? value : value == null ? "" : String(value);
+  const flat = sanitize(raw).replace(/\s+/g, " ").trim();
   if (max <= 1) return flat.slice(0, Math.max(0, max));
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
@@ -384,6 +390,8 @@ export function renderCallRow(name: string, args: unknown, theme: Theme): Compon
 export function renderResult(result: ResultLike, options: ResultOptions, theme: Theme, context: ResultContext): Component {
   const raw = resultText(result)
     .replace(/\r/g, "")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
     .replace(/[ \t]+$/gm, "")
     .replace(/\n+$/, "");
   const lines = raw.length ? raw.split("\n") : [];
@@ -392,12 +400,25 @@ export function renderResult(result: ResultLike, options: ResultOptions, theme: 
 
   const { shown, hidden } = preview(lines, options.expanded);
   const out = shown.map((line) => theme.fg(tone, line));
-  if (hidden > 0) out.push(theme.fg("muted", `… ${hidden} more line${hidden === 1 ? "" : "s"}`));
+  if (hidden > 0) out.push(theme.fg("muted", `… ${hidden} more line${hidden === 1 ? "" : "s"} (`) + expandHint() + theme.fg("muted", ")"));
   if (!out.length) {
     const empty = state === "partial" ? "…" : state === "error" ? "failed" : "(no output)";
     out.push(theme.fg(state === "error" ? "error" : "muted", empty));
   }
-  const glyph = state === "error" ? theme.fg("error", "✗") : state === "partial" ? theme.fg("dim", "…") : theme.fg("success", "✓");
-  out[0] = `${glyph} ${out[0]}`;
+  // The partial glyph is redundant when the body already starts with an ellipsis.
+  const suppressGlyph = state === "partial" && (shown[0] ?? "").trimStart().startsWith("…");
+  if (!suppressGlyph) {
+    const glyph = state === "error" ? theme.fg("error", "✗") : state === "partial" ? theme.fg("dim", "…") : theme.fg("success", "✓");
+    out[0] = `${glyph} ${out[0]}`;
+  }
   return new Text(out.join("\n"), 0, 0);
+}
+
+function expandHint(): string {
+  try {
+    // keyText is empty outside an interactive session (e.g. HTML export).
+    return keyText("app.tools.expand") ? keyHint("app.tools.expand", "to expand") : "expand";
+  } catch {
+    return "expand";
+  }
 }
