@@ -1,0 +1,166 @@
+{
+  "spawn": {
+    "mode": "auto",
+    "piCommand": "pi",
+    "extraArgs": []
+  },
+  "orchestrator": {
+    "autoWake": true
+  },
+  "limits": {
+    "maxMembersPerTeam": 6,
+    "maxActiveTeams": 4
+  },
+  "language": {
+    "internal": "English",
+    "user": "Russian"
+  },
+  "notify": {
+    "statuses": [
+      "needs_owner",
+      "done"
+    ]
+  },
+  "gates": {
+    "requireTestReport": false,
+    "requireReviewArtifact": false
+  },
+  "web": {
+    "port": 7420
+  },
+  "worktrees": {
+    "dir": "{mainRoot}/../{repo}.worktrees/{team}",
+    "branch": "genie/{team}"
+  },
+  "roleModels": {
+    "analyst": {
+      "model": "litellm/gpt-6-sol",
+      "thinking": "high"
+    },
+    "executor": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "high"
+    },
+    "reviewer": {
+      "model": "litellm/claude-opus-5-5",
+      "thinking": "high"
+    },
+    "tester": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "medium"
+    },
+    "documenter": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "low"
+    }
+  },
+  "teams": {
+    "standard": {
+      "description": "Analyst → executor → reviewer in a dedicated worktree. Default for code changes in git repositories.",
+      "worktree": true,
+      "members": [
+        {
+          "name": "analyst",
+          "role": "analyst"
+        },
+        {
+          "name": "executor",
+          "role": "executor"
+        },
+        {
+          "name": "reviewer",
+          "role": "reviewer"
+        }
+      ]
+    },
+    "pair": {
+      "description": "Executor + reviewer for small, already well-specified tasks.",
+      "worktree": true,
+      "members": [
+        {
+          "name": "executor",
+          "role": "executor"
+        },
+        {
+          "name": "reviewer",
+          "role": "reviewer"
+        }
+      ]
+    },
+    "abap": {
+      "description": "ABAP work: the SAP system is read-only through MCP, the owner transfers code and creates transports. No git worktree unless the repo uses abapGit.",
+      "worktree": false,
+      "members": [
+        {
+          "name": "analyst",
+          "role": "analyst",
+          "instructions": "Use the read-only SAP MCP servers to study the objects involved. List every ABAP object (type + name) the change touches. Parallel teams must not touch the same objects."
+        },
+        {
+          "name": "executor",
+          "role": "executor",
+          "instructions": "The SAP system is read-only for you. Deliver the complete source of every changed or new ABAP object as `code` artifacts (one per object, named like zcl_foo.clas.abap), plus a short transfer guide (order of objects, activation notes). With abapGit repos, commit the files instead."
+        },
+        {
+          "name": "reviewer",
+          "role": "reviewer",
+          "instructions": "Review the ABAP code artifacts against clean ABAP guidelines and the current system state (read via MCP): syntax plausibility, naming, performance (SELECT in loops, buffering), authorisation checks, and that only agreed objects change."
+        }
+      ]
+    },
+    "spike": {
+      "description": "Research without code changes on a ready task: analyst investigates, reviewer challenges the conclusions.",
+      "worktree": false,
+      "members": [
+        {
+          "name": "analyst",
+          "role": "analyst"
+        },
+        {
+          "name": "reviewer",
+          "role": "reviewer"
+        }
+      ]
+    },
+    "research": {
+      "description": "Refinement team for an unresearched task: analysts investigate and propose scope + acceptance criteria; a reviewer challenges them. Allowed before the task is ready.",
+      "worktree": false,
+      "members": [
+        {
+          "name": "analyst",
+          "role": "analyst"
+        },
+        {
+          "name": "reviewer",
+          "role": "reviewer"
+        }
+      ]
+    },
+    "full": {
+      "description": "Larger code change: analyst, executor, tester and reviewer, documenter joins after approval.",
+      "worktree": true,
+      "members": [
+        {
+          "name": "analyst",
+          "role": "analyst"
+        },
+        {
+          "name": "executor",
+          "role": "executor"
+        },
+        {
+          "name": "tester",
+          "role": "tester"
+        },
+        {
+          "name": "reviewer",
+          "role": "reviewer"
+        },
+        {
+          "name": "documenter",
+          "role": "documenter"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "genie",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orchestrator + focus teams for pi: local task tracker, peer-to-peer team messaging, per-team worktrees, mixed-model teams.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "bin": {
+    "genie": "./bin/genie"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "migrate": "node migration/migrate-opencode.ts",
+    "build:web": "vite build --config web/vite.config.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "typecheck": "tsc -p . && tsc -p web"
+  },
+  "engines": {
+    "node": ">=23.6"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@earendil-works/pi-ai": "^0.87.1",
+    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "@tanstack/react-query": "^5.104.0",
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router": "^8.4.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  }
+}

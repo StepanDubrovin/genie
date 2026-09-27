@@ -1,0 +1,67 @@
+# genie
+
+Набор расширений для [pi](https://pi.dev): **оркестратор + фокус-команды** агентов с локальным трекером задач (SQLite), прямым общением агентов, отдельным git worktree на команду, моделями разных провайдеров в одной команде и веб-интерфейсом в духе Linear.
+
+- `docs/architecture.md` — как устроено: статусы, права ролей, хранилище, общение, веб
+- `docs/decisions.md` — принятые решения (ответы на интервью)
+- `docs/options.md` — какие готовые пакеты есть и почему ядро своё
+- `docs/migration.md` — перенос конфигурации opencode (MCP, LiteLLM)
+
+## Как это работает
+
+1. Задача приходит в чат оркестратору (ваша сессия pi в проекте с `.genie/`) или во **входящие** из веба / CLI — оркестратор получает уведомление.
+2. Оркестратор уточняет задачу (при необходимости запускает команду аналитиков), формулирует критерии приёмки, договаривается о способе интеграции, режет на атомарные подзадачи и переводит в `ready`.
+3. `team_spawn` собирает команду под задачу (analyst / executor / reviewer / tester / documenter, у каждого своя модель), создаёт worktree `genie/<задача>` и запускает участников во вкладке herdr или headless. В чате оркестратора появляется живая карточка команды со спиннером и прогрессом.
+4. Участники общаются напрямую, ведут задачу (статусы, план, заметки, комментарии, артефакты). Когда нужно ваше решение — задача уходит в «Нужно решение», приходит уведомление; ответ из веба или чата будит оркестратора.
+5. Ревьюер выносит вердикт, оркестратор проверяет доказательства и закрывает задачу (или спрашивает вас, если сомневается).
+
+## Установка
+
+```bash
+cd ~/projects/personal/genie
+npm install && npm run build:web       # сборка веб-интерфейса (нужна один раз и после обновлений)
+pi install ~/projects/personal/genie   # расширение + skill
+ln -s ~/projects/personal/genie/bin/genie ~/.local/bin/genie
+```
+
+Нужен Node ≥ 23.6. Во время работы пакет не имеет runtime-зависимостей: SQLite берётся встроенный (`bun:sqlite` внутри pi, `node:sqlite` в CLI и веб-сервере).
+
+## Использование
+
+```bash
+cd ~/projects/my-repo
+genie init          # или /genie init в pi — .genie/genie.db в главном worktree, исключён из git
+herdr               # команды откроются во вкладках herdr
+pi                  # эта сессия — оркестратор
+```
+
+В pi:
+
+| Команда | Что делает |
+|---|---|
+| `/genie` | доска задач и команды |
+| `/genie settings` | модели и thinking по ролям, лимиты, язык, уведомления, гейты, режим запуска |
+| `/genie web [--tailscale]` | поднять веб-интерфейс (с `--tailscale` — ещё и в tailnet) |
+| `/genie team G-7`, `/genie mail G-7` | состав и переписка команды |
+| `/genie off` / `on` | выключить/включить режим оркестратора в этой сессии |
+
+Веб: `genie web [--port 7420] [--tailscale] [--open]` — список и kanban-доска (перетаскивание меняет статус), карточка задачи с блоком «Нужно ваше решение», чат команды, входящие, палитра `⌘K`, горячие клавиши `C` `/` `J` `K` `B` `G I`. Адаптивен для телефона.
+
+CLI: `genie board`, `genie new "…"` (во входящие), `genie show G-7`, `genie artifact-show G-7 2`, `genie send G-7 reviewer "…"`, `genie --help`.
+
+## Настройка
+
+Порядок слияния: `config/default.json` → `~/.pi/agent/genie/config.json` → `<.genie>/config.json`. Проще всего — `/genie settings`.
+
+Роли — `agents/<role>.md` (переопределяются в `~/.pi/agent/genie/agents/` или `<.genie>/agents/`); во frontmatter `excludeTools` (read-only роли) и `mcp` (разрешённые MCP-серверы).
+
+Сейчас для проб все роли назначены на `litellm/deepseek-v4-flash-vision-exp` (`~/.pi/agent/genie/config.json`).
+
+## Разработка
+
+```bash
+npm test                  # тесты трекера и шины
+npm run typecheck         # сервер/расширение + веб
+npm run dev:web           # Vite с проксированием /api на `genie web` (порт 7420)
+node scripts/e2e.ts --template standard --model litellm/deepseek-v4-flash-vision-exp --analyst-model litellm/deepseek-v4-flash-vision-exp
+```

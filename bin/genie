@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# genie CLI launcher: runs the TypeScript source directly (Node >= 23.6 strips types).
+set -euo pipefail
+root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec node --disable-warning=ExperimentalWarning --no-warnings=ExperimentalWarning "$root/src/cli/genie.ts" "$@"

@@ -1,0 +1,4 @@
+node_modules/
+.genie/
+.design/
+web/dist/
