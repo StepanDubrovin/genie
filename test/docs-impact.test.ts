@@ -129,6 +129,28 @@ test("related candidates work without a worktree and deprecated pages survive on
   assert.ok(!result.candidates.some((c) => c.path === "old.md"), "a deprecated page with no related match is excluded");
 });
 
+test("an explicitly related deprecated page survives the changed-path reason cap", () => {
+  const { root, wt } = tmpPair();
+  initGit(root);
+  const files = Array.from({ length: 10 }, (_, i) => `src/f${i}.ts`);
+  for (const file of files) write(root, file, "old\n");
+  write(root, "docs/dep-related.md", fm("# Old related\n\nOld.\n", "title: Old related\ntype: note\nstatus: deprecated\npaths: [src/**]\nrelated: [G-1]\n"));
+  write(root, "docs/dep-other.md", fm("# Old other\n\nOld.\n", "title: Old other\ntype: note\nstatus: deprecated\npaths: [src/**]\nrelated: [G-99]\n"));
+  commit(root, "base");
+  const base = git(root, "rev-parse", "HEAD");
+  git(root, "worktree", "add", wt, "-b", "task", base);
+  for (const file of files) write(wt, file, "new\n");
+  commit(wt, "change all");
+  const tracker = Tracker.init(path.join(root, ".genie"));
+
+  const result = computeDocsImpact(service(root, tracker), { id: "G-1", status: "review", relatedIds: ["G-1"], worktree: { path: wt, base } });
+  const related = result.candidates.find((c) => c.path === "dep-related.md");
+  assert.ok(related, "a deprecated page with an explicit related id is not dropped by the changed-path cap");
+  assert.ok(related.reasons.some((r) => r.kind === "related" && r.id === "G-1"), "the explicit related reason is kept past the cap");
+  assert.equal(related.reasons.filter((r) => r.kind === "changed-path").length, 8, "changed-path reasons stay capped");
+  assert.ok(!result.candidates.some((c) => c.path === "dep-other.md"), "a deprecated page with no related match stays excluded");
+});
+
 test("candidates are ordered changed-path before related-only, then by matched paths", () => {
   const { root, wt } = tmpPair();
   initGit(root);
@@ -187,6 +209,26 @@ test("impact degrades gracefully for missing worktree, non-git, unreachable base
   const broken = computeDocsImpact(service(brokenRoot, brokenTracker), { id: "G-1", status: "review" });
   assert.deepEqual(broken.candidates, []);
   assert.ok(broken.notes.some((n) => n.startsWith("docs index unavailable:")));
+});
+
+test("a worktree with no recorded base still reports working-tree changes with a note", () => {
+  const { root, wt } = tmpPair();
+  initGit(root);
+  write(root, "src/y.ts", "y\n");
+  write(root, "docs/page.md", fm("# P\n\nP.\n", "title: P\ntype: guide\npaths: [src/**]\nverified: 2020-01-01\n"));
+  commit(root, "base");
+  const base = git(root, "rev-parse", "HEAD");
+  git(root, "worktree", "add", wt, "-b", "task", base);
+  // No `base` passed: the committed diff is unavailable, so a dirty file is the only evidence.
+  write(wt, "src/y.ts", "y2\n");
+  const tracker = Tracker.init(path.join(root, ".genie"));
+
+  const result = computeDocsImpact(service(root, tracker), { id: "G-1", status: "review", worktree: { path: wt, branch: "task" } });
+  assert.equal(result.changedPathsAvailable, true, "the worktree is still inspectable without a base");
+  assert.deepEqual(result.notes, ["no base commit recorded for the team"]);
+  assert.ok(result.changedPaths.includes("src/y.ts"), "working-tree changes are still reported");
+  const candidate = result.candidates.find((c) => c.path === "page.md");
+  assert.ok(candidate?.reasons.some((r) => r.kind === "changed-path" && r.path === "src/y.ts"));
 });
 
 test("a status transition to done succeeds without docs and the CLI impact surfaces exit 0", () => {

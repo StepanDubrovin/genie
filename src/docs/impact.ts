@@ -58,7 +58,10 @@ export interface DocsImpactResult {
   candidates: DocsImpactCandidate[];
 }
 
-/** Cap reasons kept per page so a broad glob cannot explode the CLI/UI output. */
+/**
+ * Cap changed-path reasons kept per page so a broad glob cannot explode the
+ * CLI/UI output. Explicit `related` reasons are exempt (see `toCandidate`).
+ */
 const MAX_REASONS_PER_PAGE = 8;
 
 interface ChangedPaths {
@@ -169,9 +172,11 @@ function toCandidate(input: DocsImpactInput, page: DocPage, changedPaths: string
     }
   }
   const related = page.related.filter((id) => relatedIds.has(id.trim().toUpperCase()));
-  for (const id of related) {
-    if (reasons.length < MAX_REASONS_PER_PAGE) reasons.push({ kind: "related", id });
-  }
+  // An explicit `related` id is a deliberate link, not a broad-glob side effect,
+  // so it is exempt from MAX_REASONS_PER_PAGE (G-39 F4): a page whose only
+  // signal is `related` — an explicitly related deprecated page, for example —
+  // must never lose that reason (and with it its candidacy) to the cap.
+  for (const id of related) reasons.push({ kind: "related", id });
   const summary = reasons
     .map((reason) => (reason.kind === "changed-path" ? `changes ${reason.path} (page paths ${reason.pattern})` : `related to ${reason.id}`))
     .join("; ");
