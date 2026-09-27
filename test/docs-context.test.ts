@@ -32,7 +32,10 @@ import { Db } from "../src/tracker/db.ts";
 import { Tracker } from "../src/tracker/store.ts";
 
 function tmp(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "genie-docs-context-test-"));
+  // Neutral directory name: the project-name damping rule reads the checkout
+  // directory, so a prefix containing "genie"/"docs" would damp those tokens by
+  // accident and make tests location-dependent.
+  return fs.mkdtempSync(path.join(os.tmpdir(), "l1-fixture-"));
 }
 
 function git(root: string, ...args: string[]): string {
@@ -221,12 +224,27 @@ test("real-repo L0 measurement stays under the target and reports units/chars/pa
 });
 
 // D4 before/after baseline is G-13's artifact #4 §7. These are the pilot's own
-// exact task texts (`/tmp/g13-l1-probe.ts`), pinned here so the term-class fix
-// cannot silently regress.
-test("real-repo L1 D4: heading task selects, pilot G-93 keeps one lowest-class match, project-name-only task selects nothing", () => {
-  const db = new Db(":memory:");
-  const docs = new DocsService({ db, cwd: REPO_ROOT });
-  const pilot = (id: string, title: string, description: string): L1Task => ({ id, title, description, plan: "", acceptance: [] });
+// exact task texts (`/tmp/g13-l1-probe.ts`). The corpus is a controlled copy in a
+// temp project so the assertions depend on the pages, not on where this repo
+// happens to live (the project-name damping rule reads the checkout name).
+const PILOT_PAGES = ["architecture.md", "decisions.md", "options.md", "reference/genie-docs-system.md"];
+const pilot = (id: string, title: string, description: string): L1Task => ({ id, title, description, plan: "", acceptance: [] });
+/** Copy the real pilot corpus + package.json into a temp project with the given directory prefix. */
+function pilotCorpus(prefix: string): { root: string; docs: DocsService; tracker: Tracker } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  for (const relative of PILOT_PAGES) {
+    const target = path.join(root, "docs", relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(REPO_ROOT, "docs", relative), target);
+  }
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { name?: string };
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: pkg.name ?? "genie" }));
+  const tracker = createTracker(root);
+  return { root, docs: service(root, tracker), tracker };
+}
+
+test("real-repo L1 D4 (controlled copy): heading task selects, pilot G-93 keeps one lowest-class match, project-name-only task selects nothing", () => {
+  const { docs, tracker } = pilotCorpus("pilot-corpus-");
 
   const russian = selectL1Pages(docs, pilot("G-95", "Надёжность доставки писем", "Разобраться с доставкой почты в командах."));
   assert.deepEqual(russian.map((item) => item.page.path), ["architecture.md"], "a Russian task whose words live in a heading now selects that page");
@@ -250,7 +268,34 @@ test("real-repo L1 D4: heading task selects, pilot G-93 keeps one lowest-class m
   const trackerTask = selectL1Pages(docs, pilot("G-96", "Tracker: add a new task status", "Statuses live in `src/tracker/model.ts` and are persisted in `src/tracker/store.ts`."));
   assert.deepEqual(trackerTask.map((item) => item.page.path), ["architecture.md", "decisions.md"], "a path task selects exactly its path pages; the function word \"and\" must not drag in the contract page");
   console.log(`[G-23 measurement] G-95 -> ${russian.map((item) => `${item.page.path} (${item.reasons.join(", ")})`).join("; ")}; G-93 -> ${typo.map((item) => `${item.page.path} (${item.reasons.join(", ")})`).join("; ") || "<none>"}; G-94 -> ${architecture.map((item) => item.page.path).join("; ")}; G-70 -> ${projectNameOnly.length ? "unexpected pages" : "<none>"}`);
-  db.close();
+  tracker.db.close();
+});
+
+test("project-name damping uses the main checkout name, so a worktree named *docs* does not damp the corpus term docs", () => {
+  // Deliberately hostile directory name: `docs` is a token of the checkout name
+  // here. The controlled copy has no git, so the current project root is the
+  // identity and `docs` must be damped -> the G-93 contract match disappears.
+  const { docs, tracker } = pilotCorpus("feature-docs-system-");
+  const typo = selectL1Pages(docs, pilot("G-93", "Поправить опечатки в CHANGELOG", "Никакого отношения к коду/genie docs."));
+  assert.deepEqual(typo, [], "a checkout called feature-docs-system damps `docs` (pinned on purpose)");
+  const russian = selectL1Pages(docs, pilot("G-95", "Надёжность доставки писем", "Разобраться с доставкой почты в командах."));
+  assert.deepEqual(russian.map((item) => item.page.path), ["architecture.md"], "the corpus still selects on its real heading terms");
+  tracker.db.close();
+});
+
+test("project identity comes from the main checkout, not a docs-named linked worktree", () => {
+  const main = tmp();
+  initGit(main);
+  fs.writeFileSync(path.join(main, "package.json"), JSON.stringify({ name: "acmeproj" }));
+  write(main, "docs/contract.md", fm("# Contract\n\nBody.", "title: Contract\ntags: [docs]\nstatus: current\n"));
+  write(main, "docs/other.md", fm("# Other\n\nBody.", "title: Other\nstatus: current\n"));
+  commit(main, "initial");
+  const worktree = `${main}-docs-worktree`;
+  git(main, "worktree", "add", "-b", "wt-docs", worktree);
+  const tracker = createTracker(worktree);
+  const selected = selectL1Pages(service(worktree, tracker), { id: "G-1", title: "Docs work", description: "", plan: "", acceptance: [] });
+  assert.deepEqual(selected.map((item) => item.page.path), ["contract.md"], "`docs` stays a real term: the docs-named worktree is not the project identity, the main checkout is");
+  tracker.db.close();
 });
 
 // ---------------------------------------------------------------- 6. L1 rank determinism
