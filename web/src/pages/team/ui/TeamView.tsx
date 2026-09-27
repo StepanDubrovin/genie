@@ -17,8 +17,33 @@ interface Entry {
   to: string[];
   text: string;
   urgent: boolean;
+  level: Mail["level"];
+  intent?: Mail["intent"];
   delivered: boolean;
   title?: string;
+}
+
+const LEVEL_LABEL: Record<Mail["level"], string> = { low: "низкий", normal: "обычный", high: "высокий" };
+const INTENT_LABEL: Record<NonNullable<Mail["intent"]>, string> = { question: "вопрос", blocker: "блокер", verdict: "вердикт", done: "готово", fyi: "фай" };
+
+/** Priority badge + intent chip shown in the message meta. */
+function MailBadges({ level, intent }: { level: Mail["level"]; intent?: Mail["intent"] }) {
+  return (
+    <>
+      {level === "high" ? (
+        <span className="urgent-tag">высокий</span>
+      ) : (
+        <span className="pill" style={{ fontSize: 10.5, lineHeight: "16px", padding: "0 6px" }}>
+          {LEVEL_LABEL[level]}
+        </span>
+      )}
+      {intent ? (
+        <span className="pill" style={{ fontSize: 10.5, lineHeight: "16px", padding: "0 6px", color: "var(--muted)" }}>
+          {INTENT_LABEL[intent]}
+        </span>
+      ) : null}
+    </>
+  );
 }
 
 function toEntries(mail: Mail[]): Entry[] {
@@ -41,6 +66,8 @@ function toEntries(mail: Mail[]): Entry[] {
       to: [m.to],
       text: m.text,
       urgent: !!m.urgent,
+      level: m.level,
+      intent: m.intent,
       delivered: !!m.deliveredAt,
       title: m.kind === "kickoff" ? "Команда запущена" : undefined,
     });
@@ -148,7 +175,7 @@ export function TeamView() {
               lastDay = day;
               const prev = entries[i - 1];
               const next = entries[i + 1];
-              const same = (a?: Entry) => !!a && a.kind === m.kind && a.from === m.from && a.to.join() === m.to.join() && dayLabel(a.at) === day;
+              const same = (a?: Entry) => !!a && a.kind === m.kind && a.from === m.from && a.to.join() === m.to.join() && a.level === m.level && a.intent === m.intent && dayLabel(a.at) === day;
               const cont = same(prev) && !showDay;
               const tailless = same(next);
               return (
@@ -174,6 +201,7 @@ export function TeamView() {
                             <span className="m">
                               → {recipients(m.to, team)} · {clock(m.at)}
                             </span>
+                            <MailBadges level={m.level} intent={m.intent} />
                           </span>
                         )}
                         <div className="bubble">
@@ -193,6 +221,7 @@ export function TeamView() {
                               → {recipients(m.to, team)} · {clock(m.at)}
                               {m.urgent ? " · срочно" : ""}
                             </span>
+                            <MailBadges level={m.level} intent={m.intent} />
                           </span>
                         )}
                         <div className="bubble">

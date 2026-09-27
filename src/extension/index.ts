@@ -16,7 +16,8 @@ import { DOC_STATUSES, DOC_TYPES } from "../docs/parser.ts";
 import { DocsService } from "../docs/service.ts";
 import { notifyOn } from "../notify.ts";
 import { artifactReadContent } from "../web/artifacts.ts";
-import { BROADCAST, HEARTBEAT_STALE_MS, type Mail, type Member, ORCHESTRATOR, START_GRACE_MS, type Team, TeamBus } from "../team/bus.ts";
+import { BROADCAST, HEARTBEAT_STALE_MS, type Mail, MAIL_INTENTS, MAIL_LEVELS, type Member, ORCHESTRATOR, START_GRACE_MS, type Team, TeamBus } from "../team/bus.ts";
+import { renderDigest } from "../team/digest.ts";
 import { type GenieConfig, languagePolicy, loadConfig, loadRole, type MemberSpec, PACKAGE_ROOT, resolveMember } from "../team/config.ts";
 import { assignNames, displayName, memberLabel } from "../team/names.ts";
 import { addMembers, deleteTeam, kickoff, launchMembers, type Named, reapClosedTeams, removeMember, stopTeam } from "../team/ops.ts";
@@ -124,21 +125,47 @@ export default function genie(pi: ExtensionAPI) {
   function formatMail(m: Mail): string {
     if (m.kind === "kickoff") return `[genie kickoff · team ${m.team}]\n\n${m.text}`;
     if (m.kind === "owner") return `[genie · owner activity${m.task ? ` · ${m.task}` : ""}]\n\n${m.text}`;
-    return `[genie mail · team ${m.team} · from ${m.from} (${m.fromRole})${m.urgent ? " · URGENT" : ""}]\n\n${m.text}`;
+    const intent = m.intent ? ` · ${m.intent}` : "";
+    return `[genie mail · team ${m.team} · from ${m.from} (${m.fromRole}) · ${m.level}${intent}]\n\n${m.text}`;
   }
 
-  function deliver(mails: Mail[]): void {
+  /** Orchestrator batch: specials (kickoff/owner/system) verbatim first, then the digest. */
+  function renderOrchestratorBatch(mails: Mail[]): string {
+    const specials = mails.filter((m) => m.kind !== "message");
+    const messages = mails.filter((m) => m.kind === "message");
+    const parts: string[] = [];
+    if (specials.length) parts.push(specials.map(formatMail).join("\n\n---\n\n"));
+    if (messages.length) parts.push(renderDigest(messages));
+    return parts.join("\n\n---\n\n");
+  }
+
+  function deliver(mails: Mail[], opts: { steer?: boolean } = {}): void {
     if (!mails.length) return;
     const hint =
       mode.kind === "orchestrator"
         ? "(Act only if a decision, answer, unblock or acceptance is needed; purely informational updates need no reply — just end your turn.)"
         : "(Reply with team_send only if a reply is needed; do not send acknowledgements.)";
-    const content = `${mails.map(formatMail).join("\n\n---\n\n")}\n\n${hint}`;
+    const body = mode.kind === "orchestrator" && !opts.steer ? renderOrchestratorBatch(mails) : mails.map(formatMail).join("\n\n---\n\n");
+    const content = `${body}\n\n${hint}`;
     const idle = safeIdle();
-    const urgent = mails.some((m) => m.urgent);
     // sendUserMessage goes through the regular prompt path, so before_agent_start
     // injects the role section; custom messages with triggerTurn would bypass it.
-    pi.sendUserMessage(content, idle ? undefined : { deliverAs: urgent ? "steer" : "followUp" });
+    if (idle) pi.sendUserMessage(content);
+    // Re-checked here so a slice claimed while idle is never dropped if the session
+    // became busy in between: it queues as a follow-up instead of being lost.
+    else pi.sendUserMessage(content, { deliverAs: opts.steer ? "steer" : "followUp" });
+  }
+
+  /**
+   * Claim mail at delivery time: while idle take the whole slice as ONE batch;
+   * while busy take nothing except urgent mail, which steers on its own.
+   */
+  function deliverFor(team: string | undefined, member: string): void {
+    if (!bus) return;
+    if (runMode === "print" || runMode === "json") return;
+    const { batch, steers } = bus.takeMail(team, member, safeIdle());
+    deliver(batch);
+    for (const m of steers) deliver([m], { steer: true });
   }
 
   /** A captured ctx goes stale after reload/session replacement; never let that break the timers. */
@@ -172,8 +199,8 @@ export default function genie(pi: ExtensionAPI) {
         lastSupervise = Date.now();
         supervise();
       }
-      if (mode.kind === "member") deliver(bus.receive(mode.team, mode.member));
-      else if (mode.kind === "orchestrator" && cfg().orchestrator?.autoWake !== false) deliver(bus.receive(undefined, ORCHESTRATOR));
+      if (mode.kind === "member") deliverFor(mode.team, mode.member);
+      else if (mode.kind === "orchestrator" && cfg().orchestrator?.autoWake !== false) deliverFor(undefined, ORCHESTRATOR);
       refreshStatus();
     } catch (err) {
       safeNotify(`genie: mail poll failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
@@ -535,6 +562,14 @@ export default function genie(pi: ExtensionAPI) {
       const m = mode;
       const current = bus.get(m.team).members.find((x) => x.name === m.member);
       if (current?.activity !== "error") bus.setActivity(m.team, m.member, "idle");
+    }
+    // The step just ended: deliver the freshly unblocked mail now instead of up
+    // to a tick later (the poller remains the backstop).
+    try {
+      if (mode.kind === "member") deliverFor(mode.team, mode.member);
+      else if (mode.kind === "orchestrator" && cfg().orchestrator?.autoWake !== false) deliverFor(undefined, ORCHESTRATOR);
+    } catch (err) {
+      safeNotify(`genie: mail delivery failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
     }
     refreshStatus();
   });
@@ -991,12 +1026,14 @@ export default function genie(pi: ExtensionAPI) {
     name: "team_send",
     label: "Team message",
     description:
-      'Send a message to a team member, to "orchestrator", or to "all" (broadcast). Delivery is push-based: the recipient is woken up (or gets it after its current step). Keep messages short and point to the task/artifacts for details.',
+      'Send a message to a team member, to "orchestrator", or to "all" (broadcast). The level decides the delivery mode: low waits quietly until the recipient is free, normal (default) is delivered after its current step, high (or urgent: true) steers and interrupts it. intent explains what the mail is for and shapes the orchestrator digest. Keep messages short and point to the task/artifacts for details.',
     promptSnippet: "Message a teammate or the orchestrator directly",
     parameters: Type.Object({
       to: Type.String({ description: 'Member name, "orchestrator" or "all"' }),
       text: Type.String(),
-      urgent: Type.Optional(Type.Boolean({ description: "Interrupt the recipient's current step" })),
+      level: Type.Optional(StringEnum(MAIL_LEVELS, { description: "low = quiet until the recipient is free, normal = after the current step (default), high = interrupt now" })),
+      intent: Type.Optional(StringEnum(MAIL_INTENTS, { description: "question | blocker | verdict | done | fyi — shapes the orchestrator's digest" })),
+      urgent: Type.Optional(Type.Boolean({ description: "Alias for level: high (backwards compatible)" })),
       team: Type.Optional(Type.String({ description: "Team id (orchestrator only; defaults to the only active team)" })),
     }),
     renderCall: (args, theme) => renderCallRow("team_send", args, theme),
@@ -1013,7 +1050,7 @@ export default function genie(pi: ExtensionAPI) {
         else throw new GenieError(`specify team; active teams: ${active.map((t) => t.id).join(", ") || "none"}`);
       }
       const me = actor();
-      const sent = bus.send({ team: teamId, from: me.name, fromRole: me.role, to: p.to, text: p.text, urgent: p.urgent });
+      const sent = bus.send({ team: teamId, from: me.name, fromRole: me.role, to: p.to, text: p.text, level: p.level, intent: p.intent, urgent: p.urgent });
       return text(`delivered to ${sent.map((m) => m.to).join(", ")}`, { team: teamId });
     },
   });

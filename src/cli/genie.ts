@@ -9,7 +9,7 @@ import { loadConfig } from "../team/config.ts";
 import { oneLine, renderTask, statusIcon } from "../tracker/render.ts";
 import { GenieError, Tracker } from "../tracker/store.ts";
 import { defaultGenieDir } from "../tracker/fsutil.ts";
-import { TeamBus } from "../team/bus.ts";
+import { MAIL_INTENTS, MAIL_LEVELS, TeamBus, type MailIntent, type MailLevel } from "../team/bus.ts";
 import { memberLabel } from "../team/names.ts";
 import { addMembers, deleteTeam, removeMember, stopTeam } from "../team/ops.ts";
 import { startWebServer } from "../web/server.ts";
@@ -64,7 +64,7 @@ Teams
   genie team <TEAM> delete [--rm-worktree]  stop and delete the team with its chat history
   genie team <TEAM> add <role> [name] [--model provider/id] [-m instructions]
   genie team <TEAM> remove <member>         stop a member and drop it from the team
-  genie send <TEAM> <to|all> <text> [--urgent]
+  genie send <TEAM> <to|all> <text> [--urgent] [--level low|normal|high] [--intent question|blocker|verdict|done|fyi]
   genie mail <TEAM> [-n 30]                 message history
 
 Common flags: --json (machine output), -h/--help.
@@ -180,6 +180,8 @@ async function main(argv: string[]): Promise<void> {
       model: { type: "string" },
       "rm-worktree": { type: "boolean" },
       urgent: { type: "boolean" },
+      level: { type: "string" },
+      intent: { type: "string" },
       prefix: { type: "string" },
       title: { type: "string" },
       description: { type: "string", short: "d" },
@@ -518,15 +520,20 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "send": {
-      need(3, "send <TEAM> <to|all> <text>");
-      const sent = bus.send({ team: args[0], from: me.name, fromRole: me.role, to: args[1], text: args.slice(2).join(" "), urgent: values.urgent });
+      need(3, "send <TEAM> <to|all> <text> [--level low|normal|high] [--intent question|blocker|verdict|done|fyi] [--urgent]");
+      // An explicit --level wins; otherwise --urgent means high, otherwise normal (bus default).
+      const level = values.level === undefined ? undefined : (values.level as MailLevel);
+      if (level !== undefined && !MAIL_LEVELS.includes(level)) throw new GenieError(`invalid --level ${values.level}; expected ${MAIL_LEVELS.join("|")}`);
+      const intent = values.intent === undefined ? undefined : (values.intent as MailIntent);
+      if (intent !== undefined && !MAIL_INTENTS.includes(intent)) throw new GenieError(`invalid --intent ${values.intent}; expected ${MAIL_INTENTS.join("|")}`);
+      const sent = bus.send({ team: args[0], from: me.name, fromRole: me.role, to: args[1], text: args.slice(2).join(" "), level, intent, urgent: values.urgent });
       out(json, sent, () => `sent to ${sent.map((m) => m.to).join(", ")}`);
       return;
     }
     case "mail": {
       need(1, "mail <TEAM>");
       const mails = bus.history(args[0], Number(values.n ?? 30));
-      out(json, mails, () => mails.map((m) => `${m.at.slice(11, 19)} ${m.from} → ${m.to}${m.urgent ? " (urgent)" : ""}: ${m.text}`).join("\n\n") || "no mail");
+      out(json, mails, () => mails.map((m) => `${m.at.slice(11, 19)} ${m.from} → ${m.to} [${m.level}${m.intent ? `/${m.intent}` : ""}]: ${m.text}`).join("\n\n") || "no mail");
       return;
     }
     default:
