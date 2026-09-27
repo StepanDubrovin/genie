@@ -22,6 +22,7 @@ import { type Actor, ARTIFACT_KINDS, CLOSED, COMMENT_KINDS, MEMBER_ROLES, type M
 import { oneLine, renderTask } from "../tracker/render.ts";
 import { GenieError, Tracker } from "../tracker/store.ts";
 import { isAnimating, LiveLines, renderCard, renderWidgetLines, snapshot, type TeamSnapshot } from "./card.ts";
+import { renderCallRow, renderResult, type ResultContext, type ResultLike, type ResultOptions } from "./render.ts";
 import { settingsMenu } from "./settings.ts";
 
 type Mode = { kind: "off" } | { kind: "orchestrator" } | { kind: "member"; role: MemberRole; team: string; member: string; task: string };
@@ -634,6 +635,8 @@ export default function genie(pi: ExtensionAPI) {
       includeClosed: Type.Optional(Type.Boolean({ description: "Include done/cancelled tasks (list)" })),
       statuses: Type.Optional(Type.Array(StringEnum(STATUSES), { description: "Filter by status (list)" })),
     }),
+    renderCall: (args, theme) => renderCallRow("genie_task", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("genie_task", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
       const { tracker } = need();
@@ -776,14 +779,25 @@ export default function genie(pi: ExtensionAPI) {
     await launchMembers(tracker, bus, team, specs, launchMode === "herdr" ? "herdr" : "headless", { anchorPane, resume, cfg: cfg() });
   }
 
-  function teamCard(details: unknown, theme: Theme, invalidate: () => void, fallback: string) {
+  /** Live team card for a result that carries a team id; undefined falls back to plain text. */
+  function teamCard(details: unknown, theme: Theme, invalidate: () => void) {
     const teamId = (details as { team?: string } | undefined)?.team;
-    if (!teamId) return new LiveLines((w) => fallback.split("\n").map((l) => l.slice(0, w)));
+    if (!teamId) return undefined;
+    if (!cachedSnapshot(teamId)) return undefined;
     if (isAnimating(cachedSnapshot(teamId))) cardInvalidators.set(teamId, invalidate);
     return new LiveLines((width) => renderCard(cachedSnapshot(teamId), theme, frame, width));
   }
 
-  const resultText = (r: { content: { type: string; text?: string }[] }) => r.content.map((c) => c.text ?? "").join("\n");
+  type ToolResult = ResultLike & { details?: unknown };
+
+  /** Shared result renderer: spawn/add-member keep the live card, everything else shows a compact summary. */
+  function renderToolResult(toolName: string, result: ToolResult, options: ResultOptions, theme: Theme, context: ResultContext & { invalidate: () => void }) {
+    if (toolName === "team_spawn" || toolName === "team_add_member") {
+      const card = teamCard(result.details, theme, context.invalidate);
+      if (card) return card;
+    }
+    return renderResult(result, options, theme, context);
+  }
 
   pi.registerTool({
     name: "team_spawn",
@@ -800,7 +814,8 @@ export default function genie(pi: ExtensionAPI) {
       kickoff: Type.Optional(Type.String({ description: "Extra context for the whole team (constraints, priorities)" })),
       force: Type.Optional(Type.Boolean({ description: "Spawn even if the task status does not fit the roster" })),
     }),
-    renderResult: (result, _options, theme, context) => teamCard(result.details, theme, context.invalidate, resultText(result)),
+    renderCall: (args, theme) => renderCallRow("team_spawn", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("team_spawn", result, options, theme, context),
     async execute(_id, p, _signal, onUpdate, ctx) {
       lastCtx = ctx;
       if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can spawn teams");
@@ -888,7 +903,8 @@ export default function genie(pi: ExtensionAPI) {
       members: Type.Array(memberSchema),
       kickoff: Type.Optional(Type.String({ description: "Why they join and what to do" })),
     }),
-    renderResult: (result, _options, theme, context) => teamCard(result.details, theme, context.invalidate, resultText(result)),
+    renderCall: (args, theme) => renderCallRow("team_add_member", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("team_add_member", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
       if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can add members");
@@ -933,6 +949,8 @@ export default function genie(pi: ExtensionAPI) {
       urgent: Type.Optional(Type.Boolean({ description: "Interrupt the recipient's current step" })),
       team: Type.Optional(Type.String({ description: "Team id (orchestrator only; defaults to the only active team)" })),
     }),
+    renderCall: (args, theme) => renderCallRow("team_send", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("team_send", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
       const { bus } = need();
@@ -977,6 +995,8 @@ export default function genie(pi: ExtensionAPI) {
     label: "Team status",
     description: "Show team rosters, member statuses and activity, unread mail and recent team events. Members see their own team.",
     parameters: Type.Object({ team: Type.Optional(Type.String({ description: "Team id for a detailed view with recent events" })) }),
+    renderCall: (args, theme) => renderCallRow("team_status", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("team_status", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
       const { bus } = need();
@@ -992,6 +1012,8 @@ export default function genie(pi: ExtensionAPI) {
     label: "Set my status",
     description: "Publish a one-line status visible to the whole team and the orchestrator (e.g. 'implementing parser, 3/5 tests green').",
     parameters: Type.Object({ status: Type.String() }),
+    renderCall: (args, theme) => renderCallRow("team_set_status", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("team_set_status", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
       if (mode.kind !== "member") throw new GenieError("only team members have a status");
@@ -1028,6 +1050,8 @@ export default function genie(pi: ExtensionAPI) {
       removeWorktree: Type.Optional(Type.Boolean({ description: "git worktree remove (branch is kept)" })),
       forceRemove: Type.Optional(Type.Boolean({ description: "Remove the worktree even with uncommitted changes" })),
     }),
+    renderCall: (args, theme) => renderCallRow("team_stop", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("team_stop", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
       if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can stop teams");
