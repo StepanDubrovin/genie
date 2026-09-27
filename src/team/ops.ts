@@ -62,7 +62,7 @@ export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team[
       ? "Challenge the analyst's findings: when the analyst shares them, check them for gaps and risks and send your feedback directly to the analyst."
       : "Wait until the executor asks for review: publish a waiting status (team_set_status) and end your turn without messaging anyone. When reviewing: check each verified criterion, attach one review artifact, set status approved or changes_requested, then message the executor (and the orchestrator on approval).",
     tester:
-      "Wait until the executor submits the work for review, then test it: write/run tests against the acceptance criteria, attach a test-report artifact, and send the results to the executor and reviewer. If tests fail, set status changes_requested with a note.",
+      "Wait until the executor submits the work for review, then test it: write/run tests against the acceptance criteria, attach a test-report artifact, and send the results to the executor and reviewer, and the orchestrator when the team has no reviewer. If tests fail, set status changes_requested with a note.",
     documenter: "Wait until the implementation is approved or the orchestrator asks you, then write/update the documentation, attach a `doc` artifact and tell the orchestrator.",
   };
   const base = [
