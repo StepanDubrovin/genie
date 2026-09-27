@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { Avatar, Avatars } from "@/entities/member";
 import {
+  ArtifactThumb,
   EpicIcon,
   EpicProgress,
   historyText,
@@ -23,25 +24,9 @@ import {
 } from "@/entities/task";
 import type { Team } from "@/entities/team";
 import { timeAgo, useTick } from "@/shared/lib";
-import { Icon, ImagePreview, Markdown, useToast } from "@/shared/ui";
-import { isRasterFileName } from "../../../../../src/web/images.ts";
+import { Icon, Markdown, useToast } from "@/shared/ui";
 
 const KIND_NAME: Record<string, string> = { note: "заметка", progress: "прогресс", question: "вопрос", decision: "решение", review: "ревью", handoff: "передача", owner: "владелец" };
-
-/** List thumbnail: a loaded preview, or the plain file icon for non-images and mislabeled files. */
-function ArtifactThumb({ task, artifact }: { task: string; artifact: { id: number; name: string } }) {
-  const [failed, setFailed] = useState(false);
-  if (failed || !isRasterFileName(artifact.name)) return <Icon.file />;
-  return (
-    <ImagePreview
-      src={`/api/tasks/${encodeURIComponent(task)}/artifacts/${artifact.id}?raw=1`}
-      variant="thumb"
-      interactive={false}
-      alt={artifact.name}
-      onUnavailable={() => setFailed(true)}
-    />
-  );
-}
 
 export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onClose: () => void }) {
   useTick();
