@@ -80,6 +80,8 @@ export interface DocPage {
   verified: string | null;
   /** Git last-commit date for this file; never read from frontmatter. */
   updated: string | null;
+  /** SHA-256 of the page's Markdown content as persisted in the index; the stored value, never re-hashed on read. */
+  contentHash: string;
   headings: string[];
   diagnostics: string[];
   stale: boolean;
@@ -137,7 +139,6 @@ interface ScannedFile {
 
 interface StoredDoc extends DocPage {
   body: string;
-  contentHash: string;
 }
 
 interface PageRow {
@@ -214,7 +215,7 @@ function rowToStored(row: PageRow): StoredDoc {
 }
 
 function toPage(doc: StoredDoc): DocPage {
-  const { body: _body, contentHash: _contentHash, ...page } = doc;
+  const { body: _body, ...page } = doc;
   return page;
 }
 

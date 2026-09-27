@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -297,6 +298,48 @@ test("incremental add/edit/delete/rename agrees with DROP-and-recreate rebuild",
   assert.equal(rebuilt.pages, 1);
   assert.deepEqual(docs.list(), incremental);
   assert.equal(docs.search("alpha").length, 0);
+  tracker.db.close();
+});
+
+test("every page result exposes the stored contentHash, which tracks edits and survives a rebuild", () => {
+  const root = tmp();
+  const tracker = createTracker(root);
+  const initial = "# Page\n\nfirst body needle\n\n## Details\n\ndetail body\n";
+  write(root, "docs/page.md", initial);
+  const docs = service(root, tracker);
+  const expected = createHash("sha256").update(initial).digest("hex");
+  const storedHash = (): string | undefined => tracker.db.get<{ content_hash: string }>(
+    "SELECT content_hash FROM docs_pages WHERE root_id = ? AND path = ?", docs.rootId, "page.md",
+  )?.content_hash;
+
+  // Present on every public path that returns a page.
+  assert.equal(docs.list()[0]?.contentHash, expected);
+  assert.equal(docs.getPage("page.md")?.contentHash, expected);
+  assert.equal(docs.read("page.md", { wholePage: true }).contentHash, expected);
+  assert.equal(docs.read("page.md", { heading: "Details" }).contentHash, expected);
+  assert.equal(docs.search("needle")[0]?.contentHash, expected);
+
+  // The stored column value, not a value recomputed on read: reads agree with docs_pages.content_hash.
+  assert.equal(storedHash(), expected);
+  assert.equal(docs.read("page.md", { wholePage: true }).contentHash, storedHash());
+
+  // Stable across repeated reads of unchanged content.
+  assert.equal(docs.read("page.md", { wholePage: true }).contentHash, docs.getPage("page.md")?.contentHash);
+  assert.equal(docs.list()[0]?.contentHash, expected);
+
+  // Changes exactly when the file content changes.
+  const edited = "# Page\n\nsecond body needle\n\n## Details\n\ndetail body\n";
+  write(root, "docs/page.md", edited);
+  const editedHash = createHash("sha256").update(edited).digest("hex");
+  assert.notEqual(editedHash, expected);
+  assert.equal(docs.getPage("page.md")?.contentHash, editedHash);
+  assert.equal(docs.read("page.md", { wholePage: true }).contentHash, editedHash);
+
+  // Survives a DROP-and-recreate rebuild, still the stored value.
+  docs.rebuild();
+  assert.equal(docs.getPage("page.md")?.contentHash, editedHash);
+  assert.equal(docs.list()[0]?.contentHash, editedHash);
+  assert.equal(storedHash(), editedHash);
   tracker.db.close();
 });
 
