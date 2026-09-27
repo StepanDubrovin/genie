@@ -1,3 +1,13 @@
+---
+title: Архитектура genie
+summary: Обзор архитектуры genie: компоненты и их пути, жизненный цикл задач, эпики, обмен сообщениями, запуск участников и ограничения MVP.
+type: reference
+status: current
+tags: [архитектура, компоненты]
+paths: [src/tracker/**, src/cli/genie.ts, bin/genie, src/team/bus.ts, src/team/spawn.ts, src/team/config.ts, src/team/ops.ts, src/web/server.ts, web/**, src/notify.ts, src/extension/index.ts, config/default.json, agents/*.md, scripts/e2e-recovery.ts]
+verified: 2026-09-27
+---
+
 # Архитектура genie
 
 ```mermaid

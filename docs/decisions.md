@@ -1,3 +1,13 @@
+---
+title: Решения (по итогам интервью, 2026-09-27)
+summary: Журнал решений по итогам интервью с владельцем: статусы, автономность, команды, хранилище, git, ABAP, модели и уведомления.
+type: decision
+status: current
+tags: [решения, интервью]
+paths: [src/tracker/model.ts, src/tracker/db.ts, src/tracker/store.ts, src/team/config.ts, src/team/ops.ts, src/team/spawn.ts, src/extension/index.ts, src/extension/settings.ts, src/notify.ts, config/default.json, agents/*.md]
+verified: 2026-09-27
+---
+
 # Решения (по итогам интервью, 2026-09-27)
 
 | # | Вопрос | Решение | Где реализовано |
