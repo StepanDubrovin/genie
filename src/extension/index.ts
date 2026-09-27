@@ -1128,9 +1128,10 @@ export default function genie(pi: ExtensionAPI) {
     renderResult: (result, options, theme, context) => renderToolResult("docs_search", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
+      // Pass type/status/limit straight through: the "exclude deprecated unless
+      // requested" default belongs to the service (bug G-19), not this tool.
       const results = docsService(ctx).search(p.query, { limit: p.limit, type: p.type, status: p.status });
-      const visible = p.status === "deprecated" ? results : results.filter((result) => result.status !== "deprecated");
-      return text(formatSearchResults(visible, p.query), { count: visible.length });
+      return text(formatSearchResults(results, p.query), { count: results.length });
     },
   });
 

@@ -18,6 +18,7 @@ import {
   L1_PAGE_UNITS,
   L1_TOTAL_UNITS,
   normalizeTerm,
+  publishExclusive,
   selectL1Pages,
   slugify,
   units,
@@ -486,6 +487,63 @@ test("Bun (pi-embedded) smoke: context.ts builds L0/L1 and the estimator on bun:
   assert.equal(payload.l1, 1);
   assert.equal(payload.reason, "related G-1");
   assert.equal(payload.cyr, 1);
+});
+
+function noteWriterSource(): string {
+  const source = (relative: string) => path.join(REPO_ROOT, relative).split(path.sep).join("/");
+  return `import { Db } from ${JSON.stringify(source("src/tracker/db.ts"))};
+import { DocsService } from ${JSON.stringify(source("src/docs/service.ts"))};
+import { writeDocNote } from ${JSON.stringify(source("src/docs/context.ts"))};
+const root = process.argv[1];
+const writer = process.argv[2];
+const db = new Db(":memory:");
+const docs = new DocsService({ db, cwd: root });
+for (let i = 0; i < 5; i++) writeDocNote(docs, { title: "Race note", body: "writer " + writer + " number " + i });
+db.close();
+`;
+}
+
+test("exclusive note publishing never replaces an existing file", () => {
+  const dir = tmp();
+  const target = path.join(dir, "note.md");
+  fs.writeFileSync(target, "ORIGINAL");
+  const temp = path.join(dir, ".temp");
+  fs.writeFileSync(temp, "REPLACEMENT");
+  assert.equal(publishExclusive(temp, target), "exists", "a taken target is reported, not overwritten");
+  assert.equal(fs.readFileSync(target, "utf8"), "ORIGINAL");
+  fs.unlinkSync(temp);
+  const fresh = path.join(dir, "fresh.md");
+  fs.writeFileSync(temp, "FRESH");
+  assert.equal(publishExclusive(temp, fresh), "created");
+  assert.equal(fs.readFileSync(fresh, "utf8"), "FRESH");
+});
+
+test("docs_note survives concurrent writers and never overwrites another note", async () => {
+  const root = tmp();
+  const { spawn } = await import("node:child_process");
+  const script = noteWriterSource();
+  await Promise.all(
+    [1, 2, 3, 4].map(
+      (writer) =>
+        new Promise<void>((resolve, reject) => {
+          const child = spawn(process.execPath, ["--input-type=module", "-e", script, root, String(writer)], { stdio: "inherit" });
+          child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`note writer ${writer} exited ${code}`))));
+        }),
+    ),
+  );
+  const date = new Date().toISOString().slice(0, 10);
+  const inbox = path.join(root, "docs", "inbox");
+  const files = fs.readdirSync(inbox).filter((file) => file.startsWith(`${date}-race-note`) && file.endsWith(".md"));
+  assert.equal(files.length, 20, "every writer's note is kept under a unique name");
+  const bodies = new Set<string>();
+  for (const file of files) {
+    const content = fs.readFileSync(path.join(inbox, file), "utf8");
+    const body = content.split("---").slice(2).join("---").trim();
+    assert.ok(body, `note ${file} has a body`);
+    bodies.add(body);
+  }
+  assert.equal(bodies.size, 20, "no writer's body was clobbered");
+  assert.equal(fs.readdirSync(inbox).filter((file) => file.includes(".tmp")).length, 0, "no temp file is left behind");
 });
 
 test("docs tool call rows summarize their arguments", () => {

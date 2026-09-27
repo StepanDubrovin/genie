@@ -430,10 +430,31 @@ function yamlList(values: string[]): string {
   return `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
 }
 
+/** Atomically create `target` from `temp` without ever replacing an existing file. */
+export function publishExclusive(temp: string, target: string): "created" | "exists" {
+  try {
+    fs.linkSync(temp, target);
+    return "created";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") return "exists";
+    if (code === "EPERM" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EXDEV" || code === "EMLINK") {
+      try {
+        fs.copyFileSync(temp, target, fs.constants.COPYFILE_EXCL);
+        return "created";
+      } catch (copyError) {
+        if ((copyError as NodeJS.ErrnoException).code === "EEXIST") return "exists";
+        throw copyError;
+      }
+    }
+    throw error;
+  }
+}
+
 /**
  * Write a unique `<docs-root>/inbox/YYYY-MM-DD-slug.md` note: type note, status
- * draft, never overwriting an existing file, atomically (temp file + rename in
- * the same directory), then refresh the index.
+ * draft, never overwriting an existing file, published atomically (a private temp
+ * file, then an exclusive hardlink/COPYFILE_EXCL into place), then refresh the index.
  */
 export function writeDocNote(service: DocsService, input: DocNoteInput): DocNoteResult {
   const title = input.title.trim();
@@ -458,15 +479,15 @@ export function writeDocNote(service: DocsService, input: DocNoteInput): DocNote
     "",
   ].join("\n");
   const content = `${frontmatter}${body}${body.endsWith("\n") || !body ? "" : "\n"}`;
-  const temp = path.join(dir, `.${path.basename(absolute)}.${process.pid}.${Date.now()}.tmp`);
+  const temp = path.join(dir, `.${path.basename(absolute)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
   fs.writeFileSync(temp, content, { flag: "wx" });
   try {
-    // Re-check for a racing writer that took the name between the scan and the rename.
-    while (fs.existsSync(absolute)) absolute = base(`-${counter++}`);
-    fs.renameSync(temp, absolute);
-  } catch (error) {
+    // Publish exclusively: hardlink (or COPYFILE_EXCL) raises EEXIST instead of
+    // replacing a racing writer's file, so a note is never overwritten. On a
+    // collision move on to the next counter.
+    while (publishExclusive(temp, absolute) === "exists") absolute = base(`-${counter++}`);
+  } finally {
     try { fs.unlinkSync(temp); } catch { /* the temp file may already be gone */ }
-    throw error;
   }
   service.refresh();
   return { path: toDocRelative(service.docsRoot, absolute), absolute, slug };
