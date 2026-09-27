@@ -804,7 +804,8 @@ export default function genie(pi: ExtensionAPI) {
           const taskId = requireId();
           const a = tracker.readArtifact(taskId, p.artifact);
           // Supported raster images within the cap become an image block (see artifactReadContent).
-          const content = artifactReadContent({ n: p.artifact, name: a.name, kind: a.kind, content: a.content, text: a.text });
+          // A non-vision session model gets the runtime's own "image omitted" note.
+          const content = artifactReadContent({ n: p.artifact, name: a.name, kind: a.kind, content: a.content, text: a.text, modelSupportsImages: ctx.model?.input.includes("image") });
           return { content, details: { id: taskId, artifact: p.artifact } };
         }
         case "split": {
