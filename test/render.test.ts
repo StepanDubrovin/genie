@@ -86,7 +86,7 @@ test("result rendering strips control characters and truncates safely", () => {
   assert.deepEqual(component.render(40).map((l) => l.trimEnd()), ["✓ abc"]);
 });
 
-test("all nine genie tools register and run call and result renderers", async () => {
+test("all twelve genie tools register and run call and result renderers", async () => {
   const { default: genie } = await import("../src/extension/index.ts");
   const tools = new Map<string, { renderCall?: unknown; renderResult?: unknown }>();
   const pi = {
@@ -105,6 +105,9 @@ test("all nine genie tools register and run call and result renderers", async ()
     "team_set_status",
     "team_recover",
     "team_stop",
+    "docs_search",
+    "docs_read",
+    "docs_note",
   ];
   assert.deepEqual([...tools.keys()].sort(), [...expected].sort());
 
