@@ -28,6 +28,21 @@ import { isRasterFileName } from "../../../../../src/web/images.ts";
 
 const KIND_NAME: Record<string, string> = { note: "заметка", progress: "прогресс", question: "вопрос", decision: "решение", review: "ревью", handoff: "передача", owner: "владелец" };
 
+/** List thumbnail: a loaded preview, or the plain file icon for non-images and mislabeled files. */
+function ArtifactThumb({ task, artifact }: { task: string; artifact: { id: number; name: string } }) {
+  const [failed, setFailed] = useState(false);
+  if (failed || !isRasterFileName(artifact.name)) return <Icon.file />;
+  return (
+    <ImagePreview
+      src={`/api/tasks/${encodeURIComponent(task)}/artifacts/${artifact.id}?raw=1`}
+      variant="thumb"
+      interactive={false}
+      alt={artifact.name}
+      onUnavailable={() => setFailed(true)}
+    />
+  );
+}
+
 export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onClose: () => void }) {
   useTick();
   const q = useTask(id);
@@ -333,16 +348,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
                   className="artifact"
                   onClick={() => viewer.show(t.id, a.id)}
                 >
-                  {isRasterFileName(a.name) ? (
-                    <ImagePreview
-                      src={`/api/tasks/${encodeURIComponent(t.id)}/artifacts/${a.id}?raw=1`}
-                      variant="thumb"
-                      interactive={false}
-                      alt={a.name}
-                    />
-                  ) : (
-                    <Icon.file />
-                  )}
+                  <ArtifactThumb task={t.id} artifact={a} />
                   <span className="nm">{a.name}</span>
                   <span className="who">
                     {a.kind} · {a.author}
