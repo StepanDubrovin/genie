@@ -48,7 +48,7 @@ function l1Block(task: Task, cwd: string, epic: Task | undefined, docs: KickoffD
 export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team["worktree"], all: Named[], s: Named, extra?: string, joining = false, epic?: Task, docs?: KickoffDocs): string {
   const hasAnalyst = all.some((x) => x.role === "analyst");
   const tester = all.find((x) => x.role === "tester");
-  const notify = `message the reviewer${tester ? ` and the tester (${tester.name})` : ""}`;
+  const notify = `message the reviewer (or whoever owns the review step)${tester ? ` and the tester (${tester.name})` : ""}`;
   const refinement = !["ready", "changes_requested", "in_progress", "review"].includes(task.status);
   const first: Record<MemberRole, string> = {
     analyst: refinement

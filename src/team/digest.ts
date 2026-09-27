@@ -82,10 +82,17 @@ export function renderDigest(mails: Mail[]): string {
   // Teams standing by (question/blocker) first; ties by the earlier latest message.
   sections.sort((a, b) => a.rank - b.rank || a.at - b.at);
 
-  const teams = new Set(messages.map(teamOf));
-  const out: string[] = [`[genie digest · ${messages.length} message${messages.length === 1 ? "" : "s"} from ${teams.size} team${teams.size === 1 ? "" : "s"}]`];
-  for (const s of sections) out.push("", `## ${s.team} (${s.count})`, ...s.lines.map(digestLine));
+  // The header describes what is printed: one row per sender, grouped into team
+  // sections with the FYI-only rows in their own section. Counting raw messages
+  // or FYI-only teams would promise rows and sections the digest does not show.
   const fyi = fyiSenders.sort((a, b) => a.id - b.id);
+  const rows = sections.reduce((n, s) => n + s.count, 0) + fyi.length;
+  const shape = [
+    sections.length ? `${sections.length} team section${sections.length === 1 ? "" : "s"}` : "",
+    fyi.length ? "FYI" : "",
+  ].filter(Boolean).join(" + ");
+  const out: string[] = [`[genie digest · ${rows} message${rows === 1 ? "" : "s"} in ${shape}]`];
+  for (const s of sections) out.push("", `## ${s.team} (${s.count})`, ...s.lines.map(digestLine));
   if (fyi.length) out.push("", "## FYI", ...fyi.map(digestLine));
   return out.join("\n");
 }

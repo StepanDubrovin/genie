@@ -179,10 +179,11 @@ test("digest: grouped by team, one line per sender, ordered by importance", () =
     mail({ id: 5, team: "G-9", from: "dave", fromRole: "reviewer", level: "high", intent: "verdict", text: "LGTM" }),
     mail({ id: 6, team: "G-12", from: "erin", fromRole: "tester", level: "low", intent: "fyi", text: "FYI only" }),
   ];
+  const out = renderDigest(mails);
   assert.equal(
-    renderDigest(mails),
+    out,
     [
-      "[genie digest · 6 messages from 3 teams]",
+      "[genie digest · 5 messages in 2 team sections + FYI]",
       "",
       "## G-7 (2)",
       "- ada (analyst) · normal · question · Need ZPR1?",
@@ -196,6 +197,23 @@ test("digest: grouped by team, one line per sender, ordered by importance", () =
       "- erin (tester) · low · fyi · FYI only",
     ].join("\n"),
   );
+  // G-12 only sent FYI, so it prints under `## FYI` and gets no section of its own.
+  assert.ok(!out.includes("## G-12"), `an FYI-only team has no section:\n${out}`);
+});
+
+test("digest: the header counts printed rows and team sections, not raw messages or FYI-only teams", () => {
+  const mails: Mail[] = [
+    // G-7 prints a two-row section (ada + bender, two raw mails from bender).
+    mail({ id: 1, team: "G-7", from: "ada", fromRole: "analyst", intent: "question", text: "Need ZPR1?" }),
+    mail({ id: 2, team: "G-7", from: "bender", text: "working on it" }),
+    mail({ id: 3, team: "G-7", from: "bender", intent: "done", text: "done, tests green" }),
+    // G-12 is FYI-only: it contributes a printed row, not a team section.
+    mail({ id: 4, team: "G-12", from: "erin", fromRole: "tester", level: "low", intent: "fyi", text: "FYI only" }),
+  ];
+  const out = renderDigest(mails);
+  assert.ok(out.startsWith("[genie digest · 3 messages in 1 team section + FYI]"), `the header mirrors the printed rows and sections:\n${out}`);
+  assert.ok(!out.includes("## G-12"), "the FYI-only team does not inflate the section count");
+  assert.ok(out.includes("- erin (tester) · low · fyi · FYI only"), "its row still shows under FYI");
 });
 
 test("digest: a standing-by team outranks a later verdict; unclassified sits in between", () => {
