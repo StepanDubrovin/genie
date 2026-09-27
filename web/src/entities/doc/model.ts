@@ -92,15 +92,21 @@ export function staleReasonText(raw: string): string {
   return `${m[1] === "Commit changed" ? "Коммит изменил" : "Незакоммиченное изменение"} ${m[2]} — совпало с маской ${m[3]}`;
 }
 
-/** Search snippets mark matches with `[` `]`; split them for highlighting. */
+/**
+ * Search snippets mark matches with `[` `]`; split them for highlighting. Literal
+ * brackets in the page text (`[[wiki-links]]`, `[label](url)`) are masked first so
+ * they are never mistaken for a highlight marker (review nit N4).
+ */
 export function snippetParts(snippet: string): { text: string; hit: boolean }[] {
   const out: { text: string; hit: boolean }[] = [];
+  const literal = /\[\[[^\]\n]*\]\]|\[[^\]\n]*\]\([^)\n]*\)/g;
+  const masked = snippet.replace(literal, (match) => "\u0000".repeat(match.length));
   const re = /\[([^\[\]]*)\]/g;
   let last = 0;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(snippet))) {
+  while ((m = re.exec(masked))) {
     if (m.index > last) out.push({ text: snippet.slice(last, m.index), hit: false });
-    out.push({ text: m[1], hit: true });
+    out.push({ text: snippet.slice(m.index + 1, m.index + 1 + m[1].length), hit: true });
     last = m.index + m[0].length;
   }
   if (last < snippet.length) out.push({ text: snippet.slice(last), hit: false });

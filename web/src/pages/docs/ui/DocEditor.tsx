@@ -27,6 +27,14 @@ import { DiagIcon, StaleIcon } from "@/entities/doc";
 import { plural } from "@/shared/lib";
 import { Icon } from "@/shared/ui";
 
+function countChanges(before: string, after: string): number {
+  const a = before.replace(/\r/g, "").split("\n");
+  const b = after.replace(/\r/g, "").split("\n");
+  let changes = 0;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) if (a[i] !== b[i]) changes++;
+  return changes;
+}
+
 /** Minimal chip list editor for `tags`, `paths` and `related`. */
 function Chips({ value, onChange, placeholder, mono }: { value: string[]; onChange: (next: string[]) => void; placeholder: string; mono?: boolean }) {
   const [draft, setDraft] = useState("");
@@ -119,7 +127,7 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
   const errorFor = (field: string) => errors.find((e) => e.field === field)?.message;
 
   const dirty = !!fields && !!initial && (body !== initial.body || JSON.stringify(fields) !== JSON.stringify(initial.fields));
-  const changedLines = initial && body !== initial.body ? Math.abs(lineCount(body) - lineCount(initial.body)) : 0;
+  const changedLines = initial && body !== initial.body ? countChanges(initial.body, body) : 0;
   /** Only a real move of the docs signature after this page was loaded counts. */
   const externallyChanged = !!baseline && !!version && version !== baseline;
 

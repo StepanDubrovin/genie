@@ -26,8 +26,6 @@ interface Item {
   /** Rendered next to the label (docs status). */
   mark?: ReactNode;
   group: "ДЕЙСТВИЯ" | "ПЕРЕЙТИ" | "КОМАНДЫ" | "ЗАДАЧИ" | "ДОКУМЕНТАЦИЯ";
-  /** Extra text the query is matched against. */
-  extra?: string;
   run: () => void;
 }
 
@@ -67,11 +65,9 @@ export function CommandPalette({ onClose, actions }: { onClose: () => void; acti
             .map((part, i) => (part.hit ? <mark key={i}>{part.text}</mark> : <span key={i}>{part.text}</span>))}
         </span>
       ),
-      extra: result.snippet.replace(/[[\]]/g, " "),
       group: "ДОКУМЕНТАЦИЯ",
       run: () => actions.openDoc(result.path),
     }));
-
     if (query) {
       if (!docsHits.length) {
         docsHits.push({
@@ -100,8 +96,12 @@ export function CommandPalette({ onClose, actions }: { onClose: () => void; acti
 
     const all = [...base, ...docsHits];
     const s = query.toLowerCase();
-    const matched = s ? all.filter((i) => `${i.label} ${i.hint ?? ""} ${i.extra ?? ""}`.toLowerCase().includes(s)) : all;
-    const scoped = docsOnly ? matched.filter((i) => i.group === "ДОКУМЕНТАЦИЯ" || i.key === "d-note" || i.key === "d-page") : matched;
+    // Docs hits come from the server already ranked and matched (title, summary,
+    // headings, body, tags, aliases). Re-filtering them by substring would drop
+    // e.g. alias-only matches, so they only obey the `docsOnly` scope.
+    const isDocItem = (item: Item) => item.group === "ДОКУМЕНТАЦИЯ" || item.key === "d-note" || item.key === "d-page";
+    const matched = s ? all.filter((i) => isDocItem(i) || `${i.label} ${i.hint ?? ""}`.toLowerCase().includes(s)) : all;
+    const scoped = docsOnly ? matched.filter(isDocItem) : matched;
     return scoped.sort((a, b) => GROUP_ORDER[a.group] - GROUP_ORDER[b.group]).slice(0, 60);
   }, [query, tasks, teams, actions, docs.data, docsOnly]);
 

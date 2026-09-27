@@ -572,14 +572,14 @@ a.epic-chip:hover { border-color: var(--violet); color: var(--text); }
 .doc-tag { font-size: 11.5px; line-height: 19px; height: 20px; padding: 0 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-hover); color: var(--text-2); }
 .doc-summary { margin-bottom: 18px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-panel); color: var(--text-2); }
 
-.doc-banner { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 16px; padding: 11px 13px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg-panel); font-size: 12.5px; line-height: 1.5; }
+.doc-banner { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; padding: 11px 13px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg-panel); font-size: 12.5px; line-height: 1.5; }
 .doc-banner.stale { border-color: var(--amber-line); background: var(--amber-bg); }
 .doc-banner.stale > svg { color: var(--amber); }
 .doc-banner.stale .doc-banner-body b { color: var(--amber); }
 .doc-banner.diag { border-color: #4a2626; background: #1d1214; }
 .doc-banner.diag > svg { color: var(--red); }
 .doc-banner.diag .doc-banner-body b { color: #f08c88; }
-.doc-banner-body { flex: 1; min-width: 0; color: var(--text-2); }
+.doc-banner-body { flex: 1 1 260px; min-width: 0; color: var(--text-2); }
 .doc-banner-list { margin: 6px 0 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; color: var(--muted); }
 .doc-banner .btn { flex: none; }
 .doc-body { color: var(--text-2); }
@@ -693,7 +693,12 @@ a.epic-chip:hover { border-color: var(--violet); color: var(--text); }
 
 @media (max-width: 900px) {
   .docs-grid, .docs-grid.view, .docs-grid.docs-search-mode, .docs-grid.empty { grid-template-columns: minmax(0, 1fr); }
-  .docs-tree-col, .docs-aside { display: none; }
+  .docs-tree-col { display: none; }
+  /* The aside is not dropped on mobile: backlinks, paths, diagnostics and the TOC
+     flow inline under the body (mockup screen 11). */
+  .docs-aside { border-left: 0; border-top: 1px solid var(--line); padding: 18px 16px 32px; overflow: visible; }
+  .doc-banner { flex-wrap: wrap; }
+  .doc-banner .btn { flex: none; }
   .docs-topbar { padding: 10px 16px; }
   .docs-view { padding: 16px 16px 48px; }
   .doc-title { font-size: 19px; }

@@ -6,6 +6,7 @@ import { useEffect, useRef } from "react";
 import type { DocSearchResult } from "@/entities/doc";
 import { DocDiagBadge, DocStaleBadge, DocStatusBadge, DocTypeBadge, snippetParts } from "@/entities/doc";
 import { plural } from "@/shared/lib";
+import { Icon } from "@/shared/ui";
 
 function Hit({ result, selected, onOpen }: { result: DocSearchResult; selected: boolean; onOpen: (path: string) => void }) {
   return (
@@ -74,7 +75,7 @@ export function DocSearchList({
 
       {!pending && !error && !results.length && (
         <div className="doc-search-body empty">
-          <span className="doc-empty-icon">⌕</span>
+          <Icon.search size={26} />
           <b>Ничего не найдено по «{query}»</b>
           <p className="muted">
             Поиск идёт по заголовкам, тексту, тегам и алиасам. Попробуйте другое слово или путь к коду, например <span className="mono">src/team</span>.
