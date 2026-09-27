@@ -474,9 +474,11 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
       if (id && parts[2] === "mail" && method === "POST") {
         const to = String(body.to ?? "all");
         // The owner's send parity with agents: an omitted level stays `normal`
-        // (backwards compatible) and the values are validated before they reach
-        // the bus, so a bad one is a 400 rather than a generic server error.
-        const level = body.level === undefined || body.level === "" ? "normal" : String(body.level);
+        // (backwards compatible), but the legacy `urgent: true` alias for `high`
+        // is folded in first so an old client that sends only `urgent` still
+        // gets `high`. Values are validated here so a bad one is a 400 rather
+        // than a generic server error from the bus.
+        const level = body.level === undefined || body.level === "" ? (body.urgent ? "high" : "normal") : String(body.level);
         if (!MAIL_LEVELS.includes(level as MailLevel)) throw new HttpError(400, `unknown mail level ${level}; expected one of ${MAIL_LEVELS.join(", ")}`);
         const intent = body.intent === undefined || body.intent === "" ? undefined : String(body.intent);
         if (intent !== undefined && !MAIL_INTENTS.includes(intent as MailIntent)) throw new HttpError(400, `unknown mail intent ${intent}; expected one of ${MAIL_INTENTS.join(", ")}`);
@@ -486,7 +488,6 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
           fromRole: "human",
           to: to === "orchestrator" ? ORCHESTRATOR : to,
           text: String(body.text ?? ""),
-          urgent: !!body.urgent,
           level: level as MailLevel,
           intent: intent as MailIntent | undefined,
         });

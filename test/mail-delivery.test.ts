@@ -261,6 +261,12 @@ test("the web send route accepts, validates and forwards level and intent", asyn
     assert.equal(fallback.level, "normal");
     assert.equal(fallback.intent, undefined);
 
+    // The documented legacy alias survives: `urgent: true` without a level is high.
+    assert.equal((await post({ to: "orchestrator", text: "legacy urgent", urgent: true })).status, 201);
+    const [legacy] = bus.receive(undefined, ORCH);
+    assert.equal(legacy.level, "high");
+    assert.equal(legacy.urgent, true);
+
     // Bad values are rejected at the route (400), not stored.
     assert.equal((await post({ to: "orchestrator", text: "nope", level: "bogus" })).status, 400);
     assert.equal((await post({ to: "orchestrator", text: "nope", intent: "bogus" })).status, 400);
