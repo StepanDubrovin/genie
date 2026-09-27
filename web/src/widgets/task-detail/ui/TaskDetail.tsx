@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
+import { DocDiagBadge, DocStaleBadge, DocStatusBadge } from "@/entities/doc";
 import { Avatar, Avatars } from "@/entities/member";
+import type { DocsImpactReason, DocsImpactResult } from "../../../../../src/docs/impact.ts";
 import {
   ArtifactThumb,
   EpicIcon,
@@ -16,6 +18,7 @@ import {
   useArtifactViewer,
   useCheck,
   useComment,
+  useDocsImpact,
   useEpicMap,
   useMoveTask,
   usePatchTask,
@@ -40,6 +43,8 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const [draft, setDraft] = useState("");
   const [editDesc, setEditDesc] = useState<string | undefined>();
   const epics = useEpicMap();
+  const impactEnabled = q.data?.status === "review" || q.data?.status === "done";
+  const impact = useDocsImpact(id, impactEnabled);
 
   useEffect(() => {
     setAnswer("");
@@ -222,6 +227,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
           </Link>
         )}
         {epic && <EpicBox id={epic.id} onArtifact={viewer.show} />}
+        {impactEnabled && <DocsImpactBlock result={impact.data} />}
 
         {t.needsOwner && (
           <section className="owner-box" aria-label="Нужно ваше решение">
@@ -394,6 +400,54 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
 
       {viewer.modal}
     </aside>
+  );
+}
+
+
+/** Russian phrasing of the structured impact reasons; matching stays server-side (G-12 lesson). */
+function impactReasonText(reasons: DocsImpactReason[]): string {
+  return reasons
+    .map((reason) => (reason.kind === "changed-path" ? `меняет ${reason.path} — под paths: ${reason.pattern}` : `ссылается на задачу ${reason.id} в related`))
+    .join("; ");
+}
+
+/** Mockup screen 9: pages the task's changes may have made stale. A hint, never a gate. */
+function DocsImpactBlock({ result }: { result: DocsImpactResult | undefined }) {
+  const navigate = useNavigate();
+  if (!result) return null;
+  const candidates = result.candidates;
+  const note = result.notes[0];
+  return (
+    <section className="doc-impact" aria-label="Документация, которую могла затронуть задача">
+      <div className="h">
+        <Icon.file size={14} />
+        Документация, которую могла затронуть задача
+        {candidates.length > 0 && <span className="n">{candidates.length}</span>}
+        <span className="hint">подсказка · не блокирует</span>
+      </div>
+      {candidates.length > 0 ? (
+        <div className="rows">
+          {candidates.map((candidate) => (
+            <button
+              type="button"
+              key={candidate.path}
+              className="row"
+              onClick={() => navigate(`/docs?page=${encodeURIComponent(candidate.path)}`)}
+            >
+              <Icon.file size={13} />
+              <span className="nm">{candidate.title}</span>
+              {(candidate.status === "draft" || candidate.status === "deprecated") && <DocStatusBadge status={candidate.status} />}
+              {candidate.stale && <DocStaleBadge count={candidate.staleReasons.length} />}
+              {candidate.diagnostics.length > 0 && <DocDiagBadge count={candidate.diagnostics.length} />}
+              <span className="why">{impactReasonText(candidate.reasons)}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="muted">Затронутой документации не найдено</div>
+      )}
+      {note && <div className="why note">{result.changedPathsAvailable ? `замечание: ${note}` : `нет данных об изменениях: ${note}`}</div>}
+    </section>
   );
 }
 

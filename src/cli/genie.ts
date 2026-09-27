@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { type Actor, isMemberRole, ARTIFACT_KINDS, type ArtifactKind, COMMENT_KINDS, type CommentKind, isRole, isStatus, STATUSES, type Status, TASK_TYPES, type TaskType } from "../tracker/model.ts";
+import { type Actor, isMemberRole, ARTIFACT_KINDS, type ArtifactKind, COMMENT_KINDS, type CommentKind, isRole, isStatus, STATUSES, type Status, type Task, TASK_TYPES, type TaskType } from "../tracker/model.ts";
 import { loadConfig } from "../team/config.ts";
 import { oneLine, renderTask, statusIcon } from "../tracker/render.ts";
 import { GenieError, Tracker } from "../tracker/store.ts";
@@ -14,6 +14,7 @@ import { memberLabel } from "../team/names.ts";
 import { addMembers, deleteTeam, removeMember, stopTeam } from "../team/ops.ts";
 import { startWebServer } from "../web/server.ts";
 import { DocsService, DOC_STATUSES, DOC_TYPES, toDocRelative, type DocPage, type DocReadResult, type DocSearchResult, type DocStatus, type DocType } from "../docs/index.ts";
+import { computeDocsImpact, IMPACT_STATUSES, renderDocsImpact, type DocsImpactInput } from "../docs/impact.ts";
 
 const HELP = `genie — local task tracker for pi orchestrator + focus teams
 
@@ -52,6 +53,8 @@ Docs
   genie docs note <title> [-d body] [--tag T]... [--related ID]... [--json]
                                             capture a draft note under <docs root>/inbox
   genie docs rebuild [--json]               drop and recreate the docs index cache
+  genie docs impact <ID> [--json]           non-blocking candidates for pages the task's changes
+                                            may have made stale (review/done)
 
 Web
   genie web [--port 7420] [--tailscale] [--open]
@@ -233,6 +236,24 @@ async function main(argv: string[]): Promise<void> {
   const config = loadConfig(tracker.dir);
   tracker.gates = config.gates ?? {};
   const bus = new TeamBus(tracker);
+  let docs: DocsService | undefined;
+  const docsService = (): DocsService =>
+    (docs ??= new DocsService({ db: tracker.db, cwd: process.cwd(), trackerDir: tracker.dir, docsRoot: config.docs?.root ?? "docs" }));
+  /** Impact input: the task's worktree plus the team-record base commit (guarded). */
+  const impactInput = (task: Task): DocsImpactInput => {
+    let base: string | undefined;
+    if (task.team) {
+      try {
+        base = bus.get(task.team)?.worktree?.base;
+      } catch {
+        // team record gone: degrade to a base-less (dirty-only) diff
+      }
+    }
+    const worktree = task.worktree
+      ? { path: task.worktree.path, ...(task.worktree.branch ? { branch: task.worktree.branch } : {}), ...(base ? { base } : {}) }
+      : undefined;
+    return { id: task.id, status: task.status, relatedIds: [task.id, ...(task.parent ? [task.parent] : [])], ...(worktree ? { worktree } : {}) };
+  };
   if (cmd === "web") {
     await startWebServer(tracker, { port: values.port ? Number(values.port) : config.web.port, tailscale: !!values.tailscale, open: !!values.open });
     return;
@@ -304,7 +325,12 @@ async function main(argv: string[]): Promise<void> {
     case "show": {
       need(1, "show <ID>");
       const task = tracker.get(args[0]);
-      out(json, task, () => renderTask(task, { history: values.history, ...tracker.epicContext(task.id) }));
+      // `out` only runs the text closure in text mode, so --json stays the raw task object.
+      out(json, task, () => {
+        const base = renderTask(task, { history: values.history, ...tracker.epicContext(task.id) });
+        const impact = IMPACT_STATUSES.includes(task.status) ? `\n\n${renderDocsImpact(computeDocsImpact(docsService(), impactInput(task)))}` : "";
+        return `${base}${impact}`;
+      });
       return;
     }
     case "edit": {
@@ -393,12 +419,7 @@ async function main(argv: string[]): Promise<void> {
     case "docs": {
       const action = args[0];
       const rest = args.slice(1);
-      const docs = new DocsService({
-        db: tracker.db,
-        cwd: process.cwd(),
-        trackerDir: tracker.dir,
-        docsRoot: config.docs?.root ?? "docs",
-      });
+      const docs = docsService();
       if (action === "tree") {
         const pages = docs.list();
         out(json, pages, () => (pages.length ? pages.map(docLine).join("\n") : "no documentation pages"));
@@ -445,7 +466,14 @@ async function main(argv: string[]): Promise<void> {
         out(json, result, () => `rebuilt docs index: ${result.pages} pages (${result.changed} changed, ${result.deleted} deleted, ${result.diagnostics} diagnostics)`);
         return;
       }
-      throw new GenieError("usage: genie docs tree|search|read|note|rebuild");
+      if (action === "impact") {
+        need(2, "docs impact <ID>");
+        const task = tracker.get(rest[0]);
+        const result = computeDocsImpact(docs, impactInput(task));
+        out(json, result, () => renderDocsImpact(result));
+        return;
+      }
+      throw new GenieError("usage: genie docs tree|search|read|note|rebuild|impact");
     }
     case "board": {
       const tasks = tracker.list({ includeClosed: values.all, excludeEpics: true });

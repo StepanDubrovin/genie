@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { DOC_STATUSES, DOC_TYPES, parseDoc, type DocStatus, type DocType } from "../docs/parser.ts";
 import { DocsService } from "../docs/service.ts";
+import { computeDocsImpact } from "../docs/impact.ts";
 import { MAIL_INTENTS, MAIL_LEVELS, ORCHESTRATOR, TeamBus, type MailIntent, type MailLevel } from "../team/bus.ts";
 import { loadConfig, type MemberSpec, PACKAGE_ROOT } from "../team/config.ts";
 import { addMembers, deleteTeam, reapClosedTeams, removeMember, stopTeam } from "../team/ops.ts";
@@ -327,6 +328,29 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
           return send(res, 200, a.content, mime);
         }
         return send(res, 200, { name: a.name, kind: a.kind, size: a.content.byteLength, text: a.text, ...(mime ? { mime } : {}) });
+      }
+      // GET /api/tasks/:id/docs-impact — non-blocking docs-impact hint. Never blocks a
+      // transition and degrades to an empty result plus notes; the docs routes are untouched.
+      if (id && parts[2] === "docs-impact" && method === "GET") {
+        const task = tracker.get(id);
+        let base: string | undefined;
+        if (task.team) {
+          try {
+            base = bus.get(task.team)?.worktree?.base;
+          } catch {
+            // team record gone: degrade to a base-less (dirty-only) diff
+          }
+        }
+        const worktree = task.worktree
+          ? { path: task.worktree.path, ...(task.worktree.branch ? { branch: task.worktree.branch } : {}), ...(base ? { base } : {}) }
+          : undefined;
+        const result = computeDocsImpact(docsService(), {
+          id: task.id,
+          status: task.status,
+          relatedIds: [task.id, ...(task.parent ? [task.parent] : [])],
+          ...(worktree ? { worktree } : {}),
+        });
+        return send(res, 200, result);
       }
     }
 

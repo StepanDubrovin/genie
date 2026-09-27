@@ -710,3 +710,15 @@ a.epic-chip:hover { border-color: var(--violet); color: var(--text); }
   .docs-filter .icon-btn { min-height: 0; }
   .doc-search-head { flex-wrap: wrap; }
   .pal-foot { flex-wrap: wrap; }}
+
+/* Non-blocking docs impact in task detail (G-14, mockup screen 9). Additive only. */
+.doc-impact { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.doc-impact .h { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; }
+.doc-impact .h .n { font-weight: 400; color: var(--muted); }
+.doc-impact .h .hint { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--muted); white-space: nowrap; }
+.doc-impact .rows { display: flex; flex-direction: column; gap: 6px; }
+.doc-impact .row { display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
+.doc-impact .row:hover { border-color: var(--line-strong); background: var(--bg-hover); }
+.doc-impact .row .nm { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.doc-impact .row .why { margin-left: auto; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.doc-impact .why.note { font-size: 11.5px; color: var(--muted); }
