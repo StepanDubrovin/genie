@@ -21,7 +21,6 @@
   },
   "scripts": {
     "test": "node --test test/*.test.ts",
-    "migrate": "node migration/migrate-opencode.ts",
     "build:web": "vite build --config web/vite.config.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "typecheck": "tsc -p . && tsc -p web"
