@@ -15,6 +15,7 @@ import { DocsContext, formatReadResult, formatSearchResults, writeDocNote } from
 import { DOC_STATUSES, DOC_TYPES } from "../docs/parser.ts";
 import { DocsService } from "../docs/service.ts";
 import { notifyOn } from "../notify.ts";
+import { artifactReadContent } from "../web/artifacts.ts";
 import { BROADCAST, HEARTBEAT_STALE_MS, type Mail, type Member, ORCHESTRATOR, START_GRACE_MS, type Team, TeamBus } from "../team/bus.ts";
 import { type GenieConfig, languagePolicy, loadConfig, loadRole, type MemberSpec, PACKAGE_ROOT, resolveMember } from "../team/config.ts";
 import { assignNames, displayName, memberLabel } from "../team/names.ts";
@@ -765,10 +766,11 @@ export default function genie(pi: ExtensionAPI) {
         }
         case "artifact_read": {
           if (p.artifact === undefined) throw new GenieError("artifact_read needs artifact (number)");
-          const a = tracker.readArtifact(requireId(), p.artifact);
-          if (a.text === undefined) return text(`artifact #${p.artifact} ${a.name} is binary (${a.content.byteLength} bytes)`);
-          const body = a.text.length > 60_000 ? `${a.text.slice(0, 60_000)}\n… (truncated, ${a.text.length} chars)` : a.text;
-          return text(`# artifact #${p.artifact} ${a.name} (${a.kind})\n\n${body}`, { id: requireId(), artifact: p.artifact });
+          const taskId = requireId();
+          const a = tracker.readArtifact(taskId, p.artifact);
+          // Supported raster images within the cap become an image block (see artifactReadContent).
+          const content = artifactReadContent({ n: p.artifact, name: a.name, kind: a.kind, content: a.content, text: a.text });
+          return { content, details: { id: taskId, artifact: p.artifact } };
         }
         case "split": {
           if (!p.children?.length) throw new GenieError("split needs children");

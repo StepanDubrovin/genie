@@ -19,7 +19,9 @@ import { addMembers, deleteTeam, reapClosedTeams, removeMember, stopTeam } from 
 import { repoInfo } from "../tracker/fsutil.ts";
 import { type Actor, isMemberRole, MEMBER_ROLES, STATUSES, type Status, TASK_TYPES, type TaskType, isStatus, ARTIFACT_KINDS, type ArtifactKind } from "../tracker/model.ts";
 import { GenieError, type Tracker } from "../tracker/store.ts";
+import { inlineDisposition, readRepoImage, RepoImageError } from "./artifacts.ts";
 import { atomicWriteFile, docsFilesSignature, passesThroughSymlink } from "./docs.ts";
+import { detectImageMime } from "./images.ts";
 
 const execFileAsync = promisify(execFile);
 const WEB_ROOT = path.join(PACKAGE_ROOT, "web", "dist");
@@ -121,6 +123,10 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
   for (const host of opts.hostnames ?? []) if (host) allowedHosts.add(`${host}:${opts.port}`);
   const tailnetName = opts.tailnet;
   const docsCwd = opts.cwd ?? process.cwd();
+  // Repo images are served from the checkout the server runs in (docs use the
+  // main checkout instead). A file that only exists in a linked worktree is
+  // therefore not reachable and its reference degrades to text.
+  const imageRoot = repoInfo(docsCwd)?.toplevel ?? docsCwd;
 
   // Server-sent events: one data_version poll for all clients.
   const clients = new Set<http.ServerResponse>();
@@ -314,7 +320,25 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
           res.setHeader("content-disposition", `attachment; filename="${a.name.replace(/"/g, "")}"`);
           return send(res, 200, a.content, "application/octet-stream");
         }
-        return send(res, 200, { name: a.name, kind: a.kind, size: a.content.byteLength, text: a.text });
+        const mime = detectImageMime(a.content);
+        if (url.searchParams.get("raw") === "1") {
+          if (!mime) throw new HttpError(415, "artifact is not a supported raster image");
+          res.setHeader("content-disposition", inlineDisposition(a.name));
+          return send(res, 200, a.content, mime);
+        }
+        return send(res, 200, { name: a.name, kind: a.kind, size: a.content.byteLength, text: a.text, ...(mime ? { mime } : {}) });
+      }
+    }
+
+    // GET /api/images?path=<repo-relative> — contained inline raster bytes.
+    if (parts[0] === "images" && !parts[1] && method === "GET") {
+      try {
+        const { bytes, mime } = readRepoImage(imageRoot, url.searchParams.get("path") ?? "");
+        res.setHeader("content-disposition", "inline");
+        return send(res, 200, bytes, mime);
+      } catch (error) {
+        if (error instanceof RepoImageError) throw new HttpError(error.status, error.message);
+        throw error;
       }
     }
 

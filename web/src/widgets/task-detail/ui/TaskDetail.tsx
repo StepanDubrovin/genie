@@ -23,7 +23,8 @@ import {
 } from "@/entities/task";
 import type { Team } from "@/entities/team";
 import { timeAgo, useTick } from "@/shared/lib";
-import { Icon, Markdown, useToast } from "@/shared/ui";
+import { Icon, ImagePreview, Markdown, useToast } from "@/shared/ui";
+import { isRasterFileName } from "../../../../../src/web/images.ts";
 
 const KIND_NAME: Record<string, string> = { note: "заметка", progress: "прогресс", question: "вопрос", decision: "решение", review: "ревью", handoff: "передача", owner: "владелец" };
 
@@ -332,7 +333,16 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
                   className="artifact"
                   onClick={() => viewer.show(t.id, a.id)}
                 >
-                  <Icon.file />
+                  {isRasterFileName(a.name) ? (
+                    <ImagePreview
+                      src={`/api/tasks/${encodeURIComponent(t.id)}/artifacts/${a.id}?raw=1`}
+                      variant="thumb"
+                      interactive={false}
+                      alt={a.name}
+                    />
+                  ) : (
+                    <Icon.file />
+                  )}
                   <span className="nm">{a.name}</span>
                   <span className="who">
                     {a.kind} · {a.author}

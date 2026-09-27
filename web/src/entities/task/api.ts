@@ -45,6 +45,6 @@ export const useAddArtifact = () =>
     request<Task>("POST", `/api/tasks/${encodeURIComponent(v.id)}/artifacts`, { name: v.name, kind: v.kind, text: v.text, note: v.note }),
   );
 
-export async function fetchArtifact(task: string, n: number): Promise<{ name: string; kind: string; size: number; text?: string }> {
+export async function fetchArtifact(task: string, n: number): Promise<{ name: string; kind: string; size: number; text?: string; mime?: string }> {
   return request("GET", `/api/tasks/${encodeURIComponent(task)}/artifacts/${n}`);
 }
