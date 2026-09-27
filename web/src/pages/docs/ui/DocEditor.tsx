@@ -12,14 +12,17 @@ import {
   DOC_STATUSES,
   DOC_TYPES,
   DocBody,
+  DocRequestError,
   DocSaveError,
   docCrumbs,
   fieldsFromPage,
   isIsoDate,
   serializeDoc,
   useDocPage,
+  useDocsVersion,
   useSaveDoc,
 } from "@/entities/doc";
+import { DiagIcon, StaleIcon } from "@/entities/doc";
 import { plural } from "@/shared/lib";
 import { Icon } from "@/shared/ui";
 
@@ -72,10 +75,21 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
   const [initial, setInitial] = useState<{ fields: DocFields; body: string } | null>(null);
   const [serverDiags, setServerDiags] = useState<string[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** 404/409 from the API: the page on disk is not the page being edited. */
+  const [conflict, setConflict] = useState<number | null>(null);
   const [caret, setCaret] = useState({ line: 1, column: 1 });
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
   const loadedFor = useRef<string | undefined>(undefined);
+
+  // Docs change signal: a moved version means the file on disk is ahead of the editor.
+  const versionQ = useDocsVersion();
+  const version = versionQ.data?.version;
+  const versionRef = useRef<string | undefined>(undefined);
+  const [baseline, setBaseline] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    versionRef.current = version;
+  }, [version]);
 
   const page: DocReadResult | undefined = pageQ.data;
   useEffect(() => {
@@ -87,6 +101,7 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
     setBody(page.content);
     setServerDiags([]);
     setSaveError(null);
+    setBaseline(versionRef.current);
   }, [page]);
 
   const title = pages.find((p) => p.path === path)?.title ?? page?.title ?? path;
@@ -101,6 +116,16 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
 
   const dirty = !!fields && !!initial && (body !== initial.body || JSON.stringify(fields) !== JSON.stringify(initial.fields));
   const changedLines = initial && body !== initial.body ? Math.abs(lineCount(body) - lineCount(initial.body)) : 0;
+  /** Only a real move of the docs signature after this page was loaded counts. */
+  const externallyChanged = dirty && !!baseline && !!version && version !== baseline;
+
+  // The page disappeared (or became unreadable) after it was loaded: keep the
+  // editor content and surface it as a save conflict instead of losing the edits.
+  useEffect(() => {
+    if (!fields || !pageQ.isError) return;
+    const status = pageQ.error instanceof DocRequestError ? pageQ.error.status : 0;
+    if (status === 404 || status === 0) setConflict((current) => current ?? 404);
+  }, [fields, pageQ.isError, pageQ.error]);
 
   const trackCaret = () => {
     const area = areaRef.current;
@@ -111,7 +136,7 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
     setCaret({ line, column });
   };
 
-  const submit = async () => {
+  const submit = async (mode: "update" | "create" = "update") => {
     if (!fields || errors.length) return;
     if (!body.trim()) {
       setSaveError("Содержимое страницы пустое — сервер отклонит такое сохранение");
@@ -119,17 +144,38 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
     }
     setSaveError(null);
     setServerDiags([]);
+    setConflict(null);
     try {
-      await save.mutateAsync({ path, content: serializeDoc(fields, body), mode: "update" });
+      await save.mutateAsync({ path, content: serializeDoc(fields, body), mode });
       onSaved(path);
     } catch (error) {
       if (error instanceof DocSaveError) {
+        // 404 = the file was deleted/moved, 409 = somebody created it meanwhile.
+        if (error.status === 404 || error.status === 409) {
+          setConflict(error.status);
+          return;
+        }
         setServerDiags(error.diagnostics);
         setSaveError(error.diagnostics.length ? "Frontmatter не принят сервером — исправьте поля ниже" : error.message);
       } else {
         setSaveError(error instanceof Error ? error.message : String(error));
       }
     }
+  };
+
+  /** Re-read the page from disk, dropping the local form/body state. */
+  const reload = async () => {
+    const fresh = await pageQ.refetch();
+    const freshPage = fresh.data;
+    if (!freshPage) return;
+    const next = fieldsFromPage(freshPage);
+    setFields(next);
+    setInitial({ fields: next, body: freshPage.content });
+    setBody(freshPage.content);
+    setServerDiags([]);
+    setSaveError(null);
+    setConflict(null);
+    setBaseline(versionRef.current);
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -139,8 +185,10 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
     }
   };
 
-  if (pageQ.isPending || !fields) return <div className="docs-content single"><div className="doc-editor-wait muted">Загрузка страницы…</div></div>;
-  if (pageQ.isError) return <div className="docs-content single"><div className="doc-editor-wait muted">Не удалось открыть страницу: {pageQ.error.message}</div></div>;
+  if (!fields) {
+    if (pageQ.isError) return <div className="docs-content"><div className="doc-editor-wait muted">Не удалось открыть страницу: {pageQ.error.message}</div></div>;
+    return <div className="docs-content"><div className="doc-editor-wait muted">Загрузка страницы…</div></div>;
+  }
 
   const update = <K extends keyof DocFields>(key: K, value: DocFields[K]) => setFields({ ...fields, [key]: value });
   const lines = lineCount(body);
@@ -171,6 +219,12 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
           </span>
         )}
         <span className="grow" />
+        {externallyChanged && (
+          <span className="doc-chip-state warn" title="Файл на диске изменился после открытия редактора">
+            <StaleIcon size={11} />
+            Изменено на диске
+          </span>
+        )}
         {errors.length > 0 && (
           <span className="doc-chip-state error">
             {errors.length} {plural(errors.length, "поле", "поля", "полей")} с ошибкой
@@ -184,6 +238,45 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
           {save.isPending ? "Сохраняю…" : "Сохранить"}
         </button>
       </header>
+
+      {conflict === 404 && (
+        <div className="doc-banner diag editor">
+          <DiagIcon size={15} />
+          <div className="doc-banner-body">
+            <b>Конфликт сохранения:</b> файла <span className="mono">{path}</span> больше нет на диске — его удалили или переместили после открытия редактора.
+          </div>
+          <button type="button" className="btn" onClick={() => void reload()}>
+            Перечитать
+          </button>
+          <button type="button" className="btn primary" onClick={() => void submit("create")}>
+            Создать заново
+          </button>
+        </div>
+      )}
+
+      {conflict === 409 && (
+        <div className="doc-banner diag editor">
+          <DiagIcon size={15} />
+          <div className="doc-banner-body">
+            <b>Конфликт сохранения:</b> страница <span className="mono">{path}</span> уже существует — её создали параллельно. Откройте текущую версию, чтобы не перезаписать чужие правки.
+          </div>
+          <Link className="btn" to={`/docs?page=${encodeURIComponent(path)}`}>
+            Открыть текущую версию
+          </Link>
+        </div>
+      )}
+
+      {externallyChanged && !conflict && (
+        <div className="doc-banner stale editor">
+          <StaleIcon size={15} />
+          <div className="doc-banner-body">
+            <b>Документация изменилась на диске</b> после того, как редактор открыл эту страницу. Сохранение перезапишет версию с диска.
+          </div>
+          <button type="button" className="btn" onClick={() => void reload()} title="Правки в форме и в тексте будут потеряны">
+            Перечитать страницу
+          </button>
+        </div>
+      )}
 
       {saveError && (
         <div className="doc-banner diag editor">

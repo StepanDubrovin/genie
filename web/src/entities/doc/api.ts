@@ -28,12 +28,32 @@ export const docsKeys = {
   page: (path: string) => ["docs", "page", path] as const,
 };
 
-/** A failed save; keeps the 422 parser diagnostics so the editor can show them. */
+/** A failed read/write; keeps the HTTP status so 404/409 can be told apart from 422. */
+export class DocRequestError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "DocRequestError";
+    this.status = status;
+  }
+}
+
+/** `GET /api/docs/page` with the status preserved (reads cannot use `request()` for that). */
+export async function readDocPage(path: string): Promise<DocReadResult> {
+  const res = await fetch(`/api/docs/page?path=${encodeURIComponent(path)}`);
+  const data = (await res.json().catch(() => ({}))) as DocReadResult & { error?: string };
+  if (!res.ok) throw new DocRequestError(data.error ?? `${res.status} ${res.statusText}`, res.status);
+  return data;
+}
+
+/** A failed save; keeps the HTTP status and the 422 parser diagnostics. */
 export class DocSaveError extends Error {
+  status: number;
   diagnostics: string[];
-  constructor(message: string, diagnostics: string[] = []) {
+  constructor(message: string, status: number, diagnostics: string[] = []) {
     super(message);
     this.name = "DocSaveError";
+    this.status = status;
     this.diagnostics = diagnostics;
   }
 }
@@ -41,7 +61,7 @@ export class DocSaveError extends Error {
 /**
  * `POST /api/docs/page` with the `X-Genie` guard. Uses `fetch` directly (instead
  * of the shared `request`) because a 422 carries the per-field diagnostics in the
- * body — the editor must show them, not just the error message.
+ * body and 404/409 mean a genuine save conflict — the editor must tell them apart.
  */
 export async function saveDoc(v: { path: string; content: string; mode: "create" | "update" | "upsert" }): Promise<DocsSaveResponse> {
   const res = await fetch("/api/docs/page", {
@@ -50,7 +70,7 @@ export async function saveDoc(v: { path: string; content: string; mode: "create"
     body: JSON.stringify(v),
   });
   const data = (await res.json().catch(() => ({}))) as Partial<DocsSaveResponse> & { error?: string; diagnostics?: string[] };
-  if (!res.ok) throw new DocSaveError(data.error ?? `${res.status} ${res.statusText}`, data.diagnostics ?? []);
+  if (!res.ok) throw new DocSaveError(data.error ?? `${res.status} ${res.statusText}`, res.status, data.diagnostics ?? []);
   return data as DocsSaveResponse;
 }
 
@@ -88,11 +108,11 @@ export const useDocSearch = (q: string, enabled = true) =>
 export const useDocPage = (path: string | undefined) =>
   useQuery({
     queryKey: docsKeys.page(path ?? ""),
-    queryFn: () => request<DocReadResult>("GET", `/api/docs/page?path=${encodeURIComponent(path!)}`),
+    queryFn: () => readDocPage(path!),
     enabled: !!path,
   });
 
-export const fetchDocPage = (path: string) => request<DocReadResult>("GET", `/api/docs/page?path=${encodeURIComponent(path)}`);
+export const fetchDocPage = (path: string) => readDocPage(path);
 
 export const useSaveDoc = () => {
   const qc = useQueryClient();

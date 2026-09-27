@@ -3,7 +3,7 @@
 // mirrors `genie docs note`: `inbox/<date>-<slug>.md`, type note, status draft.
 
 import { type KeyboardEvent, useMemo, useState } from "react";
-import { DOC_TYPE_NAME, DOC_TYPES, DocSaveError, saveDoc, serializeDoc, slugify, todayIso, type DocType } from "@/entities/doc";
+import { diagnosticText, DOC_TYPE_NAME, DOC_TYPES, DocSaveError, saveDoc, serializeDoc, slugify, todayIso, type DocType } from "@/entities/doc";
 import { Icon } from "@/shared/ui";
 
 export function NewDocDialog({
@@ -59,7 +59,13 @@ export function NewDocDialog({
       await saveDoc({ path: docPath, content, mode: "create" });
       onCreated(docPath);
     } catch (cause) {
-      setError(cause instanceof DocSaveError ? `${cause.message}${cause.diagnostics.length ? `: ${cause.diagnostics.join("; ")}` : ""}` : cause instanceof Error ? cause.message : String(cause));
+      if (cause instanceof DocSaveError) {
+        if (cause.status === 409) setError(`Страница docs/${docPath} уже существует — измените название или папку.`);
+        else if (cause.status === 422) setError(`Frontmatter не принят сервером: ${cause.diagnostics.map(diagnosticText).join("; ")}`);
+        else setError(cause.message);
+      } else {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
       setBusy(false);
     }
   };
