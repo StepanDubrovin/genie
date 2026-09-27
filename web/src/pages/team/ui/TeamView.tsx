@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router";
 import { Avatar, displayName, memberLabel } from "@/entities/member";
 import { RemoveMemberButton, TeamActions } from "@/features/manage-team";
 import { StageBars, STAGES, stageOf, STATUS_NAME } from "@/entities/task";
-import { type Mail, type TeamDetail, useSendMail, useTeam } from "@/entities/team";
+import { type Mail, MessageText, type TeamDetail, useSendMail, useTeam } from "@/entities/team";
 import { clock, dayLabel, timeAgo, useTick } from "@/shared/lib";
 import { Icon, useToast } from "@/shared/ui";
 
@@ -176,7 +176,9 @@ export function TeamView() {
                             </span>
                           </span>
                         )}
-                        <div className="bubble">{m.text}</div>
+                        <div className="bubble">
+                          <MessageText text={m.text} />
+                        </div>
                         {!tailless && <span className="receipt">{m.delivered ? "получено" : "отправлено"}</span>}
                       </div>
                     </div>
@@ -193,7 +195,9 @@ export function TeamView() {
                             </span>
                           </span>
                         )}
-                        <div className="bubble">{m.text}</div>
+                        <div className="bubble">
+                          <MessageText text={m.text} />
+                        </div>
                       </div>
                     </div>
                   )}

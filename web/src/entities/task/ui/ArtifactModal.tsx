@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { bytes } from "@/shared/lib";
-import { Icon, Markdown, Modal } from "@/shared/ui";
+import { Icon, ImagePreview, Markdown, Modal } from "@/shared/ui";
 import { fetchArtifact } from "../api.ts";
 
 export interface OpenArtifact {
@@ -10,6 +10,8 @@ export interface OpenArtifact {
   kind: string;
   size: number;
   text?: string;
+  /** Set by the server when the artifact's own bytes are a supported raster image. */
+  mime?: string;
 }
 
 /** Loads an artifact on demand and shows it in a modal. */
@@ -36,7 +38,13 @@ export function ArtifactModal({ artifact, onClose }: { artifact: OpenArtifact; o
         </button>
       </div>
       <div className="mb">
-        {artifact.text === undefined ? (
+        {artifact.mime ? (
+          <ImagePreview
+            src={`/api/tasks/${encodeURIComponent(artifact.task)}/artifacts/${artifact.n}?raw=1`}
+            variant="full"
+            alt={artifact.name}
+          />
+        ) : artifact.text === undefined ? (
           <span className="muted">Двоичный файл — скачайте его.</span>
         ) : /\.(md|markdown)$/i.test(artifact.name) ? (
           <Markdown text={artifact.text} />

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Avatars } from "@/entities/member";
 import {
+  ArtifactThumb,
   EpicIcon,
   EpicProgress,
   historyText,
@@ -118,7 +119,7 @@ export function EpicPage({ onNew }: { onNew: (preset?: NewTaskPreset) => void })
             <div className="epic-artifacts">
               {epic.artifacts.map((a) => (
                 <button type="button" key={a.id} className="artifact tall" onClick={() => viewer.show(epic.id, a.id)}>
-                  <Icon.file />
+                  <ArtifactThumb task={epic.id} artifact={a} />
                   <span className="txt">
                     <span className="nm">{a.name}</span>
                     <span className="who">

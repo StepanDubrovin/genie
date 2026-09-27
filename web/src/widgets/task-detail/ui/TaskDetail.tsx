@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { Avatar, Avatars } from "@/entities/member";
 import {
+  ArtifactThumb,
   EpicIcon,
   EpicProgress,
   historyText,
@@ -332,7 +333,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
                   className="artifact"
                   onClick={() => viewer.show(t.id, a.id)}
                 >
-                  <Icon.file />
+                  <ArtifactThumb task={t.id} artifact={a} />
                   <span className="nm">{a.name}</span>
                   <span className="who">
                     {a.kind} · {a.author}
