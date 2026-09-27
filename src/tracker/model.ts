@@ -17,6 +17,9 @@ export type Status = (typeof STATUSES)[number];
 
 export const CLOSED: Status[] = ["done", "cancelled"];
 
+/** Statuses that mean a team is actually working on a task (they start its epic). */
+export const WORKING: Status[] = ["in_progress", "review", "changes_requested", "approved"];
+
 export const MEMBER_ROLES = ["analyst", "executor", "reviewer", "tester", "documenter"] as const;
 export type MemberRole = (typeof MEMBER_ROLES)[number];
 
@@ -133,7 +136,10 @@ export interface TaskSummary {
   deps: string[];
   openDeps: string[];
   children: number;
+  /** Children that are done or cancelled (epic progress). */
+  childrenClosed: number;
   comments: number;
+  artifacts: number;
   created: string;
   updated: string;
 }

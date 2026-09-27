@@ -19,7 +19,7 @@ export function resolveLaunchMode(requested: string | undefined, cfg: GenieConfi
 }
 
 /** The first message every member receives: who they are, the team, and what to do first. */
-export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team["worktree"], all: Named[], s: Named, extra?: string, joining = false): string {
+export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team["worktree"], all: Named[], s: Named, extra?: string, joining = false, epic?: Task): string {
   const hasAnalyst = all.some((x) => x.role === "analyst");
   const tester = all.find((x) => x.role === "tester");
   const notify = `message the reviewer${tester ? ` and the tester (${tester.name})` : ""}`;
@@ -43,6 +43,9 @@ export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team[
     `${joining ? "You are joining team" : "Welcome to team"} ${teamId}, ${displayName(s.name)}! You are the ${s.role}; teammates address you as "${s.name}". Task: ${task.id} — ${task.title} (status ${task.status}). Read it with genie_task {"action":"show"}.`,
     worktree ? `Working directory: ${cwd} (branch ${worktree.branch}, base ${String(worktree.base).slice(0, 10)}).` : `Working directory: ${cwd}.`,
     `Team: ${all.map((x) => `${memberLabel(x.name, x.role, "en")} (\`${x.name}\`)`).join(", ")}, plus orchestrator.`,
+    epic
+      ? `This task is part of epic ${epic.id} — ${epic.title}. Its goal and ${epic.artifacts.length ? `${epic.artifacts.length} shared artifact(s)` : "shared artifacts"} are shown with genie_task show; read them (artifact_read with id ${epic.id}) before you start, and attach material useful for the whole epic to the epic itself.`
+      : "",
     first[s.role],
     extra ? `\nFrom ${joining ? "whoever added you" : "the orchestrator"}: ${extra}` : "",
   ].join("\n");
@@ -96,7 +99,8 @@ export async function addMembers(
   const updated = bus.get(team.id);
   const task = tracker.get(team.task);
   const all: Named[] = updated.members.map((m) => ({ name: m.name, role: m.role, model: m.model }));
-  for (const s of specs) bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(team.id, task, team.cwd, team.worktree, all, s, opts.note, true) });
+  const epic = tracker.epicContext(task.id).epic;
+  for (const s of specs) bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(team.id, task, team.cwd, team.worktree, all, s, opts.note, true, epic) });
   for (const m of team.members) {
     bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: m.name, kind: "system", text: `New teammate(s): ${specs.map((s) => memberLabel(s.name, s.role, "en")).join(", ")} (added by ${opts.by}).` });
   }

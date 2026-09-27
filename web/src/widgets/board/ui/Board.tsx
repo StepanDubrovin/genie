@@ -14,7 +14,7 @@ import {
 import { useState } from "react";
 import { Link } from "react-router";
 import { Avatar, Avatars, memberLabel } from "@/entities/member";
-import { COLUMNS, type Column, Labels, PriorityIcon, type Status, STATUS_NAME, StatusIcon, type TaskSummary, useMoveTask } from "@/entities/task";
+import { COLUMNS, type Column, EpicChip, EpicIcon, Labels, PriorityIcon, type Status, STATUS_NAME, StatusIcon, type TaskSummary, useMoveTask } from "@/entities/task";
 import type { Team } from "@/entities/team";
 import { Icon, Modal, useToast } from "@/shared/ui";
 
@@ -35,10 +35,19 @@ function CardBody({ t, team }: { t: TaskSummary; team?: Team }) {
           </span>
         )}
       </span>
-      <span className="t">{t.title}</span>
+      <span className="t">
+        {t.type === "epic" && (
+          <span className="epic-mark">
+            <EpicIcon size={12} />
+            эпик
+          </span>
+        )}
+        {t.title}
+      </span>
       {t.needsOwner && <span className="q">{t.needsOwner.question}</span>}
       {t.openDeps.length > 0 && <span className="muted" style={{ fontSize: 12 }}>ждёт {t.openDeps.join(", ")}</span>}
       <span className="foot">
+        <EpicChip id={t.parent} text />
         <Labels labels={t.labels} />
         {t.acceptanceTotal > 0 && (
           <span className="muted" style={{ fontSize: 11 }}>

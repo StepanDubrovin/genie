@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import { ORCHESTRATOR, TeamBus } from "../team/bus.ts";
 import { loadConfig, type MemberSpec, PACKAGE_ROOT } from "../team/config.ts";
 import { addMembers, deleteTeam, reapClosedTeams, removeMember, stopTeam } from "../team/ops.ts";
-import { type Actor, isMemberRole, MEMBER_ROLES, STATUSES, type Status, TASK_TYPES, isStatus } from "../tracker/model.ts";
+import { type Actor, isMemberRole, MEMBER_ROLES, STATUSES, type Status, TASK_TYPES, type TaskType, isStatus, ARTIFACT_KINDS, type ArtifactKind } from "../tracker/model.ts";
 import { GenieError, type Tracker } from "../tracker/store.ts";
 
 const execFileAsync = promisify(execFile);
@@ -176,7 +176,19 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
       const id = parts[1];
       if (!id && method === "GET") {
         const status = (url.searchParams.get("status") ?? "").split(",").filter(isStatus) as Status[];
-        return send(res, 200, tracker.list({ status: status.length ? status : undefined, includeClosed: url.searchParams.get("closed") === "1", search: url.searchParams.get("q") ?? undefined, parent: url.searchParams.get("parent") ?? undefined }));
+        const type = (url.searchParams.get("type") ?? "").split(",").filter((t) => TASK_TYPES.includes(t as never)) as TaskType[];
+        return send(
+          res,
+          200,
+          tracker.list({
+            status: status.length ? status : undefined,
+            type: type.length ? type : undefined,
+            excludeEpics: url.searchParams.get("epics") === "0",
+            includeClosed: url.searchParams.get("closed") === "1",
+            search: url.searchParams.get("q") ?? undefined,
+            parent: url.searchParams.get("parent") ?? undefined,
+          }),
+        );
       }
       if (!id && method === "POST") {
         const task = tracker.create(me!, {
@@ -186,6 +198,7 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
           priority: body.priority !== undefined ? Number(body.priority) : undefined,
           labels: Array.isArray(body.labels) ? body.labels.map(String).filter(Boolean) : undefined,
           type: TASK_TYPES.includes(body.type as never) ? (body.type as never) : undefined,
+          parent: body.parent ? String(body.parent) : undefined,
           status: "inbox",
         });
         changed();
@@ -200,6 +213,8 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
           labels: Array.isArray(body.labels) ? body.labels.map(String) : undefined,
           mergeStrategy: body.mergeStrategy !== undefined ? String(body.mergeStrategy) : undefined,
           addAcceptance: Array.isArray(body.addAcceptance) ? body.addAcceptance.map(String) : undefined,
+          plan: body.plan !== undefined ? String(body.plan) : undefined,
+          parent: body.parent === undefined ? undefined : body.parent ? String(body.parent) : null,
         });
         changed();
         return send(res, 200, task);
@@ -221,6 +236,17 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
         const task = tracker.check(me!, id, Number(parts[3]), body.done !== false);
         changed();
         return send(res, 200, task);
+      }
+      if (id && parts[2] === "artifacts" && !parts[3] && method === "POST") {
+        const kind = ARTIFACT_KINDS.includes(body.kind as never) ? (body.kind as ArtifactKind) : "doc";
+        const task = tracker.addArtifact(me!, id, {
+          kind,
+          name: String(body.name ?? "").trim() || undefined,
+          content: String(body.text ?? ""),
+          note: body.note ? String(body.note) : undefined,
+        });
+        changed();
+        return send(res, 201, task);
       }
       if (id && parts[2] === "artifacts" && parts[3] && method === "GET") {
         const a = tracker.readArtifact(id, Number(parts[3]));

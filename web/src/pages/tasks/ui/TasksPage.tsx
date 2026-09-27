@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router";
-import { isView, type ViewId, VIEWS, useTasks } from "@/entities/task";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
+import { EpicIcon, inTaskViews, isView, type ViewId, VIEWS, useEpicMap, useTasks } from "@/entities/task";
 import { type Team, useTeamMap } from "@/entities/team";
+import type { NewTaskPreset } from "@/features/create-task";
 import { isTyping, type Layout, plural, readPref, writePref } from "@/shared/lib";
 import { Icon } from "@/shared/ui";
 import { Board } from "@/widgets/board";
 import { TaskList } from "@/widgets/task-list";
 
-export function TasksPage({ onNew, searchRef }: { onNew: () => void; searchRef: React.RefObject<HTMLInputElement | null> }) {
+export function TasksPage({ onNew, searchRef }: { onNew: (preset?: NewTaskPreset) => void; searchRef: React.RefObject<HTMLInputElement | null> }) {
   const params = useParams();
   const view: ViewId = isView(params.view) ? params.view : "active";
   const [sp, setSp] = useSearchParams();
@@ -19,9 +20,18 @@ export function TasksPage({ onNew, searchRef }: { onNew: () => void; searchRef: 
   const tasksQ = useTasks();
   const teams = useTeamMap();
   const selected = sp.get("task") ?? undefined;
+  const epicFilter = sp.get("epic") ?? undefined;
+  const epic = useEpicMap().get(epicFilter ?? "");
+  const newTask = () => onNew(epicFilter ? { epic: epicFilter } : undefined);
+  const clearEpic = () => {
+    const next = new URLSearchParams(sp);
+    next.delete("epic");
+    setSp(next);
+  };
 
   const q = query.trim().toLowerCase();
-  const matches = (tasksQ.data ?? []).filter((t) => !q || t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q) || t.labels.some((l) => l.includes(q)));
+  const visible = (tasksQ.data ?? []).filter((t) => (epicFilter ? t.parent === epicFilter : inTaskViews(t)));
+  const matches = visible.filter((t) => !q || t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q) || t.labels.some((l) => l.includes(q)));
   const inView = matches.filter((t) => VIEWS[view].statuses.includes(t.status));
   const ordered = useMemo(() => inView, [inView]);
 
@@ -65,6 +75,15 @@ export function TasksPage({ onNew, searchRef }: { onNew: () => void; searchRef: 
     <main className="main">
       <header className="topbar">
         <h1>{layout === "board" ? "Доска" : VIEWS[view].name}</h1>
+        {epicFilter && (
+          <span className="filter-chip" title={epic ? `Эпик ${epic.id}: ${epic.title}` : undefined}>
+            <EpicIcon size={11} />
+            <Link to={`/epic/${encodeURIComponent(epicFilter)}`}>Эпик {epicFilter}</Link>
+            <button type="button" onClick={clearEpic} aria-label="Снять фильтр по эпику">
+              <Icon.close size={10} />
+            </button>
+          </span>
+        )}
         <span className="muted d-only" style={{ fontSize: 12 }}>
           {(layout === "board" ? matches : inView).length} {plural((layout === "board" ? matches : inView).length, "задача", "задачи", "задач")}
         </span>
@@ -97,7 +116,7 @@ export function TasksPage({ onNew, searchRef }: { onNew: () => void; searchRef: 
             {showDone ? "Скрыть завершённые" : "Показать завершённые"}
           </button>
         )}
-        <button type="button" className="btn primary" onClick={onNew}>
+        <button type="button" className="btn primary" onClick={newTask}>
           <Icon.plus size={13} />
           <span className="d-only">Новая задача</span>
         </button>
@@ -106,7 +125,7 @@ export function TasksPage({ onNew, searchRef }: { onNew: () => void; searchRef: 
       {layout === "list" && (
         <div className="m-only m-nav" role="group" aria-label="Разделы">
           {(Object.keys(VIEWS) as ViewId[]).map((v) => {
-            const n = (tasksQ.data ?? []).filter((t) => VIEWS[v].statuses.includes(t.status)).length;
+            const n = visible.filter((t) => VIEWS[v].statuses.includes(t.status)).length;
             const cls = v === view ? "on" : v === "decisions" && n ? "amber" : "";
             return (
               <button key={v} type="button" className={cls} onClick={() => navigate({ pathname: `/${v}`, search: sp.toString() })}>
@@ -114,6 +133,9 @@ export function TasksPage({ onNew, searchRef }: { onNew: () => void; searchRef: 
               </button>
             );
           })}
+          <button type="button" onClick={() => navigate("/epics")}>
+            Эпики
+          </button>
           {[...teams.values()]
             .filter((t) => t.state === "active")
             .map((t) => (

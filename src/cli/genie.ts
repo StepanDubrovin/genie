@@ -18,13 +18,17 @@ const HELP = `genie — local task tracker for pi orchestrator + focus teams
 Tasks
   genie init [--prefix G]                   create .genie/ in the main worktree (or cwd outside git)
   genie new <title> [-d text] [-a criterion]... [--type task|bug|spike|epic]
-                    [-p 0-4] [--parent ID] [--dep ID]... [--label L]...
+                    [-p 0-4] [--epic ID] [--parent ID] [--dep ID]... [--label L]...
                                             (as the owner the task lands in the inbox; --draft to skip it)
-  genie ls [--all] [--status s1,s2] [--team T] [--parent ID] [--label L]
+  genie epic <title> [-d goal] [-a success criterion]... [--plan roadmap]
+                                            create an epic: a milestone with a goal, tasks and shared artifacts
+  genie epics [--all]                       epics with progress
+  genie ls [--all] [--status s1,s2] [--team T] [--epic ID] [--label L] [--no-epics]
   genie ready                               ready queue: ready, unblocked, deps done, no team
   genie show <ID> [--history]
   genie edit <ID> [--title t] [-d text] [--plan text] [--notes text] [-p N]
                   [-a criterion]... [--rm-ac N]... [--dep ID]... [--rm-dep ID]... [--label L]...
+                  [--epic ID | --no-epic]      move the task into an epic or out of it
   genie status <ID> <status> [-m note] [--force]
                                             statuses: ${STATUSES.join(", ")}
   genie accept <ID> [-m summary]            shortcut for: status <ID> done
@@ -34,7 +38,7 @@ Tasks
   genie artifact-show <ID> <N> [--out FILE] print (or save) artifact N of a task
   genie split <ID> <child title>...         slice a task into atomic children (parent becomes an epic)
   genie block <ID> <reason> | genie unblock <ID>
-  genie board                               tasks grouped by status + active teams
+  genie board                               epics, tasks grouped by status, active teams
 
 Web
   genie web [--port 7420] [--tailscale] [--open]
@@ -97,6 +101,9 @@ async function main(argv: string[]): Promise<void> {
       type: { type: "string" },
       priority: { type: "string", short: "p" },
       parent: { type: "string" },
+      epic: { type: "string" },
+      "no-epic": { type: "boolean" },
+      "no-epics": { type: "boolean" },
       dep: { type: "string", multiple: true },
       "rm-dep": { type: "string", multiple: true },
       label: { type: "string", multiple: true },
@@ -150,7 +157,7 @@ async function main(argv: string[]): Promise<void> {
         description: values.description,
         acceptance: values.acceptance,
         priority: values.priority !== undefined ? Number(values.priority) : undefined,
-        parent: values.parent,
+        parent: values.epic ?? values.parent,
         deps: asList(values.dep),
         labels: asList(values.label),
         status: me.role === "human" && !values.draft ? "inbox" : "draft",
@@ -158,11 +165,38 @@ async function main(argv: string[]): Promise<void> {
       out(json, task, () => `created ${task.id}: ${task.title} (${task.status})`);
       return;
     }
+    case "epic": {
+      need(1, "epic <title>");
+      const epic = tracker.create(me, {
+        title: args.join(" "),
+        type: "epic",
+        description: values.description,
+        acceptance: values.acceptance,
+        priority: values.priority !== undefined ? Number(values.priority) : undefined,
+        labels: asList(values.label),
+        status: me.role === "human" && !values.draft ? "inbox" : "draft",
+      });
+      if (values.plan) tracker.update(me, epic.id, { plan: values.plan });
+      out(json, tracker.get(epic.id), () => `created epic ${epic.id}: ${epic.title} (${epic.status})`);
+      return;
+    }
+    case "epics": {
+      const epics = tracker.list({ type: ["epic"], includeClosed: values.all });
+      out(json, epics, () => (epics.length ? epics.map(oneLine).join("\n") : "no epics"));
+      return;
+    }
     case "ls":
     case "list": {
       const status = asList(values.status);
       for (const s of status) if (!isStatus(s)) throw new GenieError(`unknown status ${s}`);
-      const tasks = tracker.list({ status: status as Status[], team: values.team, parent: values.parent, label: values.label?.[0], includeClosed: values.all });
+      const tasks = tracker.list({
+        status: status as Status[],
+        team: values.team,
+        parent: values.epic ?? values.parent,
+        label: values.label?.[0],
+        includeClosed: values.all,
+        excludeEpics: values["no-epics"],
+      });
       out(json, tasks, () => (tasks.length ? tasks.map(oneLine).join("\n") : "no tasks"));
       return;
     }
@@ -174,7 +208,7 @@ async function main(argv: string[]): Promise<void> {
     case "show": {
       need(1, "show <ID>");
       const task = tracker.get(args[0]);
-      out(json, task, () => renderTask(task, { history: values.history }));
+      out(json, task, () => renderTask(task, { history: values.history, ...tracker.epicContext(task.id) }));
       return;
     }
     case "edit": {
@@ -192,6 +226,7 @@ async function main(argv: string[]): Promise<void> {
         removeAcceptance: values["rm-ac"]?.map(Number),
         addDeps: asList(values.dep),
         removeDeps: asList(values["rm-dep"]),
+        parent: values["no-epic"] ? null : values.epic,
       });
       out(json, task, () => `updated ${task.id}`);
       return;
@@ -260,10 +295,16 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "board": {
-      const tasks = tracker.list({ includeClosed: values.all });
+      const tasks = tracker.list({ includeClosed: values.all, excludeEpics: true });
+      const epics = tracker.list({ type: ["epic"], includeClosed: values.all });
       const teams = bus.list();
-      out(json, { tasks, teams }, () => {
+      out(json, { epics, tasks, teams }, () => {
         const lines: string[] = [];
+        if (epics.length) {
+          lines.push(`◆ EPICS (${epics.length})`);
+          for (const e of epics) lines.push(`   ${oneLine(e)}`);
+          lines.push("");
+        }
         for (const s of STATUSES) {
           const group = tasks.filter((t) => t.status === s);
           if (!group.length) continue;

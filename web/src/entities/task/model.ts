@@ -66,3 +66,80 @@ export function stageOf(status: Status, previous?: Status): number {
   const map: Partial<Record<Status, number>> = { refining: 1, ready: 2, in_progress: 3, changes_requested: 3, review: 4, approved: 5, done: 6 };
   return map[s] ?? 0;
 }
+
+/**
+ * Epics have their own pages. In task views they only show up while someone has to
+ * act on them as a whole: the orchestrator (inbox) or the owner (needs owner).
+ */
+export function inTaskViews(t: TaskSummary): boolean {
+  return t.type !== "epic" || t.status === "inbox" || t.status === "needs_owner";
+}
+
+/** Where a task of an epic stands, for the epic's progress bar. */
+export type Progress = "closed" | "owner" | "review" | "working" | "ready" | "early";
+
+export const PROGRESS: { id: Progress; name: string; color: string }[] = [
+  { id: "closed", name: "Закрыто", color: "#7c84f0" },
+  { id: "owner", name: "Ждёт вашего решения", color: "#f0a04b" },
+  { id: "review", name: "На ревью", color: "#4cb782" },
+  { id: "working", name: "В работе", color: "#f2c94c" },
+  { id: "ready", name: "Готово к работе", color: "#4a4d55" },
+  { id: "early", name: "Черновик", color: "#2e3138" },
+];
+
+export function progressOf(status: Status): Progress {
+  if (status === "done" || status === "cancelled") return "closed";
+  if (status === "needs_owner") return "owner";
+  if (status === "review" || status === "approved") return "review";
+  if (status === "in_progress" || status === "changes_requested") return "working";
+  if (status === "ready") return "ready";
+  return "early";
+}
+
+const FIELD_RU: Record<string, string> = {
+  title: "название",
+  type: "тип",
+  description: "описание",
+  priority: "приоритет",
+  "merge strategy": "интеграцию",
+  plan: "план",
+  notes: "заметки",
+  labels: "метки",
+  assignees: "исполнителей",
+  acceptance: "критерии",
+  dependencies: "зависимости",
+};
+
+/** History entry in words for the UI; the tracker records it in English for the agents. */
+export function historyText(h: Task["history"][number], epic = false): string {
+  const note = h.note ? ` — ${h.note.replace(/^work started on (.+)$/, "команда взяла $1").replace(/^split into (.+)$/, "разбита на $1")}` : "";
+  if (h.event === "status" && h.from && h.to) return `${STATUS_NAME[h.from as Status] ?? h.from} → ${STATUS_NAME[h.to as Status] ?? h.to}${note}`;
+  if (h.event === "created") return epic ? "создал эпик" : "создал задачу";
+  const rules: [RegExp, (...m: string[]) => string][] = [
+    [/^child (\S+) added$/, (id) => `добавил задачу ${id}`],
+    [/^child (\S+) moved in$/, (id) => `перенёс сюда ${id}`],
+    [/^child (\S+) moved out$/, (id) => `убрал ${id} из эпика`],
+    [/^artifact #\d+ (.+) \((\S+)\) added$/, (name, kind) => `добавил артефакт ${name} (${kind})`],
+    [/^acceptance #(\d+) checked$/, (n) => `отметил критерий #${n}`],
+    [/^acceptance #(\d+) unchecked$/, (n) => `снял отметку с критерия #${n}`],
+    [/^(\S+) split into (.+)$/, (id, ids) => `разбил ${id} на ${ids}`],
+    [/^split into (.+)$/, (ids) => `разбил на ${ids}`],
+    [/^blocked: (.+)$/, (r) => `заблокировал: ${r}`],
+    [/^unblocked$/, () => "снял блокировку"],
+    [/^assigned to team (.+)$/, (t) => `назначил команду ${t}`],
+    [/^team released$/, () => "освободил задачу от команды"],
+    [
+      /^updated (.+)$/,
+      (fields) =>
+        `изменил ${fields
+          .split(", ")
+          .map((f) => (f.startsWith("epic → ") ? `эпик на ${f.slice(7)}` : f === "epic removed" ? "эпик (убран)" : (FIELD_RU[f] ?? f)))
+          .join(", ")}`,
+    ],
+  ];
+  for (const [re, fn] of rules) {
+    const m = h.event.match(re);
+    if (m) return fn(...m.slice(1)) + note;
+  }
+  return h.event + note;
+}

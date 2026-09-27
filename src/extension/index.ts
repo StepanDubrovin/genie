@@ -396,6 +396,12 @@ export default function genie(pi: ExtensionAPI) {
         "",
         "## Workspace",
         `Tracker: ${tracker.dir}. Inbox: ${counts.inbox ?? 0}. Waiting for the owner: ${counts.needs_owner ?? 0}. Ready queue: ${tracker.readyQueue().map((t) => t.id).join(", ") || "empty"}.`,
+        `Open epics: ${
+          tracker
+            .list({ type: ["epic"] })
+            .map((e) => `${e.id} "${e.title}" (${e.status}, ${e.childrenClosed}/${e.children} tasks closed)`)
+            .join("; ") || "none"
+        }.`,
         `Workflow statuses: ${STATUSES.join(", ")}.`,
         `Limits: at most ${c.limits.maxMembersPerTeam} members per team and ${c.limits.maxActiveTeams} active teams.`,
         `Default models per role: ${models}.`,
@@ -416,6 +422,12 @@ export default function genie(pi: ExtensionAPI) {
       // team deleted
     }
     const me = team?.members.find((x) => x.name === m.member);
+    let epic: Task | undefined;
+    try {
+      epic = tracker.epicContext(m.task).epic;
+    } catch {
+      // task deleted
+    }
     return [
       role.prompt,
       "",
@@ -429,7 +441,11 @@ export default function genie(pi: ExtensionAPI) {
       me?.instructions ? `\nSpecific instructions for you: ${me.instructions}` : "",
       role.mcp.includes("*") ? "" : `\nMCP servers you may use: ${role.mcp.join(", ") || "none"}.`,
       "",
-      "The tracker is only reachable through genie_task; do not look for its files. Keep the task up to date: comment progress and decisions, attach artifacts, move the status when your step is done. You may only modify your own task and its sub-tasks. You cannot start other agents.",
+      epic
+        ? `\nYour task is part of epic ${epic.id} — ${epic.title}. \`genie_task show\` of your task includes the epic's goal and lists its shared artifacts (${epic.artifacts.length}); read the relevant ones with artifact_read and id ${epic.id}. Material useful for the whole epic goes to the epic (comment / artifact with id ${epic.id}), everything else stays on your task.`
+        : "",
+      "",
+      "The tracker is only reachable through genie_task; do not look for its files. Keep the task up to date: comment progress and decisions, attach artifacts, move the status when your step is done. You may only modify your own task and its sub-tasks (and comment on / attach artifacts to its epic). You cannot start other agents.",
     ].join("\n");
   }
 
@@ -575,11 +591,16 @@ export default function genie(pi: ExtensionAPI) {
 
   // ---------------------------------------------------------------- genie_task
 
-  function assertScope(id: string): void {
+  /**
+   * Members may modify their own task and its sub-tasks. With `allowEpic`, they may
+   * also comment on / attach shared artifacts to the epic their task belongs to.
+   */
+  function assertScope(id: string, opts: { allowEpic?: boolean } = {}): void {
     if (mode.kind !== "member" || !tracker) return;
     const own = tracker.normalizeId(mode.task);
     let cur: Task | undefined = tracker.get(id);
     const target = cur.id;
+    if (opts.allowEpic && cur.type === "epic" && tracker.get(own).parent === cur.id) return;
     while (cur) {
       if (cur.id === own) return;
       cur = cur.parent ? tracker.get(cur.parent) : undefined;
@@ -591,10 +612,10 @@ export default function genie(pi: ExtensionAPI) {
     name: "genie_task",
     label: "Genie task",
     description:
-      "Local task tracker shared by the orchestrator and all team members. Actions: list, ready (ready queue), show, create, update, status, comment, check/uncheck (acceptance criterion), artifact (attach), artifact_read, split, block, unblock. Members may only modify their own task and its sub-tasks; only the orchestrator can move tasks to draft/ready/needs_owner/done/cancelled. Use status needs_owner (with note = the question) when only the owner can decide.",
+      "Local task tracker shared by the orchestrator and all team members. Actions: list, ready (ready queue), epics (epics with progress), show, create, update, status, comment, check/uncheck (acceptance criterion), artifact (attach), artifact_read, split, block, unblock. Epics (type epic) group tasks of a milestone: goal, success criteria, roadmap (plan) and shared artifacts; create a task in an epic with parent, move a task in or out with update + parent (an empty parent removes it); show of a task includes its epic's goal and shared artifacts. Members may only modify their own task and its sub-tasks (plus comments and artifacts on its epic); only the orchestrator can move tasks to draft/ready/needs_owner/done/cancelled. Use status needs_owner (with note = the question) when only the owner can decide.",
     promptSnippet: "Read and update tasks in the local genie tracker",
     parameters: Type.Object({
-      action: StringEnum(["list", "ready", "show", "create", "update", "status", "comment", "check", "uncheck", "artifact", "artifact_read", "split", "block", "unblock"] as const),
+      action: StringEnum(["list", "ready", "epics", "show", "create", "update", "status", "comment", "check", "uncheck", "artifact", "artifact_read", "split", "block", "unblock"] as const),
       id: Type.Optional(Type.String({ description: "Task id, e.g. G-7 (a bare number is accepted). Members default to their own task." })),
       title: Type.Optional(Type.String()),
       description: Type.Optional(Type.String({ description: "Markdown description (create/update)" })),
@@ -608,7 +629,7 @@ export default function genie(pi: ExtensionAPI) {
       labels: Type.Optional(Type.Array(Type.String())),
       deps: Type.Optional(Type.Array(Type.String(), { description: "Dependency task ids to add (create/update)" })),
       removeDeps: Type.Optional(Type.Array(Type.String())),
-      parent: Type.Optional(Type.String({ description: "Parent task id (create)" })),
+      parent: Type.Optional(Type.String({ description: "Epic (or parent task) id: create a task in it, or move a task into it with update (\"\" removes it from its epic)" })),
       status: Type.Optional(StringEnum(STATUSES, { description: "Target status (status action)" })),
       note: Type.Optional(Type.String({ description: "Reason / summary recorded with a status change or artifact; the question for needs_owner" })),
       force: Type.Optional(Type.Boolean({ description: "Orchestrator only: bypass Definition of Ready/Done checks" })),
@@ -662,7 +683,11 @@ export default function genie(pi: ExtensionAPI) {
         }
         case "show": {
           const t = tracker.get(requireId());
-          return text(renderTask(t), { id: t.id });
+          return text(renderTask(t, tracker.epicContext(t.id)), { id: t.id });
+        }
+        case "epics": {
+          const epics = tracker.list({ type: ["epic"], includeClosed: p.includeClosed });
+          return text(epics.length ? epics.map(oneLine).join("\n") : "no epics", { ids: epics.map((t) => t.id) });
         }
         case "create": {
           if (p.parent) assertScope(p.parent);
@@ -693,6 +718,7 @@ export default function genie(pi: ExtensionAPI) {
             removeAcceptance: p.removeAcceptance,
             addDeps: p.deps,
             removeDeps: p.removeDeps,
+            parent: p.parent === undefined ? undefined : p.parent === "" ? null : p.parent,
           });
           return text(`updated ${t.id}`, { id: t.id });
         }
@@ -704,7 +730,9 @@ export default function genie(pi: ExtensionAPI) {
           return text(`${t.id} → ${t.status}`, { id: t.id, status: t.status });
         }
         case "comment": {
-          const t = tracker.comment(me, write(), p.text ?? "", (p.kind ?? "note") as never);
+          const cid = requireId();
+          assertScope(cid, { allowEpic: true });
+          const t = tracker.comment(me, cid, p.text ?? "", (p.kind ?? "note") as never);
           return text(`commented on ${t.id}`, { id: t.id });
         }
         case "check":
@@ -714,7 +742,9 @@ export default function genie(pi: ExtensionAPI) {
           return text(t.acceptance.map((a) => `[${a.done ? "x" : " "}] #${a.id} ${a.text}`).join("\n"), { id: t.id });
         }
         case "artifact": {
-          const t = tracker.addArtifact(me, write(), { kind: (p.kind ?? "other") as never, content: p.content, file: p.file, name: p.name, note: p.note });
+          const aid = requireId();
+          assertScope(aid, { allowEpic: true });
+          const t = tracker.addArtifact(me, aid, { kind: (p.kind ?? "other") as never, content: p.content, file: p.file, name: p.name, note: p.note });
           const a = t.artifacts.at(-1)!;
           return text(`attached artifact #${a.id} ${a.name} (${a.kind}) to ${t.id}`, { id: t.id, artifact: a.id });
         }
@@ -867,7 +897,8 @@ export default function genie(pi: ExtensionAPI) {
       });
       tracker.assignTeam(actor(), task.id, teamId, worktree ? { path: worktree.path, branch: worktree.branch } : undefined, specs.map((s) => `${s.name}@${teamId}`));
       const fresh = tracker.get(task.id);
-      for (const s of specs) bus.send({ team: teamId, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(teamId, fresh, cwd, worktree, specs, s, p.kickoff) });
+      const epic = tracker.epicContext(fresh.id).epic;
+      for (const s of specs) bus.send({ team: teamId, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(teamId, fresh, cwd, worktree, specs, s, p.kickoff, false, epic) });
 
       const requested = p.mode ?? c.spawn.mode ?? "auto";
       const launchMode = requested === "auto" ? (process.env.HERDR_ENV === "1" ? "herdr" : "headless") : requested;
@@ -1152,11 +1183,12 @@ export default function genie(pi: ExtensionAPI) {
           }
           default: {
             const { tracker, bus } = need();
-            const tasks = tracker.list();
-            const lines = STATUSES.flatMap((s) => {
+            const tasks = tracker.list({ excludeEpics: true });
+            const epics = tracker.list({ type: ["epic"] });
+            const lines = (epics.length ? [`EPICS (${epics.length})`, ...epics.map((e) => `  ${oneLine(e)}`), ""] : []).concat(STATUSES.flatMap((s) => {
               const g = tasks.filter((t) => t.status === s);
               return g.length ? [`${s.toUpperCase()} (${g.length})`, ...g.map((t) => `  ${oneLine(t)}`)] : [];
-            });
+            }));
             const teams = bus.list().map((t) => describeTeam(t, false));
             return say([...lines, ...(teams.length ? ["", ...teams] : [])].join("\n") || "board is empty");
           }

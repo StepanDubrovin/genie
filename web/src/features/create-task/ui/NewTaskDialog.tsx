@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMeta } from "@/entities/project";
-import { PRIORITY_NAME, PriorityIcon, StatusIcon, useCreateTask } from "@/entities/task";
+import { EpicIcon, PRIORITY_NAME, PriorityIcon, StatusIcon, useCreateTask, useEpicMap } from "@/entities/task";
 import { Icon, Modal, useToast } from "@/shared/ui";
 
 const TYPES: [string, string][] = [
@@ -10,7 +10,12 @@ const TYPES: [string, string][] = [
   ["epic", "Эпик"],
 ];
 
-export function NewTaskDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
+export interface NewTaskPreset {
+  type?: string;
+  epic?: string;
+}
+
+export function NewTaskDialog({ preset, onClose, onCreated }: { preset?: NewTaskPreset; onClose: () => void; onCreated: (id: string, type: string) => void }) {
   const meta = useMeta().data;
   const create = useCreateTask();
   const toast = useToast();
@@ -18,7 +23,10 @@ export function NewTaskDialog({ onClose, onCreated }: { onClose: () => void; onC
   const [description, setDescription] = useState("");
   const [criteria, setCriteria] = useState("");
   const [priority, setPriority] = useState(2);
-  const [type, setType] = useState("task");
+  const [type, setType] = useState(preset?.type ?? "task");
+  const [epic, setEpic] = useState(preset?.epic ?? "");
+  const epics = [...useEpicMap().values()].filter((e) => e.status !== "done" && e.status !== "cancelled");
+  const isEpic = type === "epic";
   const [labels, setLabels] = useState("");
 
   const submit = () => {
@@ -31,11 +39,12 @@ export function NewTaskDialog({ onClose, onCreated }: { onClose: () => void; onC
         priority,
         type,
         labels: labels.split(",").map((s) => s.trim()).filter(Boolean),
+        parent: !isEpic && epic ? epic : undefined,
       },
       {
         onSuccess: (t) => {
-          toast(`${t.id} во входящих · оркестратор уведомлён`);
-          onCreated(t.id);
+          toast(`${isEpic ? "Эпик" : "Задача"} ${t.id} во входящих · оркестратор уведомлён`);
+          onCreated(t.id, t.type);
         },
         onError: (e) => toast(`Не создано: ${e.message}`, "error"),
       },
@@ -43,7 +52,7 @@ export function NewTaskDialog({ onClose, onCreated }: { onClose: () => void; onC
   };
 
   return (
-    <Modal label="Новая задача" onClose={onClose}>
+    <Modal label={isEpic ? "Новый эпик" : "Новая задача"} onClose={onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -55,7 +64,7 @@ export function NewTaskDialog({ onClose, onCreated }: { onClose: () => void; onC
         <div className="mh">
           <span className="pill">{meta?.project ?? "genie"}</span>
           <Icon.chevron size={12} />
-          Новая задача во входящие
+          {isEpic ? "Новый эпик во входящие" : "Новая задача во входящие"}
           <span className="grow" />
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Закрыть">
             <Icon.close />
@@ -64,14 +73,19 @@ export function NewTaskDialog({ onClose, onCreated }: { onClose: () => void; onC
         <div className="mb">
           <label className="field">
             Название
-            <input className="title-in" autoFocus required value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Что нужно сделать?" style={{ height: "auto", border: 0 }} />
+            <input className="title-in" autoFocus required value={title} onChange={(e) => setTitle(e.target.value)} placeholder={isEpic ? "Крупная веха: что должно получиться?" : "Что нужно сделать?"} style={{ height: "auto", border: 0 }} />
           </label>
           <label className="field">
-            Описание
-            <textarea rows={4} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Контекст, ограничения, ссылки. Поддерживается markdown." />
+            {isEpic ? "Цель" : "Описание"}
+            <textarea
+              rows={4}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder={isEpic ? "Зачем эта веха, что входит и что нет. Поддерживается markdown." : "Контекст, ограничения, ссылки. Поддерживается markdown."}
+            />
           </label>
           <label className="field">
-            Критерии приёмки — по одному в строке (можно оставить оркестратору)
+            {isEpic ? "Критерии успеха — по одному в строке (можно оставить оркестратору)" : "Критерии приёмки — по одному в строке (можно оставить оркестратору)"}
             <textarea rows={2} value={criteria} onChange={(e) => setCriteria(e.target.value)} />
           </label>
           <div className="opts">
@@ -92,12 +106,25 @@ export function NewTaskDialog({ onClose, onCreated }: { onClose: () => void; onC
                 </option>
               ))}
             </select>
+            {!isEpic && epics.length > 0 && (
+              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <EpicIcon size={13} />
+                <select aria-label="Эпик" value={epic} onChange={(e) => setEpic(e.target.value)}>
+                  <option value="">Без эпика</option>
+                  {epics.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.id} · {e.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <input aria-label="Метки" placeholder="метки через запятую" value={labels} onChange={(e) => setLabels(e.target.value)} style={{ flex: 1, minWidth: 160 }} />
           </div>
         </div>
         <div className="mf">
           <StatusIcon status="inbox" />
-          Оркестратор получит уведомление и уточнит детали в чате
+          {isEpic ? "Оркестратор уточнит цель и разобьёт эпик на задачи" : "Оркестратор получит уведомление и уточнит детали в чате"}
           <span className="grow" />
           <button type="button" className="btn ghost" onClick={onClose}>
             Отмена

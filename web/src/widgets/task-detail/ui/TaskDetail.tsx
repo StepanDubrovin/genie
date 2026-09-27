@@ -1,10 +1,29 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { Avatar, Avatars } from "@/entities/member";
-import { fetchArtifact, Labels, PRIORITY_NAME, PriorityIcon, type Status, STATUS_NAME, StatusIcon, type Task, useCheck, useComment, useMoveTask, usePatchTask, useTask } from "@/entities/task";
+import {
+  EpicIcon,
+  EpicProgress,
+  historyText,
+  Labels,
+  PRIORITY_NAME,
+  PriorityIcon,
+  type Status,
+  STATUS_NAME,
+  StatusIcon,
+  type Task,
+  useArtifactViewer,
+  useCheck,
+  useComment,
+  useEpicMap,
+  useMoveTask,
+  usePatchTask,
+  useTask,
+  useTasks,
+} from "@/entities/task";
 import type { Team } from "@/entities/team";
-import { bytes, timeAgo, useTick } from "@/shared/lib";
-import { Icon, Markdown, Modal, useToast } from "@/shared/ui";
+import { timeAgo, useTick } from "@/shared/lib";
+import { Icon, Markdown, useToast } from "@/shared/ui";
 
 const KIND_NAME: Record<string, string> = { note: "заметка", progress: "прогресс", question: "вопрос", decision: "решение", review: "ревью", handoff: "передача", owner: "владелец" };
 
@@ -18,8 +37,8 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const check = useCheck();
   const [answer, setAnswer] = useState("");
   const [draft, setDraft] = useState("");
-  const [artifact, setArtifact] = useState<{ name: string; kind: string; size: number; text?: string; n: number } | undefined>();
   const [editDesc, setEditDesc] = useState<string | undefined>();
+  const epics = useEpicMap();
 
   useEffect(() => {
     setAnswer("");
@@ -28,10 +47,14 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   }, [id]);
 
   const fail = (e: Error) => toast(`Не удалось: ${e.message}`, "error");
+  const viewer = useArtifactViewer(fail);
 
   if (q.isPending) return <aside className="detail"><div className="empty">Загрузка…</div></aside>;
   if (q.isError) return <aside className="detail"><div className="empty">{q.error.message}</div></aside>;
   const t: Task = q.data;
+  const isEpic = t.type === "epic";
+  const epic = t.parent ? epics.get(t.parent) : undefined;
+  const epicChoices = [...epics.values()].filter((e) => e.id === t.parent || (e.status !== "done" && e.status !== "cancelled"));
 
   const setStatus = (status: Status, note?: string) =>
     move.mutate({ id: t.id, status, note }, { onSuccess: () => toast(`${t.id} → ${STATUS_NAME[status]} · оркестратор уведомлён`), onError: fail });
@@ -64,7 +87,12 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
           <Icon.back />
         </button>
         <span className="crumbs">
-          {t.parent ? `${t.parent} / ` : ""}
+          {t.parent && (
+            <>
+              {epic ? <Link to={`/epic/${encodeURIComponent(t.parent)}`}>{t.parent}</Link> : t.parent}
+              {" / "}
+            </>
+          )}
           {t.id}
         </span>
         <span className="grow" />
@@ -127,6 +155,31 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
               <span className="muted">не назначена</span>
             )}
           </span>
+          {!isEpic && (
+            <>
+              <span className="k">Эпик</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                <EpicIcon size={13} empty={!epic} />
+                <select
+                  aria-label="Эпик"
+                  value={epic ? epic.id : ""}
+                  onChange={(e) =>
+                    patch.mutate(
+                      { id: t.id, patch: { parent: e.target.value || null } },
+                      { onSuccess: () => toast(e.target.value ? `${t.id} теперь в эпике ${e.target.value}` : `${t.id} больше не в эпике`), onError: fail },
+                    )
+                  }
+                >
+                  <option value="">Без эпика</option>
+                  {epicChoices.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.id} · {e.title}
+                    </option>
+                  ))}
+                </select>
+              </span>
+            </>
+          )}
           <span className="k">Метки</span>
           <span>{t.labels.length ? <Labels labels={t.labels} /> : <span className="muted">—</span>}</span>
           <span className="k">Интеграция</span>
@@ -148,17 +201,26 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
               </span>
             </>
           )}
-          {(t.deps.length > 0 || t.children.length > 0) && (
+          {(t.deps.length > 0 || (!isEpic && t.children.length > 0)) && (
             <>
               <span className="k">Связи</span>
               <span className="wide muted">
                 {t.deps.length > 0 && `зависит от ${t.deps.join(", ")}`}
                 {t.deps.length > 0 && t.children.length > 0 && " · "}
-                {t.children.length > 0 && `подзадачи ${t.children.join(", ")}`}
+                {!isEpic && t.children.length > 0 && `подзадачи ${t.children.join(", ")}`}
               </span>
             </>
           )}
         </div>
+
+        {isEpic && (
+          <Link className="epic-box link" to={`/epic/${encodeURIComponent(t.id)}`}>
+            <EpicIcon />
+            Это эпик: его задачи, прогресс и общие артефакты — на странице эпика
+            <Icon.chevron size={12} style={{ marginLeft: "auto" }} />
+          </Link>
+        )}
+        {epic && <EpicBox id={epic.id} onArtifact={viewer.show} />}
 
         {t.needsOwner && (
           <section className="owner-box" aria-label="Нужно ваше решение">
@@ -192,7 +254,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
 
         <section className="sec">
           <h3>
-            Описание
+            {isEpic ? "Цель" : "Описание"}
             {editDesc === undefined ? (
               <button type="button" className="btn ghost" style={{ height: 24 }} onClick={() => setEditDesc(t.description)}>
                 Изменить
@@ -224,7 +286,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
 
         <section className="sec">
           <h3>
-            Критерии приёмки
+            {isEpic ? "Критерии успеха" : "Критерии приёмки"}
             <span className="n">
               {t.acceptance.filter((a) => a.done).length} / {t.acceptance.length}
             </span>
@@ -246,7 +308,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
 
         {t.plan.trim() && (
           <section className="sec">
-            <h3>План</h3>
+            <h3>{isEpic ? "Дорожная карта" : "План"}</h3>
             <Markdown text={t.plan} />
           </section>
         )}
@@ -268,7 +330,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
                   type="button"
                   key={a.id}
                   className="artifact"
-                  onClick={() => fetchArtifact(t.id, a.id).then((r) => setArtifact({ ...r, n: a.id }), fail)}
+                  onClick={() => viewer.show(t.id, a.id)}
                 >
                   <Icon.file />
                   <span className="nm">{a.name}</span>
@@ -288,7 +350,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
               <div key={`h${a.at}${a.h.event}`} className="ev">
                 <i />
                 <span>
-                  <span style={{ color: "var(--text-2)" }}>{a.h.actor}</span> {eventText(a.h)} · {timeAgo(a.at)}
+                  <span style={{ color: "var(--text-2)" }}>{a.h.actor}</span> {historyText(a.h, isEpic)} · {timeAgo(a.at)}
                 </span>
               </div>
             ) : (
@@ -329,37 +391,47 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
         </section>
       </div>
 
-      {artifact && (
-        <Modal label={artifact.name} wide onClose={() => setArtifact(undefined)}>
-          <div className="mh">
-            <Icon.file />
-            <span className="mono">{artifact.name}</span>
-            <span>
-              {artifact.kind} · {bytes(artifact.size)}
-            </span>
-            <span className="grow" />
-            <a href={`/api/tasks/${encodeURIComponent(t.id)}/artifacts/${artifact.n}?download=1`}>Скачать</a>
-            <button type="button" className="icon-btn" onClick={() => setArtifact(undefined)} aria-label="Закрыть">
-              <Icon.close />
-            </button>
-          </div>
-          <div className="mb">
-            {artifact.text === undefined ? (
-              <span className="muted">Двоичный файл — скачайте его.</span>
-            ) : /\.(md|markdown)$/i.test(artifact.name) ? (
-              <Markdown text={artifact.text} />
-            ) : (
-              <pre className="view">{artifact.text}</pre>
-            )}
-          </div>
-        </Modal>
-      )}
+      {viewer.modal}
     </aside>
   );
 }
 
-function eventText(h: Task["history"][number]): string {
-  if (h.event === "status" && h.from && h.to) return `${STATUS_NAME[h.from as Status] ?? h.from} → ${STATUS_NAME[h.to as Status] ?? h.to}`;
-  if (h.event === "created") return "создал задачу";
-  return h.event;
+
+/** The epic a task belongs to: its goal, progress and the artifacts shared by all its tasks. */
+function EpicBox({ id, onArtifact }: { id: string; onArtifact: (task: string, n: number) => void }) {
+  const epic = useTask(id).data;
+  const tasks = (useTasks().data ?? []).filter((x) => x.parent === id);
+  if (!epic) return null;
+  const goal = epic.description.trim().split(/\n\s*\n/)[0];
+  return (
+    <section className="epic-box" aria-label={`Эпик ${epic.id}`}>
+      <div className="h">
+        <EpicIcon />
+        <span className="kind">Эпик</span>
+        <Link to={`/epic/${encodeURIComponent(epic.id)}`} className="nm">
+          {epic.id} · {epic.title}
+        </Link>
+        {tasks.length > 0 && (
+          <span className="mini">
+            <EpicProgress tasks={tasks} />
+            {tasks.filter((x) => x.status === "done" || x.status === "cancelled").length} из {tasks.length}
+          </span>
+        )}
+      </div>
+      {goal ? <Markdown text={goal} /> : <span className="muted">Цель эпика ещё не записана</span>}
+      {epic.artifacts.length > 0 && (
+        <div className="shared">
+          <span className="lbl">Общие артефакты эпика</span>
+          <div className="files">
+            {epic.artifacts.map((a) => (
+              <button type="button" key={a.id} className="artifact small" onClick={() => onArtifact(epic.id, a.id)} title={a.note ?? `${a.kind} · ${a.author}`}>
+                <Icon.file size={13} />
+                <span className="nm">{a.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
 }

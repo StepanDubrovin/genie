@@ -3,7 +3,9 @@ import { createBrowserRouter, Navigate, Outlet, useLocation, useNavigate, useOut
 import { useTasks, type ViewId } from "@/entities/task";
 import { useTeamMap } from "@/entities/team";
 import { CommandPalette, type PaletteActions } from "@/features/command-palette";
-import { NewTaskDialog } from "@/features/create-task";
+import { NewTaskDialog, type NewTaskPreset } from "@/features/create-task";
+import { EpicPage } from "@/pages/epic";
+import { EpicsPage } from "@/pages/epics";
 import { TasksPage } from "@/pages/tasks";
 import { TeamView } from "@/pages/team";
 import { useLiveUpdates } from "@/shared/api";
@@ -17,10 +19,17 @@ function Shell() {
   const location = useLocation();
   const [sp, setSp] = useSearchParams();
   const [dialog, setDialog] = useState<"new" | "palette" | undefined>();
+  const [preset, setPreset] = useState<NewTaskPreset | undefined>();
+  const newTask = useCallback((p?: NewTaskPreset) => {
+    setPreset(p);
+    setDialog("new");
+  }, []);
   const searchRef = useRef<HTMLInputElement>(null);
   const teams = useTeamMap();
   const tasks = useTasks().data;
   const teamRoute = location.pathname.startsWith("/team/");
+  // Pages without a task list: palette actions that need one go to "active".
+  const ownPage = teamRoute || location.pathname.startsWith("/epic");
   const openTaskId = teamRoute ? undefined : (sp.get("task") ?? undefined);
   const openTask = tasks?.find((t) => t.id === openTaskId);
 
@@ -32,16 +41,16 @@ function Shell() {
 
   const actions: PaletteActions = useMemo(
     () => ({
-      newTask: () => setDialog("new"),
+      newTask: () => newTask(),
       go: (v: ViewId) => navigate({ pathname: `/${v}`, search: sp.get("layout") ? `?layout=${sp.get("layout")}` : "" }),
-      layout: (l) => navigate({ pathname: teamRoute ? "/active" : location.pathname, search: `?layout=${l}` }),
-      openTask: (id) => navigate({ pathname: teamRoute ? "/active" : location.pathname, search: `?${new URLSearchParams({ ...(sp.get("layout") ? { layout: sp.get("layout")! } : {}), task: id })}` }),
+      layout: (l) => navigate({ pathname: ownPage ? "/active" : location.pathname, search: `?layout=${l}` }),
+      openTask: (id) => navigate({ pathname: ownPage ? "/active" : location.pathname, search: `?${new URLSearchParams({ ...(sp.get("layout") ? { layout: sp.get("layout")! } : {}), task: id })}` }),
       openTeam: (id) => navigate(`/team/${encodeURIComponent(id)}`),
     }),
-    [navigate, sp, location.pathname, teamRoute],
+    [navigate, sp, location.pathname, ownPage, newTask],
   );
 
-  // Global shortcuts (Linear-style): C, /, ⌘K, Esc, G then I/D/A/P/C
+  // Global shortcuts (Linear-style): C, /, ⌘K, Esc, G then I/D/A/P/C/E
   const gPending = useRef(0);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -59,6 +68,11 @@ function Shell() {
       if (Date.now() - gPending.current < 1200) {
         const map: Record<string, ViewId> = { i: "inbox", d: "decisions", a: "active", p: "prep", c: "done" };
         gPending.current = 0;
+        if (e.key === "e") {
+          navigate("/epics");
+          e.preventDefault();
+          return;
+        }
         if (map[e.key]) {
           actions.go(map[e.key]);
           e.preventDefault();
@@ -68,7 +82,7 @@ function Shell() {
       if (e.key === "g") gPending.current = Date.now();
       else if (e.key === "c") {
         e.preventDefault();
-        setDialog("new");
+        newTask();
       } else if (e.key === "/") {
         e.preventDefault();
         searchRef.current?.focus();
@@ -76,23 +90,44 @@ function Shell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dialog, openTaskId, closeTask, actions]);
+  }, [dialog, openTaskId, closeTask, actions, navigate, newTask]);
 
   const cls = teamRoute ? "app team-view" : openTaskId ? "app with-detail" : "app";
   return (
     <div className={cls}>
-      <Sidebar onNew={() => setDialog("new")} online={online} />
-      <Outlet context={{ onNew: () => setDialog("new"), searchRef }} />
+      <Sidebar onNew={() => newTask()} online={online} />
+      <Outlet context={{ onNew: newTask, searchRef }} />
       {openTaskId && <TaskDetail key={openTaskId} id={openTaskId} team={openTask?.team ? teams.get(openTask.team) : undefined} onClose={closeTask} />}
-      {dialog === "new" && <NewTaskDialog onClose={() => setDialog(undefined)} onCreated={(id) => (setDialog(undefined), navigate(`/inbox?task=${encodeURIComponent(id)}`))} />}
+      {dialog === "new" && (
+        <NewTaskDialog
+          preset={preset}
+          onClose={() => setDialog(undefined)}
+          onCreated={(id, type) => {
+            setDialog(undefined);
+            if (type === "epic") navigate(`/epic/${encodeURIComponent(id)}`);
+            else if (preset?.epic) navigate(`/epic/${encodeURIComponent(preset.epic)}`);
+            else navigate(`/inbox?task=${encodeURIComponent(id)}`);
+          }}
+        />
+      )}
       {dialog === "palette" && <CommandPalette onClose={() => setDialog(undefined)} actions={actions} />}
     </div>
   );
 }
 
+type ShellContext = { onNew: (preset?: NewTaskPreset) => void; searchRef: React.RefObject<HTMLInputElement | null> };
+
 function TasksRoute() {
-  const ctx = useOutletContext<{ onNew: () => void; searchRef: React.RefObject<HTMLInputElement | null> }>();
+  const ctx = useOutletContext<ShellContext>();
   return <TasksPage onNew={ctx.onNew} searchRef={ctx.searchRef} />;
+}
+
+function EpicsRoute() {
+  return <EpicsPage onNew={useOutletContext<ShellContext>().onNew} />;
+}
+
+function EpicRoute() {
+  return <EpicPage onNew={useOutletContext<ShellContext>().onNew} />;
 }
 
 export const router = createBrowserRouter([
@@ -102,6 +137,8 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/active" replace /> },
       { path: "team/:teamId", element: <TeamView /> },
+      { path: "epics", element: <EpicsRoute /> },
+      { path: "epic/:epicId", element: <EpicRoute /> },
       { path: ":view", element: <TasksRoute /> },
     ],
   },

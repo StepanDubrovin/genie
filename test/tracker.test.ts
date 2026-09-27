@@ -332,3 +332,88 @@ test("team ops: remove member, reap teams of closed tasks, stop and delete", asy
   assert.equal(bus.exists("G-2"), false);
   assert.equal(bus.history("G-2").length, 0);
 });
+
+test("epics: tasks move in and out, no nesting, list filters and progress", () => {
+  const t = fresh();
+  const epic = t.create(orch, { title: "Returns", type: "epic", description: "goal", acceptance: ["works"] });
+  const a = t.create(orch, { title: "a", parent: epic.id });
+  const b = t.create(orch, { title: "b" });
+  assert.throws(() => t.create(orch, { title: "nested", type: "epic", parent: epic.id }), /cannot be nested/);
+  assert.throws(() => t.update(orch, b.id, { parent: a.id }), /not an epic/);
+  assert.throws(() => t.update(orch, epic.id, { parent: epic.id }), /own epic|cannot be nested/);
+  assert.throws(() => t.update(executor, b.id, { parent: epic.id }), /not allowed to change epic/);
+  t.update(analyst, b.id, { parent: epic.id });
+  assert.deepEqual(t.get(epic.id).children, [a.id, b.id]);
+  assert.match(t.get(epic.id).history.at(-1)!.event, new RegExp(`child ${b.id} moved in`));
+  t.update(orch, b.id, { parent: null });
+  assert.equal(t.get(b.id).parent, undefined);
+  assert.throws(() => t.update(orch, a.id, { type: "epic" }), /cannot be nested/);
+
+  assert.deepEqual(t.list({ type: ["epic"] }).map((x) => x.id), [epic.id]);
+  assert.ok(!t.list({ excludeEpics: true }).some((x) => x.type === "epic"));
+  assert.deepEqual(t.list({ parent: epic.id }).map((x) => x.id), [a.id]);
+  const summary = t.list({ type: ["epic"] })[0];
+  assert.equal(summary.children, 1);
+  assert.equal(summary.childrenClosed, 0);
+});
+
+test("epics start with their first task and ask the orchestrator to close them", () => {
+  const t = fresh();
+  const bus = new TeamBus(t);
+  const epic = t.create(orch, { title: "Returns", type: "epic", description: "goal", acceptance: ["works"] });
+  const ready = (title: string) => {
+    const x = t.create(orch, { title, parent: epic.id, description: "d", acceptance: ["c"] });
+    t.setStatus(orch, x.id, "ready");
+    return x;
+  };
+  const a = ready("a");
+  const b = ready("b");
+  assert.equal(t.get(epic.id).status, "draft");
+  t.setStatus(executor, a.id, "in_progress");
+  assert.equal(t.get(epic.id).status, "in_progress", "work on a task starts its epic");
+  assert.equal(t.get(epic.id).history.at(-1)!.actor, "genie");
+
+  t.setStatus(executor, a.id, "review");
+  t.check(reviewer, a.id, 1, true);
+  t.setStatus(reviewer, a.id, "approved");
+  t.setStatus(orch, a.id, "done");
+  assert.ok(!bus.receive(undefined, "orchestrator").some((m) => /All tasks of epic/.test(m.text)), "one task is still open");
+  t.setStatus(orch, b.id, "cancelled");
+  const mail = bus.receive(undefined, "orchestrator");
+  assert.ok(mail.some((m) => m.text.includes(`All tasks of epic ${epic.id} are closed`)));
+  assert.equal(t.list({ type: ["epic"] })[0].childrenClosed, 2);
+
+  assert.throws(() => t.setStatus(orch, epic.id, "done"), /unchecked acceptance/);
+  t.check(orch, epic.id, 1, true);
+  t.setStatus(orch, epic.id, "done");
+  assert.equal(t.get(epic.id).status, "done");
+});
+
+test("epic context: tasks see the epic's goal and shared artifacts; split keeps pieces in the epic", async () => {
+  const { renderTask } = await import("../src/tracker/render.ts");
+  const { kickoff } = await import("../src/team/ops.ts");
+  const t = fresh();
+  const epic = t.create(orch, { title: "Returns", type: "epic", description: "Correct return prices." });
+  t.addArtifact(orch, epic.id, { kind: "doc", name: "glossary.md", content: "# terms" });
+  const task = t.create(orch, { title: "Reason codes", parent: epic.id });
+  const sub = t.create(orch, { title: "sub-step", parent: task.id });
+
+  const ctx = t.epicContext(sub.id);
+  assert.equal(ctx.epic?.id, epic.id, "found through the parent task");
+  const text = renderTask(t.get(task.id), t.epicContext(task.id));
+  assert.match(text, /## Epic G-1: Returns/);
+  assert.match(text, /Correct return prices\./);
+  assert.match(text, /#1 \[doc\] glossary\.md/);
+  const epicText = renderTask(t.get(epic.id), t.epicContext(epic.id));
+  assert.match(epicText, /## Goal/);
+  assert.match(epicText, /## Tasks \(0\/1 closed\)/);
+
+  const member = { name: "bender", role: "executor" as const };
+  const ko = kickoff("G-2", t.get(task.id), "/tmp", undefined, [member], member, undefined, false, ctx.epic);
+  assert.match(ko, /part of epic G-1/);
+
+  const pieces = t.split(orch, task.id, [{ title: "one" }, { title: "two" }]);
+  assert.ok(pieces.every((p) => t.get(p.id).parent === epic.id), "pieces join the epic");
+  assert.equal(t.get(task.id).status, "cancelled");
+  assert.equal(t.get(task.id).type, "task", "a task inside an epic does not become a nested epic");
+});

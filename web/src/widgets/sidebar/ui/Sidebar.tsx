@@ -1,6 +1,6 @@
 import { NavLink, useLocation } from "react-router";
 import { useMeta } from "@/entities/project";
-import { StageBars, StatusIcon, stageOf, type ViewId, VIEWS } from "@/entities/task";
+import { EpicIcon, inTaskViews, StageBars, StatusIcon, stageOf, type ViewId, VIEWS, useTasks } from "@/entities/task";
 import { useTeams } from "@/entities/team";
 import { timeAgo, useTick } from "@/shared/lib";
 import { Icon } from "@/shared/ui";
@@ -17,8 +17,11 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
   useTick();
   const meta = useMeta().data;
   const teams = useTeams().data?.filter((t) => t.state === "active") ?? [];
-  const { search } = useLocation();
-  const count = (id: ViewId) => VIEWS[id].statuses.reduce((n, s) => n + (meta?.counts[s] ?? 0), 0);
+  const { search, pathname } = useLocation();
+  const tasks = useTasks().data;
+  const count = (id: ViewId) =>
+    tasks ? tasks.filter((t) => inTaskViews(t) && VIEWS[id].statuses.includes(t.status)).length : VIEWS[id].statuses.reduce((n, s) => n + (meta?.counts[s] ?? 0), 0);
+  const openEpics = tasks?.filter((t) => t.type === "epic" && t.status !== "done" && t.status !== "cancelled").length ?? 0;
 
   return (
     <nav className="sidebar" aria-label="Навигация">
@@ -49,6 +52,12 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
           </NavLink>
         );
       })}
+
+      <NavLink to="/epics" className={({ isActive }) => `nav-item${isActive || pathname.startsWith("/epic/") ? " on" : ""}`}>
+        <EpicIcon size={15} />
+        <span className="grow">Эпики</span>
+        <span className="count">{openEpics || ""}</span>
+      </NavLink>
 
       {teams.length > 0 && <div className="nav-section">Команды</div>}
       {teams.map((t) => {

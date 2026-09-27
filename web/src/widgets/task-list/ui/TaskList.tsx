@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Avatars } from "@/entities/member";
-import { Labels, PriorityIcon, StatusIcon, type Status, STATUS_NAME, STATUS_ORDER, type TaskSummary } from "@/entities/task";
+import { EpicChip, EpicIcon, Labels, PriorityIcon, StatusIcon, type Status, STATUS_NAME, STATUS_ORDER, type TaskSummary } from "@/entities/task";
 import type { Team } from "@/entities/team";
 import { timeAgo } from "@/shared/lib";
 
@@ -63,12 +63,21 @@ export function TaskList({
                   <PriorityIcon priority={t.priority} />
                 </span>
                 <button type="button" className="title" onClick={(e) => { e.stopPropagation(); onOpen(t.id); }}>
+                  {t.type === "epic" && (
+                    <span className="epic-mark">
+                      <EpicIcon size={12} />
+                      эпик
+                    </span>
+                  )}
                   {t.title}
                   {t.needsOwner && <span className="q">{t.needsOwner.question}</span>}
                   {t.openDeps.length > 0 && <span className="w">ждёт {t.openDeps.join(", ")}</span>}
                   {t.blocked && <span className="q">заблокировано: {t.blocked.reason}</span>}
                 </button>
-                <Labels labels={t.labels} />
+                <span className="tags">
+                  <EpicChip id={t.parent} />
+                  <Labels labels={t.labels} />
+                </span>
                 {team ? <Avatars members={team.members} /> : <span className="muted" style={{ fontSize: 12 }}>{t.status === "inbox" ? "ждёт оркестратора" : "без команды"}</span>}
                 <span className="when">{timeAgo(t.updated)}</span>
               </div>

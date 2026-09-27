@@ -1,1 +1,1 @@
-export { NewTaskDialog } from "./ui/NewTaskDialog.tsx";
+export { NewTaskDialog, type NewTaskPreset } from "./ui/NewTaskDialog.tsx";

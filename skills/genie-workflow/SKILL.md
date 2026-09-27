@@ -21,13 +21,18 @@ echo "# review" | genie artifact G-7 --stdin --kind review --name review.md
 genie status G-7 review -m "submitted, tests green"
 genie check G-7 2               # tick acceptance criterion #2
 genie new "title" -d "details"  # as the owner: lands in the inbox and wakes the orchestrator
+genie new "title" --epic G-3    # a task inside epic G-3
+genie epic "title" -d "goal" -a "success criterion" --plan "roadmap"
+genie epics [--all]             # epics with progress (closed/total tasks)
+genie ls --epic G-3             # tasks of an epic
+genie edit G-7 --epic G-3       # move a task into an epic (--no-epic takes it out)
 genie teams | genie team G-7 | genie mail G-7
 genie send G-7 bender "message" # address members by their name (see `genie team G-7`), or `all` / `orchestrator`
 genie team G-7 add tester [name] [--model provider/id] [-m "what to do"]
 genie team G-7 remove bender    # stop a member and drop it from the team
 genie team G-7 stop [--rm-worktree]
 genie team G-7 delete [--rm-worktree]   # stop and delete with chat history
-genie web [--tailscale]         # Linear-style web UI (list, board, team chat)
+genie web [--tailscale]         # Linear-style web UI (list, board, epics, team chat)
 ```
 
 Add `--json` for machine-readable output. Identity comes from `GENIE_ROLE` / `GENIE_MEMBER`; without them you act as the owner (`human`, all permissions). Comments and status changes made as the owner wake the orchestrator.
@@ -43,3 +48,7 @@ Add `--json` for machine-readable output. Identity comes from `GENIE_ROLE` / `GE
 ## Teams
 
 Members have playful names shown as "Name — role" (e.g. Sherlock — analyst, Bender — executor); the lowercase name is their address. `genie team G-7` shows each member's state: `active`, `starting`, `stopped`, or `lost` (no heartbeat and no process). Lost members are restarted by the orchestrator with `team_recover`, or from pi with `/genie recover [G-7]`; their conversation continues from the saved session. Closing a task (`done`/`cancelled`, also from the web board) stops its team automatically.
+
+## Epics
+
+An epic is a milestone of big work: a goal (description), success criteria (acceptance), a roadmap (plan), its tasks (children) and **shared artifacts** that every task of the epic needs. `genie show <task>` of a task inside an epic prints the epic's goal and lists its shared artifacts — read them with `genie artifact-show <epic> N`. Put material that concerns the whole epic on the epic (`genie artifact <epic> …`), not on one of its tasks. Epics are never handed to a team and cannot be nested; one moves to `in_progress` by itself when work on one of its tasks starts, and the orchestrator is told when all its tasks are closed.

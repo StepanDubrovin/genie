@@ -9,6 +9,7 @@ import {
   canTransition,
   CLOSED,
   COMMENT_KINDS,
+  WORKING,
   type CommentKind,
   doneProblems,
   type Gates,
@@ -62,9 +63,14 @@ export interface UpdateInput {
   removeAcceptance?: number[];
   addDeps?: string[];
   removeDeps?: string[];
+  /** Move the task into an epic (id) or out of it (null). */
+  parent?: string | null;
 }
 
 export interface ListFilter {
+  type?: TaskType[];
+  /** Hide epics (task lists and boards show epics separately). */
+  excludeEpics?: boolean;
   status?: Status[];
   team?: string;
   parent?: string;
@@ -259,6 +265,11 @@ export class Tracker {
       where.push("t.team = ?");
       params.push(filter.team);
     }
+    if (filter.type?.length) {
+      where.push(`t.type IN (${filter.type.map(() => "?").join(",")})`);
+      params.push(...filter.type);
+    }
+    if (filter.excludeEpics) where.push("t.type != 'epic'");
     if (filter.parent) {
       where.push("t.parent = ?");
       params.push(this.normalizeId(filter.parent));
@@ -271,12 +282,14 @@ export class Tracker {
       where.push("(t.title LIKE ? OR t.id LIKE ?)");
       params.push(`%${filter.search}%`, `%${filter.search}%`);
     }
-    const rows = this.db.all<TaskRow & { ac_done: number; ac_total: number; children: number; comments: number; deps_all: string | null; deps_open: string | null }>(
+    const rows = this.db.all<TaskRow & { ac_done: number; ac_total: number; children: number; children_closed: number; comments: number; artifacts: number; deps_all: string | null; deps_open: string | null }>(
       `SELECT t.*,
         (SELECT COUNT(*) FROM acceptance a WHERE a.task = t.id AND a.done = 1) AS ac_done,
         (SELECT COUNT(*) FROM acceptance a WHERE a.task = t.id) AS ac_total,
         (SELECT COUNT(*) FROM tasks c WHERE c.parent = t.id) AS children,
+        (SELECT COUNT(*) FROM tasks c WHERE c.parent = t.id AND c.status IN ('done', 'cancelled')) AS children_closed,
         (SELECT COUNT(*) FROM comments c WHERE c.task = t.id) AS comments,
+        (SELECT COUNT(*) FROM artifacts a WHERE a.task = t.id) AS artifacts,
         (SELECT group_concat(d.dep) FROM deps d WHERE d.task = t.id) AS deps_all,
         (SELECT group_concat(d.dep) FROM deps d JOIN tasks x ON x.id = d.dep WHERE d.task = t.id AND x.status != 'done') AS deps_open
        FROM tasks t ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
@@ -299,7 +312,9 @@ export class Tracker {
       deps: r.deps_all ? r.deps_all.split(",") : [],
       openDeps: r.deps_open ? r.deps_open.split(",") : [],
       children: r.children,
+      childrenClosed: r.children_closed,
       comments: r.comments,
+      artifacts: r.artifacts,
       created: r.created,
       updated: r.updated,
     }));
@@ -329,6 +344,53 @@ export class Tracker {
   }
 
   /** Owner activity wakes the orchestrator through its global mailbox. */
+  /**
+   * Keep an epic in step with its tasks: the first task a team works on starts the
+   * epic; when every task is closed the orchestrator is asked to close the epic.
+   */
+  private followEpic(epicId: string, childId: string, childStatus: Status): void {
+    const epic = this.db.get<{ id: string; type: TaskType; status: Status }>("SELECT id, type, status FROM tasks WHERE id = ?", epicId);
+    if (!epic || epic.type !== "epic") return;
+    const system: Actor = { name: "genie", role: "orchestrator" };
+    if (WORKING.includes(childStatus) && ["draft", "refining", "ready"].includes(epic.status)) {
+      this.db.tx(() => {
+        this.db.run("UPDATE tasks SET status = 'in_progress', updated = ? WHERE id = ?", now(), epic.id);
+        this.history(epic.id, system, "status", { from: epic.status, to: "in_progress", note: `work started on ${childId}` });
+      });
+    }
+    if (CLOSED.includes(childStatus) && !CLOSED.includes(epic.status)) {
+      const open = this.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE parent = ? AND status NOT IN ('done', 'cancelled')", epic.id)?.n ?? 0;
+      if (open === 0) {
+        this.db.run(
+          "INSERT INTO mail(team, at, sender, sender_role, recipient, text, urgent, kind, task) VALUES (NULL, ?, 'genie', 'system', 'orchestrator', ?, 0, 'system', ?)",
+          now(),
+          `All tasks of epic ${epic.id} are closed. Check the epic's success criteria and artifacts, then close it (done) or add the missing tasks.`,
+          epic.id,
+        );
+      }
+    }
+  }
+
+  /** Epic of a task plus the epic's tasks, for rendering context. */
+  epicContext(id: string): { epic?: Task; children?: TaskSummary[] } {
+    const t = this.row(id);
+    if (t.type === "epic") return { children: this.list({ parent: t.id, includeClosed: true }) };
+    const epic = this.epicOf(t.id);
+    return epic ? { epic: this.get(epic) } : {};
+  }
+
+  /** The epic a task belongs to (directly or through its parent task), if any. */
+  epicOf(id: string): string | undefined {
+    let cur = this.db.get<{ parent: string | null }>("SELECT parent FROM tasks WHERE id = ?", this.normalizeId(id))?.parent;
+    for (let depth = 0; cur && depth < 10; depth++) {
+      const r = this.db.get<{ type: TaskType; parent: string | null }>("SELECT type, parent FROM tasks WHERE id = ?", cur);
+      if (!r) return undefined;
+      if (r.type === "epic") return cur;
+      cur = r.parent;
+    }
+    return undefined;
+  }
+
   private tellOrchestrator(actor: Actor, task: string, text: string): void {
     if (actor.role !== "human") return;
     this.db.run(
@@ -349,6 +411,7 @@ export class Tracker {
     const id = this.db.tx(() => {
       const parent = input.parent ? this.normalizeId(input.parent) : null;
       if (parent && !this.exists(parent)) throw new GenieError(`parent ${parent} not found`);
+      if (parent && type === "epic") throw new GenieError("epics cannot be nested");
       const deps = (input.deps ?? []).map((d) => this.normalizeId(d));
       for (const d of deps) if (!this.exists(d)) throw new GenieError(`dependency ${d} not found`);
       const seq = Number(this.metaValue("next_seq"));
@@ -400,6 +463,7 @@ export class Tracker {
       if (input.type !== undefined) {
         scope("type", ["analyst"]);
         if (!TASK_TYPES.includes(input.type)) throw new GenieError(`unknown type ${input.type}`);
+        if (input.type === "epic" && r.parent && input.parent !== null) throw new GenieError(`${r.id} is inside ${r.parent}; epics cannot be nested`);
         set("type", input.type, "type");
       }
       if (input.description !== undefined) {
@@ -438,6 +502,23 @@ export class Tracker {
         scope("acceptance criteria", ["analyst"]);
         for (const n of input.removeAcceptance) this.db.run("DELETE FROM acceptance WHERE task = ? AND n = ?", r.id, n);
         changed.push("acceptance");
+      }
+      if (input.parent !== undefined) {
+        scope("epic", ["analyst"]);
+        const target = input.parent === null ? null : this.normalizeId(input.parent);
+        if (target !== r.parent) {
+          if (target) {
+            const epic = this.db.get<{ id: string; type: TaskType }>("SELECT id, type FROM tasks WHERE id = ?", target);
+            if (!epic) throw new GenieError(`epic ${target} not found`);
+            if (epic.type !== "epic") throw new GenieError(`${target} is not an epic (type ${epic.type})`);
+            if (target === r.id) throw new GenieError("a task cannot be its own epic");
+            if (r.type === "epic") throw new GenieError("epics cannot be nested");
+          }
+          if (r.parent) this.history(r.parent, actor, `child ${r.id} moved out`);
+          if (target) this.history(target, actor, `child ${r.id} moved in`);
+          this.db.run("UPDATE tasks SET parent = ? WHERE id = ?", target, r.id);
+          changed.push(target ? `epic → ${target}` : "epic removed");
+        }
       }
       if (input.addDeps?.length || input.removeDeps?.length) {
         scope("dependencies", ["analyst"]);
@@ -505,6 +586,7 @@ export class Tracker {
       this.tellOrchestrator(actor, task.id, `The owner moved ${task.id} from ${from} to ${to}${opts.note ? `: ${opts.note}` : ""}`);
     });
     this.emit({ type: "status", task: { id: task.id, title: task.title }, from, to, actor, note: opts.note });
+    if (task.parent) this.followEpic(task.parent, task.id, to);
     return this.get(task.id);
   }
 
@@ -587,10 +669,26 @@ export class Tracker {
     return { name: a.name, kind: a.kind, content, text };
   }
 
-  /** Slice a task into atomic children. The parent becomes an epic. */
+  /**
+   * Slice a task into atomic children. The parent becomes an epic — unless it already
+   * belongs to an epic (epics are not nested): then the pieces join that epic and the
+   * split task is cancelled.
+   */
   split(actor: Actor, id: string, children: CreateInput[]): Task[] {
     requireRole(actor, "split tasks", []);
     const parent = this.get(id);
+    const epic = parent.type === "epic" ? undefined : this.epicOf(parent.id);
+    if (epic) {
+      if (parent.team || WORKING.includes(parent.status)) throw new GenieError(`${parent.id} is being worked on; stop its team before splitting it`);
+      return this.db.tx(() => {
+        const out = children.map((c) => this.create(actor, { ...c, status: undefined, parent: epic, labels: c.labels ?? parent.labels }));
+        const ids = out.map((c) => c.id).join(", ");
+        this.db.run("UPDATE tasks SET status = 'cancelled', updated = ? WHERE id = ?", now(), parent.id);
+        this.history(parent.id, actor, "status", { from: parent.status, to: "cancelled", note: `split into ${ids}` });
+        this.history(epic, actor, `${parent.id} split into ${ids}`);
+        return out;
+      });
+    }
     const created = this.db.tx(() => {
       const out = children.map((c) => this.create(actor, { ...c, status: undefined, parent: parent.id, labels: c.labels ?? parent.labels }));
       this.db.run("UPDATE tasks SET type = 'epic' WHERE id = ?", parent.id);

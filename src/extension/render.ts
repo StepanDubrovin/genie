@@ -131,6 +131,7 @@ const UPDATE_FIELDS: ReadonlyArray<readonly [string, string]> = [
 
 function updatedFields(a: Record<string, unknown>): string[] {
   const out: string[] = [];
+  if (typeof a.parent === "string") out.push(a.parent.trim() ? `epic ${a.parent.trim()}` : "-epic");
   for (const [key, label] of UPDATE_FIELDS) {
     const v = a[key];
     if (v === undefined || v === null) continue;
