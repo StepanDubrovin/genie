@@ -6,6 +6,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   root: import.meta.dirname,
   plugins: [react()],
+  resolve: { alias: { "@": new URL("./src", import.meta.url).pathname } },
   build: { outDir: "dist", emptyOutDir: true, sourcemap: true },
   server: { port: 5173, proxy: { "/api": { target: "http://127.0.0.1:7420", headers: { host: "127.0.0.1:7420" } } } },
 });
