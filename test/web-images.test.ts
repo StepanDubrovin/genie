@@ -11,13 +11,14 @@ import {
   detectImageMime,
   isRasterFileName,
   MAX_INLINE_IMAGE_BYTES,
+  MAX_REPO_IMAGE_BYTES,
   normalizeRepoImagePath,
   parseImageRef,
   parseImageRefs,
   shouldInlineImage,
 } from "../src/web/images.ts";
 import { createWebApp, type WebApp } from "../src/web/server.ts";
-import { artifactReadContent } from "../src/web/artifacts.ts";
+import { artifactReadContent, NON_VISION_IMAGE_NOTE, readRepoImage, resolveRepoImage, RepoImageError } from "../src/web/artifacts.ts";
 
 // ------------------------------------------------------------------ fixtures
 
@@ -180,6 +181,34 @@ test("parseImageRefs finds local references and leaves everything else as text",
   assert.deepEqual(parseImageRefs("!image[a\nb.png]"), [{ type: "text", text: "!image[a\nb.png]" }]);
 });
 
+// ------------------------------------------------------------------ repo image read cap
+
+test("readRepoImage rejects an over-cap file from its stat size, before reading it", () => {
+  const root = tmp();
+  initGit(root);
+  const big = write(root, "docs/big.png", Buffer.concat([PNG, Buffer.alloc(MAX_REPO_IMAGE_BYTES)]));
+
+  // The stat size is available from the same resolution step that readRepoImage uses.
+  const resolved = resolveRepoImage(root, "docs/big.png");
+  assert.equal(resolved.file, fs.realpathSync(big));
+  assert.ok(resolved.size > MAX_REPO_IMAGE_BYTES, `expected stat size over the cap, got ${resolved.size}`);
+  assert.throws(() => readRepoImage(root, "docs/big.png"), (error: unknown) => error instanceof RepoImageError && error.status === 413);
+
+  // A file the process cannot read still reports 413 when its stat size is over
+  // the cap: the read must not happen first (a read-first implementation would
+  // surface 404 here). Root bypasses file permissions, so skip that check as root.
+  if (process.getuid?.() !== 0) {
+    fs.chmodSync(big, 0o000);
+    assert.throws(() => readRepoImage(root, "docs/big.png"), (error: unknown) => error instanceof RepoImageError && error.status === 413);
+    fs.chmodSync(big, 0o644);
+
+    const small = write(root, "docs/small.png", PNG);
+    fs.chmodSync(small, 0o000);
+    assert.throws(() => readRepoImage(root, "docs/small.png"), (error: unknown) => error instanceof RepoImageError && error.status === 404);
+    fs.chmodSync(small, 0o644);
+  }
+});
+
 // ------------------------------------------------------------------ agent block
 
 test("artifactReadContent attaches a raster image block within the cap and notes the fallbacks", () => {
@@ -203,6 +232,22 @@ test("artifactReadContent attaches a raster image block within the cap and notes
   // Text artifacts are unchanged apart from the shared header.
   const plain = artifactReadContent({ n: 6, name: "notes.md", kind: "analysis", content: Buffer.from("body"), text: "body" });
   assert.deepEqual(plain, [{ type: "text", text: "# artifact #6 notes.md (analysis)\n\nbody" }]);
+
+  // A non-vision session model gets the runtime's own note (pi's `read` tool
+  // wording) while the image block is still returned and downgraded by pi.
+  assert.equal(NON_VISION_IMAGE_NOTE, "[Current model does not support images. The image will be omitted from this request.]");
+  const nonVision = artifactReadContent({ n: 3, name: "shot.txt", kind: "log", content: PNG, text: undefined, modelSupportsImages: false });
+  assert.equal(nonVision.length, 2);
+  assert.deepEqual(nonVision[1], { type: "image", data: PNG.toString("base64"), mimeType: "image/png" });
+  const nonVisionText = (nonVision[0] as { text: string }).text;
+  assert.match(nonVisionText, /^# artifact #3 shot\.txt \(log\)\n\nImage attached \(image\/png/);
+  assert.ok(nonVisionText.endsWith(NON_VISION_IMAGE_NOTE), nonVisionText);
+
+  // A vision model, or an unknown capability, keeps the plain "Image attached" text.
+  for (const modelSupportsImages of [true, undefined]) {
+    const text = (artifactReadContent({ n: 3, name: "shot.txt", kind: "log", content: PNG, text: undefined, modelSupportsImages })[0] as { text: string }).text;
+    assert.equal(text.includes("does not support images"), false, text);
+  }
 });
 
 // ------------------------------------------------------------------ HTTP routes

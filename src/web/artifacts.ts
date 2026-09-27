@@ -34,7 +34,7 @@ function realpath(file: string): string {
  * Rejects `..`, absolute paths, backslashes/NUL/schemes, symlink escapes
  * (including an in-root symlink alias) and non-regular files.
  */
-export function resolveRepoImage(root: string, input: string): string {
+export function resolveRepoImage(root: string, input: string): { file: string; size: number } {
   const relative = normalizeRepoImagePath(input);
   if (!relative) throw new RepoImageError(400, `invalid image path: ${input}`);
   const canonicalRoot = realpath(root);
@@ -57,7 +57,7 @@ export function resolveRepoImage(root: string, input: string): string {
     throw new RepoImageError(404, "image not found");
   }
   if (!stat.isFile()) throw new RepoImageError(404, "image not found");
-  return real;
+  return { file: real, size: stat.size };
 }
 
 /**
@@ -65,13 +65,16 @@ export function resolveRepoImage(root: string, input: string): string {
  * Throws RepoImageError(400|404|413|415) for every rejection.
  */
 export function readRepoImage(root: string, input: string): { bytes: Buffer; mime: RasterMime } {
-  const file = resolveRepoImage(root, input);
+  const { file, size } = resolveRepoImage(root, input);
+  // Enforce the cap from the stat size, before the bytes are loaded into memory.
+  if (size > MAX_REPO_IMAGE_BYTES) throw new RepoImageError(413, `image is larger than ${MAX_REPO_IMAGE_BYTES} bytes`);
   let bytes: Buffer;
   try {
     bytes = fs.readFileSync(file);
   } catch {
     throw new RepoImageError(404, "image not found");
   }
+  // Re-check after the read: the file can grow between the stat and the read.
   if (bytes.byteLength > MAX_REPO_IMAGE_BYTES) throw new RepoImageError(413, `image is larger than ${MAX_REPO_IMAGE_BYTES} bytes`);
   const mime = detectImageMime(bytes);
   if (!mime) throw new RepoImageError(415, "unsupported image type");
@@ -88,17 +91,29 @@ export function inlineDisposition(name?: string): string {
 export type ArtifactReadBlock = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 
 /**
+ * The runtime's own note for a model that cannot take image input; it is the
+ * wording pi's built-in `read` tool uses, so `artifact_read` says the same thing
+ * instead of claiming "Image attached" while the runtime drops the block.
+ */
+export const NON_VISION_IMAGE_NOTE = "[Current model does not support images. The image will be omitted from this request.]";
+
+/**
  * Build the `artifact_read` content blocks: a supported raster image within the
  * inline cap is attached as an image block so the model sees the picture; any
  * other binary keeps the previous text-only result with an explicit note.
+ *
+ * `modelSupportsImages` is the session model's capability (`model.input`
+ * includes `"image"`); when it is explicitly `false`, the accompanying text
+ * carries `NON_VISION_IMAGE_NOTE`. `undefined` keeps the previous text.
  */
-export function artifactReadContent(input: { n: number; name: string; kind: string; content: Uint8Array; text: string | undefined }): ArtifactReadBlock[] {
-  const { n, name, kind, content, text } = input;
+export function artifactReadContent(input: { n: number; name: string; kind: string; content: Uint8Array; text: string | undefined; modelSupportsImages?: boolean }): ArtifactReadBlock[] {
+  const { n, name, kind, content, text, modelSupportsImages } = input;
   const header = `# artifact #${n} ${name} (${kind})`;
   const mime = detectImageMime(content);
   if (mime && shouldInlineImage(mime, content.byteLength)) {
+    const nonVision = modelSupportsImages === false ? `\n\n${NON_VISION_IMAGE_NOTE}` : "";
     return [
-      { type: "text", text: `${header}\n\nImage attached (${mime}, ${content.byteLength} bytes).` },
+      { type: "text", text: `${header}\n\nImage attached (${mime}, ${content.byteLength} bytes).${nonVision}` },
       { type: "image", data: Buffer.from(content).toString("base64"), mimeType: mime },
     ];
   }
