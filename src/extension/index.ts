@@ -11,6 +11,9 @@ import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
+import { DocsContext, formatReadResult, formatSearchResults, writeDocNote } from "../docs/context.ts";
+import { DOC_STATUSES, DOC_TYPES } from "../docs/parser.ts";
+import { DocsService } from "../docs/service.ts";
 import { notifyOn } from "../notify.ts";
 import { BROADCAST, HEARTBEAT_STALE_MS, type Mail, type Member, ORCHESTRATOR, START_GRACE_MS, type Team, TeamBus } from "../team/bus.ts";
 import { type GenieConfig, languagePolicy, loadConfig, loadRole, type MemberSpec, PACKAGE_ROOT, resolveMember } from "../team/config.ts";
@@ -27,8 +30,9 @@ import { settingsMenu } from "./settings.ts";
 
 type Mode = { kind: "off" } | { kind: "orchestrator" } | { kind: "member"; role: MemberRole; team: string; member: string; task: string };
 
-const ORCHESTRATOR_TOOLS = ["genie_task", "team_spawn", "team_add_member", "team_remove_member", "team_send", "team_status", "team_recover", "team_stop"];
-const MEMBER_TOOLS = ["genie_task", "team_send", "team_status", "team_set_status"];
+const DOCS_TOOLS = ["docs_search", "docs_read", "docs_note"];
+const ORCHESTRATOR_TOOLS = ["genie_task", "team_spawn", "team_add_member", "team_remove_member", "team_send", "team_status", "team_recover", "team_stop", ...DOCS_TOOLS];
+const MEMBER_TOOLS = ["genie_task", "team_send", "team_status", "team_set_status", ...DOCS_TOOLS];
 const ALL_TOOLS = [...new Set([...ORCHESTRATOR_TOOLS, ...MEMBER_TOOLS])];
 const POLL_MS = 1000;
 const HEARTBEAT_EVERY_MS = 5_000;
@@ -56,6 +60,7 @@ export default function genie(pi: ExtensionAPI) {
   let mode: Mode = { kind: "off" };
   let tracker: Tracker | undefined;
   let bus: TeamBus | undefined;
+  let docsContext: DocsContext | undefined;
   let lastCtx: ExtensionContext | undefined;
   let poller: ReturnType<typeof setInterval> | undefined;
   let animator: ReturnType<typeof setInterval> | undefined;
@@ -73,6 +78,13 @@ export default function genie(pi: ExtensionAPI) {
     if (!tracker || !bus) throw new GenieError("no genie tracker in this project; run /genie init (or `genie init`)");
     return { tracker, bus };
   };
+
+  /** Docs services always resolve against the caller's own project root (worktree or main checkout). */
+  function docsService(ctx: ExtensionContext): DocsService {
+    const { tracker } = need();
+    const c = cfg();
+    return new DocsService({ db: tracker.db, cwd: ctx.cwd, trackerDir: tracker.dir, docsRoot: c.docs?.root });
+  }
 
   function cachedSnapshot(teamId: string): TeamSnapshot | undefined {
     if (!tracker || !bus) return undefined;
@@ -95,6 +107,7 @@ export default function genie(pi: ExtensionAPI) {
     tracker = Tracker.tryOpen(ctx.cwd);
     bus = tracker ? new TeamBus(tracker) : undefined;
     if (tracker) tracker.gates = cfg().gates ?? {};
+    docsContext = tracker ? new DocsContext({ db: tracker.db, trackerDir: tracker.dir, docsRoot: cfg().docs?.root }) : undefined;
     mode = fromEnv ?? (tracker ? { kind: "orchestrator" } : { kind: "off" });
     if (mode.kind === "member" && !tracker) {
       ctx.ui.notify(`genie: GENIE_DIR not found for member ${mode.member}; team tools disabled`, "error");
@@ -498,6 +511,7 @@ export default function genie(pi: ExtensionAPI) {
     tracker?.close();
     tracker = undefined;
     bus = undefined;
+    docsContext = undefined;
     lastCtx = undefined;
     tui = undefined;
   });
@@ -505,7 +519,8 @@ export default function genie(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     lastCtx = ctx;
     const section = promptSection();
-    if (section) event.systemPromptOptions.sections.genie = section;
+    const inventory = docsContext?.l0(ctx.cwd);
+    if (section) event.systemPromptOptions.sections.genie = inventory ? `${section}\n\n${inventory.text}` : section;
   });
 
   pi.on("agent_start", async (_event, ctx) => {
@@ -898,7 +913,7 @@ export default function genie(pi: ExtensionAPI) {
       tracker.assignTeam(actor(), task.id, teamId, worktree ? { path: worktree.path, branch: worktree.branch } : undefined, specs.map((s) => `${s.name}@${teamId}`));
       const fresh = tracker.get(task.id);
       const epic = tracker.epicContext(fresh.id).epic;
-      for (const s of specs) bus.send({ team: teamId, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(teamId, fresh, cwd, worktree, specs, s, p.kickoff, false, epic) });
+      for (const s of specs) bus.send({ team: teamId, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(teamId, fresh, cwd, worktree, specs, s, p.kickoff, false, epic, { db: tracker.db, trackerDir: tracker.dir, docsRoot: c.docs?.root }) });
 
       const requested = p.mode ?? c.spawn.mode ?? "auto";
       const launchMode = requested === "auto" ? (process.env.HERDR_ENV === "1" ? "herdr" : "headless") : requested;
@@ -1094,6 +1109,72 @@ export default function genie(pi: ExtensionAPI) {
       const out = await stopTeam(tracker, bus, p.team, { reason: "orchestrator", by: "orchestrator", removeWorktree: p.removeWorktree, forceRemove: p.forceRemove });
       snapCache.delete(p.team);
       return text(out.join("\n"));
+    },
+  });
+
+  pi.registerTool({
+    name: "docs_search",
+    label: "Search docs",
+    description:
+      "Full-text search (SQLite FTS5, BM25) over this project's documentation. Returns path, title, type, status, refresh date, stale/draft/diagnostic markers, the matched snippet and per-file frontmatter diagnostics. Russian is not stemmed: search literal forms or use page aliases.",
+    promptSnippet: "Search the project's docs",
+    parameters: Type.Object({
+      query: Type.String({ description: "Search terms (FTS5, no stemming)" }),
+      type: Type.Optional(StringEnum(DOC_TYPES)),
+      status: Type.Optional(StringEnum(DOC_STATUSES)),
+      limit: Type.Optional(Type.Number({ description: "Max results (default 20, max 100)" })),
+    }),
+    renderCall: (args, theme) => renderCallRow("docs_search", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("docs_search", result, options, theme, context),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      // Pass type/status/limit straight through: the "exclude deprecated unless
+      // requested" default belongs to the service (bug G-19), not this tool.
+      const results = docsService(ctx).search(p.query, { limit: p.limit, type: p.type, status: p.status });
+      return text(formatSearchResults(results, p.query), { count: results.length });
+    },
+  });
+
+  pi.registerTool({
+    name: "docs_read",
+    label: "Read docs",
+    description:
+      "Read one documentation page: metadata, staleness reasons, frontmatter diagnostics, wiki links/backlinks and content. Pass `heading` for one section or `wholePage: true` for the whole page (whole-page reads must be explicit). Content is clipped to `maxChars` (a character cap, because the docs service clips by characters; default 12000, max 100000) and carries a truncation marker.",
+    promptSnippet: "Read a documentation page or heading",
+    parameters: Type.Object({
+      path: Type.String({ description: "Docs-root-relative path, e.g. architecture.md or reference/auth" }),
+      heading: Type.Optional(Type.String({ description: "Read only this heading's section" })),
+      maxChars: Type.Optional(Type.Number({ description: "Character cap (default 12000, max 100000)" })),
+      wholePage: Type.Optional(Type.Boolean({ description: "Read the whole page (required without `heading`)" })),
+    }),
+    renderCall: (args, theme) => renderCallRow("docs_read", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("docs_read", result, options, theme, context),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      const result = docsService(ctx).read(p.path, { heading: p.heading, maxChars: p.maxChars, wholePage: p.wholePage });
+      return text(formatReadResult(result), { path: result.path });
+    },
+  });
+
+  pi.registerTool({
+    name: "docs_note",
+    label: "Capture a note",
+    description:
+      "Capture a quick note as <docs-root>/inbox/YYYY-MM-DD-slug.md (type note, status draft). The file is never overwritten and is written atomically; the index is refreshed so the note is immediately searchable. A note is a normal Markdown file: it is not automatically reviewed or merged, promotion and pruning are manual, and a note left uncommitted in a deleted worktree is lost — commit it if it matters.",
+    promptSnippet: "Capture a docs note in the inbox",
+    parameters: Type.Object({
+      title: Type.String({ description: "Note title (also the filename slug)" }),
+      body: Type.String({ description: "Markdown body" }),
+      tags: Type.Optional(Type.Array(Type.String())),
+      related: Type.Optional(Type.Array(Type.String(), { description: "Task/epic ids (defaults to your task)" })),
+    }),
+    renderCall: (args, theme) => renderCallRow("docs_note", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("docs_note", result, options, theme, context),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      const related = p.related ?? (mode.kind === "member" ? [mode.task] : undefined);
+      const written = writeDocNote(docsService(ctx), { title: p.title, body: p.body, tags: p.tags, related });
+      return text(`note written: docs/${written.path}\nA note is not automatically reviewed or merged; commit it or it can be lost with a deleted worktree.`, { path: written.path });
     },
   });
 
