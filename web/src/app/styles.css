@@ -717,7 +717,7 @@ a.epic-chip:hover { border-color: var(--violet); color: var(--text); }
 .doc-impact .h .n { font-weight: 400; color: var(--muted); }
 .doc-impact .h .hint { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--muted); white-space: nowrap; }
 .doc-impact .rows { display: flex; flex-direction: column; gap: 6px; }
-.doc-impact .row { display: flex; flex-direction: column; align-items: stretch; gap: 3px; text-align: left; min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
+.doc-impact .row { display: flex; flex-direction: column; align-items: stretch; gap: 3px; height: auto; min-height: 0; text-align: left; min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); cursor: pointer; }
 .doc-impact .row:hover { border-color: var(--line-strong); background: var(--bg-hover); }
 .doc-impact .row .line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .doc-impact .row .line .doc-status { flex: none; }

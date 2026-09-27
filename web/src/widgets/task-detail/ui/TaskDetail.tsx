@@ -415,7 +415,7 @@ function impactReasonText(reasons: DocsImpactReason[]): string {
  * Russian phrasing of the degradation notes (G-39 F2). The core keeps its note
  * vocabulary stable and English for the CLI and logs, so the only Russian surface
  * maps that fixed vocabulary here. An unmapped note falls back to a generic
- * Russian line; the raw English string stays in the element's `title`.
+ * Russian line, so no English text ever becomes visible in the UI.
  */
 function impactNoteText(note: string): string {
   const mapping: [RegExp, (m: RegExpExecArray) => string][] = [
@@ -482,7 +482,7 @@ function DocsImpactBlock({ result }: { result: DocsImpactResult | undefined }) {
         <div className="muted">Затронутой документации не найдено</div>
       )}
       {note && (
-        <div className="why note" title={note}>
+        <div className="why note">
           {result.changedPathsAvailable ? `замечание: ${impactNoteText(note)}` : `нет данных об изменениях: ${impactNoteText(note)}`}
         </div>
       )}
