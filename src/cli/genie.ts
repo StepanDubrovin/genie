@@ -2,16 +2,19 @@
 
 import * as fs from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { type Actor, isMemberRole, ARTIFACT_KINDS, type ArtifactKind, COMMENT_KINDS, type CommentKind, isRole, isStatus, STATUSES, type Status, TASK_TYPES, type TaskType } from "../tracker/model.ts";
+import { type Actor, isMemberRole, ARTIFACT_KINDS, type ArtifactKind, COMMENT_KINDS, type CommentKind, isRole, isStatus, STATUSES, type Status, type Task, TASK_TYPES, type TaskType } from "../tracker/model.ts";
 import { loadConfig } from "../team/config.ts";
 import { oneLine, renderTask, statusIcon } from "../tracker/render.ts";
 import { GenieError, Tracker } from "../tracker/store.ts";
 import { defaultGenieDir } from "../tracker/fsutil.ts";
-import { TeamBus } from "../team/bus.ts";
+import { MAIL_INTENTS, MAIL_LEVELS, TeamBus, type MailIntent, type MailLevel } from "../team/bus.ts";
 import { memberLabel } from "../team/names.ts";
 import { addMembers, deleteTeam, removeMember, stopTeam } from "../team/ops.ts";
 import { startWebServer } from "../web/server.ts";
+import { DocsService, DOC_STATUSES, DOC_TYPES, toDocRelative, type DocPage, type DocReadResult, type DocSearchResult, type DocStatus, type DocType } from "../docs/index.ts";
+import { computeDocsImpact, IMPACT_STATUSES, renderDocsImpact, type DocsImpactInput } from "../docs/impact.ts";
 
 const HELP = `genie — local task tracker for pi orchestrator + focus teams
 
@@ -40,6 +43,19 @@ Tasks
   genie block <ID> <reason> | genie unblock <ID>
   genie board                               epics, tasks grouped by status, active teams
 
+Docs
+  genie docs tree [--json]                  indexed pages with draft/stale/diagnostic markers
+  genie docs search <query> [--type T] [--status S] [--limit N] [--json]
+                                            full-text search over the caller's project docs;
+                                            deprecated pages are excluded unless --status asks for them
+  genie docs read <path> (--heading H | --whole) [--max-chars N] [--json]
+                                            read a page or one of its heading sections
+  genie docs note <title> [-d body] [--tag T]... [--related ID]... [--json]
+                                            capture a draft note under <docs root>/inbox
+  genie docs rebuild [--json]               drop and recreate the docs index cache
+  genie docs impact <ID> [--json]           non-blocking candidates for pages the task's changes
+                                            may have made stale (review/done)
+
 Web
   genie web [--port 7420] [--tailscale] [--open]
                                             Linear-style UI; --tailscale also serves it on this machine's tailnet address
@@ -51,7 +67,7 @@ Teams
   genie team <TEAM> delete [--rm-worktree]  stop and delete the team with its chat history
   genie team <TEAM> add <role> [name] [--model provider/id] [-m instructions]
   genie team <TEAM> remove <member>         stop a member and drop it from the team
-  genie send <TEAM> <to|all> <text> [--urgent]
+  genie send <TEAM> <to|all> <text> [--urgent] [--level low|normal|high] [--intent question|blocker|verdict|done|fyi]
   genie mail <TEAM> [-n 30]                 message history
 
 Common flags: --json (machine output), -h/--help.
@@ -65,6 +81,80 @@ function actor(): Actor {
 
 function out(json: boolean, data: unknown, text: () => string): void {
   process.stdout.write(json ? `${JSON.stringify(data, null, 2)}\n` : `${text()}\n`);
+}
+
+/** Draft/stale/diagnostic markers shared by `docs tree`, search and read. */
+function docMarkerList(page: DocPage): string[] {
+  const markers: string[] = [];
+  if (page.status === "draft" || page.status === "deprecated") markers.push(page.status);
+  if (page.stale) markers.push("stale");
+  if (page.diagnostics.length) markers.push(`diagnostics:${page.diagnostics.length}`);
+  return markers;
+}
+
+function docLine(page: DocPage): string {
+  const markers = docMarkerList(page);
+  const suffix = markers.length ? ` [${markers.join(", ")}]` : "";
+  return `${page.path}  ${page.title} (${page.type ?? "untyped"}, ${page.status ?? "status unknown"})${suffix}`;
+}
+
+function renderDocRead(page: DocReadResult): string {
+  const lines: string[] = [`# ${page.title}`, `- path: ${page.path}`];
+  lines.push(`- type: ${page.type ?? "untyped"}, status: ${page.status ?? "status unknown"}`);
+  const markers = docMarkerList(page);
+  if (markers.length) lines.push(`- markers: ${markers.join(", ")}`);
+  if (page.summary) lines.push(`- summary: ${page.summary}`);
+  if (page.tags.length) lines.push(`- tags: ${page.tags.join(", ")}`);
+  if (page.aliases.length) lines.push(`- aliases: ${page.aliases.join(", ")}`);
+  if (page.related.length) lines.push(`- related: ${page.related.join(", ")}`);
+  lines.push(`- verified: ${page.verified ?? "never"}, updated: ${page.updated ?? "unknown"}`);
+  if (page.staleReasons.length) {
+    lines.push(`- stale reasons (${page.staleReasons.length}):`);
+    for (const reason of page.staleReasons) lines.push(`  - ${reason}`);
+  }
+  if (page.diagnostics.length) {
+    lines.push(`- frontmatter diagnostics (${page.diagnostics.length}):`);
+    for (const diagnostic of page.diagnostics) lines.push(`  - ${diagnostic}`);
+  }
+  if (page.heading) lines.push(`- heading: ${page.heading}`);
+  if (page.links.length) {
+    lines.push("- links:");
+    for (const link of page.links) lines.push(`  - ${link.target} -> ${link.resolution}${link.targetPath ? ` (${link.targetPath})` : ""}`);
+  }
+  if (page.backlinks.length) lines.push(`- backlinks: ${page.backlinks.join(", ")}`);
+  lines.push("", page.content);
+  return lines.join("\n");
+}
+
+function slugifyTitle(title: string): string {
+  const slug = title.normalize("NFKD").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/g, "");
+  return slug || "note";
+}
+
+/** Write a unique draft note under <docs root>/inbox; never overwrites an existing file. */
+function writeDocsNote(
+  docs: DocsService,
+  input: { title: string; body: string; tags: string[]; related: string[] },
+): { path: string; title: string; type: string; status: string; tags: string[]; related: string[] } {
+  const date = new Date().toISOString().slice(0, 10);
+  const inbox = path.join(docs.docsRoot, "inbox");
+  fs.mkdirSync(inbox, { recursive: true });
+  const base = `${date}-${slugifyTitle(input.title)}`;
+  let target = path.join(inbox, `${base}.md`);
+  for (let counter = 2; fs.existsSync(target); counter++) target = path.join(inbox, `${base}-${counter}.md`);
+  const quoted = (value: string) => JSON.stringify(value);
+  const list = (items: string[]) => `[${items.map(quoted).join(", ")}]`;
+  const frontmatter = ["---", `title: ${quoted(input.title)}`, "type: note", "status: draft"];
+  if (input.tags.length) frontmatter.push(`tags: ${list(input.tags)}`);
+  if (input.related.length) frontmatter.push(`related: ${list(input.related)}`);
+  frontmatter.push("---");
+  const body = input.body.trim();
+  const content = `${frontmatter.join("\n")}\n\n${body ? `${body}\n` : ""}`;
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, target);
+  docs.refresh();
+  return { path: toDocRelative(docs.docsRoot, target), title: input.title, type: "note", status: "draft", tags: input.tags, related: input.related };
 }
 
 function asList(v: unknown): string[] {
@@ -93,6 +183,8 @@ async function main(argv: string[]): Promise<void> {
       model: { type: "string" },
       "rm-worktree": { type: "boolean" },
       urgent: { type: "boolean" },
+      level: { type: "string" },
+      intent: { type: "string" },
       prefix: { type: "string" },
       title: { type: "string" },
       description: { type: "string", short: "d" },
@@ -117,6 +209,12 @@ async function main(argv: string[]): Promise<void> {
       name: { type: "string" },
       note: { type: "string" },
       n: { type: "string", short: "n" },
+      heading: { type: "string" },
+      whole: { type: "boolean" },
+      "max-chars": { type: "string" },
+      limit: { type: "string" },
+      tag: { type: "string", multiple: true },
+      related: { type: "string", multiple: true },
     },
   });
   const [cmd, ...args] = positionals;
@@ -135,10 +233,29 @@ async function main(argv: string[]): Promise<void> {
   }
 
   const tracker = Tracker.open(process.cwd());
-  tracker.gates = loadConfig(tracker.dir).gates ?? {};
+  const config = loadConfig(tracker.dir);
+  tracker.gates = config.gates ?? {};
   const bus = new TeamBus(tracker);
+  let docs: DocsService | undefined;
+  const docsService = (): DocsService =>
+    (docs ??= new DocsService({ db: tracker.db, cwd: process.cwd(), trackerDir: tracker.dir, docsRoot: config.docs?.root ?? "docs" }));
+  /** Impact input: the task's worktree plus the team-record base commit (guarded). */
+  const impactInput = (task: Task): DocsImpactInput => {
+    let base: string | undefined;
+    if (task.team) {
+      try {
+        base = bus.get(task.team)?.worktree?.base;
+      } catch {
+        // team record gone: degrade to a base-less (dirty-only) diff
+      }
+    }
+    const worktree = task.worktree
+      ? { path: task.worktree.path, ...(task.worktree.branch ? { branch: task.worktree.branch } : {}), ...(base ? { base } : {}) }
+      : undefined;
+    return { id: task.id, status: task.status, relatedIds: [task.id, ...(task.parent ? [task.parent] : [])], ...(worktree ? { worktree } : {}) };
+  };
   if (cmd === "web") {
-    await startWebServer(tracker, { port: values.port ? Number(values.port) : loadConfig(tracker.dir).web.port, tailscale: !!values.tailscale, open: !!values.open });
+    await startWebServer(tracker, { port: values.port ? Number(values.port) : config.web.port, tailscale: !!values.tailscale, open: !!values.open });
     return;
   }
   const need = (n: number, usage: string) => {
@@ -208,7 +325,12 @@ async function main(argv: string[]): Promise<void> {
     case "show": {
       need(1, "show <ID>");
       const task = tracker.get(args[0]);
-      out(json, task, () => renderTask(task, { history: values.history, ...tracker.epicContext(task.id) }));
+      // `out` only runs the text closure in text mode, so --json stays the raw task object.
+      out(json, task, () => {
+        const base = renderTask(task, { history: values.history, ...tracker.epicContext(task.id) });
+        const impact = IMPACT_STATUSES.includes(task.status) ? `\n\n${renderDocsImpact(computeDocsImpact(docsService(), impactInput(task)))}` : "";
+        return `${base}${impact}`;
+      });
       return;
     }
     case "edit": {
@@ -294,6 +416,65 @@ async function main(argv: string[]): Promise<void> {
       out(json, task, () => `${task.id} unblocked`);
       return;
     }
+    case "docs": {
+      const action = args[0];
+      const rest = args.slice(1);
+      const docs = docsService();
+      if (action === "tree") {
+        const pages = docs.list();
+        out(json, pages, () => (pages.length ? pages.map(docLine).join("\n") : "no documentation pages"));
+        return;
+      }
+      if (action === "search") {
+        need(2, "docs search <query>");
+        const type = values.type as DocType | undefined;
+        if (type && !DOC_TYPES.includes(type)) throw new GenieError(`type must be one of ${DOC_TYPES.join(", ")}`);
+        const status = values.status as DocStatus | undefined;
+        if (status && !DOC_STATUSES.includes(status)) throw new GenieError(`status must be one of ${DOC_STATUSES.join(", ")}`);
+        const limit = values.limit !== undefined ? Number(values.limit) : undefined;
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new GenieError("--limit must be a positive integer");
+        const query = rest.join(" ");
+        const results = docs.search(query, { type, status, limit });
+        out(json, results, () => (results.length
+          ? results.map((result) => `${docLine(result)}\n    ${result.snippet.replace(/\s+/g, " ").trim()}`).join("\n\n")
+          : `no documentation matches "${query}"`));
+        return;
+      }
+      if (action === "read") {
+        need(2, "docs read <path>");
+        const heading = values.heading;
+        const wholePage = !!values.whole;
+        if (heading === undefined && !wholePage) throw new GenieError("docs read needs --heading <heading> or --whole");
+        const maxChars = values["max-chars"] !== undefined ? Number(values["max-chars"]) : undefined;
+        const page = docs.read(rest[0], { heading, wholePage, maxChars });
+        out(json, page, () => renderDocRead(page));
+        return;
+      }
+      if (action === "note") {
+        need(2, "docs note <title>");
+        const created = writeDocsNote(docs, {
+          title: rest.join(" "),
+          body: values.description ?? "",
+          tags: asList(values.tag),
+          related: asList(values.related),
+        });
+        out(json, created, () => `created ${created.path}`);
+        return;
+      }
+      if (action === "rebuild") {
+        const result = docs.rebuild();
+        out(json, result, () => `rebuilt docs index: ${result.pages} pages (${result.changed} changed, ${result.deleted} deleted, ${result.diagnostics} diagnostics)`);
+        return;
+      }
+      if (action === "impact") {
+        need(2, "docs impact <ID>");
+        const task = tracker.get(rest[0]);
+        const result = computeDocsImpact(docs, impactInput(task));
+        out(json, result, () => renderDocsImpact(result));
+        return;
+      }
+      throw new GenieError("usage: genie docs tree|search|read|note|rebuild|impact");
+    }
     case "board": {
       const tasks = tracker.list({ includeClosed: values.all, excludeEpics: true });
       const epics = tracker.list({ type: ["epic"], includeClosed: values.all });
@@ -367,15 +548,20 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "send": {
-      need(3, "send <TEAM> <to|all> <text>");
-      const sent = bus.send({ team: args[0], from: me.name, fromRole: me.role, to: args[1], text: args.slice(2).join(" "), urgent: values.urgent });
+      need(3, "send <TEAM> <to|all> <text> [--level low|normal|high] [--intent question|blocker|verdict|done|fyi] [--urgent]");
+      // An explicit --level wins; otherwise --urgent means high, otherwise normal (bus default).
+      const level = values.level === undefined ? undefined : (values.level as MailLevel);
+      if (level !== undefined && !MAIL_LEVELS.includes(level)) throw new GenieError(`invalid --level ${values.level}; expected ${MAIL_LEVELS.join("|")}`);
+      const intent = values.intent === undefined ? undefined : (values.intent as MailIntent);
+      if (intent !== undefined && !MAIL_INTENTS.includes(intent)) throw new GenieError(`invalid --intent ${values.intent}; expected ${MAIL_INTENTS.join("|")}`);
+      const sent = bus.send({ team: args[0], from: me.name, fromRole: me.role, to: args[1], text: args.slice(2).join(" "), level, intent, urgent: values.urgent });
       out(json, sent, () => `sent to ${sent.map((m) => m.to).join(", ")}`);
       return;
     }
     case "mail": {
       need(1, "mail <TEAM>");
       const mails = bus.history(args[0], Number(values.n ?? 30));
-      out(json, mails, () => mails.map((m) => `${m.at.slice(11, 19)} ${m.from} → ${m.to}${m.urgent ? " (urgent)" : ""}: ${m.text}`).join("\n\n") || "no mail");
+      out(json, mails, () => mails.map((m) => `${m.at.slice(11, 19)} ${m.from} → ${m.to} [${m.level}${m.intent ? `/${m.intent}` : ""}]: ${m.text}`).join("\n\n") || "no mail");
       return;
     }
     default:

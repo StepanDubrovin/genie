@@ -1,4 +1,5 @@
 import { NavLink, useLocation } from "react-router";
+import { BookIcon, useDocsTree } from "@/entities/doc";
 import { useMeta } from "@/entities/project";
 import { EpicIcon, inTaskViews, StageBars, StatusIcon, stageOf, type ViewId, VIEWS, useTasks } from "@/entities/task";
 import { useTeams } from "@/entities/team";
@@ -19,6 +20,8 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
   const teams = useTeams().data?.filter((t) => t.state === "active") ?? [];
   const { search, pathname } = useLocation();
   const tasks = useTasks().data;
+  const docs = useDocsTree().data;
+  const docsCount = docs?.pages.length ?? 0;
   const count = (id: ViewId) =>
     tasks ? tasks.filter((t) => inTaskViews(t) && VIEWS[id].statuses.includes(t.status)).length : VIEWS[id].statuses.reduce((n, s) => n + (meta?.counts[s] ?? 0), 0);
   const openEpics = tasks?.filter((t) => t.type === "epic" && t.status !== "done" && t.status !== "cancelled").length ?? 0;
@@ -57,6 +60,12 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
         <EpicIcon size={15} />
         <span className="grow">Эпики</span>
         <span className="count">{openEpics || ""}</span>
+      </NavLink>
+
+      <NavLink to={{ pathname: "/docs", search: keepLayout(search) }} className={({ isActive }) => `nav-item${isActive || pathname.startsWith("/docs") ? " on" : ""}`}>
+        <BookIcon size={15} />
+        <span className="grow">Документация</span>
+        <span className="count">{docs ? docsCount : ""}</span>
       </NavLink>
 
       {teams.length > 0 && <div className="nav-section">Команды</div>}

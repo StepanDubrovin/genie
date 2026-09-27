@@ -316,6 +316,39 @@ function teamStopCall(a: Record<string, unknown>): Segment[] {
   return out;
 }
 
+function docsSearchCall(a: Record<string, unknown>): Segment[] {
+  const out: Segment[] = [TITLE("docs_search")];
+  const query = snippet(str(a.query), 64);
+  if (query) out.push(PLAIN(` ${quoted(query)}`));
+  const flags: string[] = [];
+  const type = snippet(str(a.type), 24);
+  const status = snippet(str(a.status), 24);
+  if (type) flags.push(type);
+  if (status) flags.push(status);
+  if (typeof a.limit === "number") flags.push(`limit ${a.limit}`);
+  if (flags.length) out.push(SPACE, MUTED(flags.join(" · ")));
+  return out;
+}
+
+function docsReadCall(a: Record<string, unknown>): Segment[] {
+  const out: Segment[] = [TITLE("docs_read")];
+  const file = snippet(str(a.path), 64);
+  if (file) out.push(PLAIN(` ${file}`));
+  const heading = snippet(str(a.heading), 48);
+  if (heading) out.push(ARROW, MUTED(heading));
+  else if (a.wholePage === true) out.push(ARROW, MUTED("whole page"));
+  return out;
+}
+
+function docsNoteCall(a: Record<string, unknown>): Segment[] {
+  const out: Segment[] = [TITLE("docs_note")];
+  const title = snippet(str(a.title), 64);
+  if (title) out.push(PLAIN(` ${quoted(title)}`));
+  const tags = arr(a.tags).length;
+  if (tags) out.push(SPACE, MUTED(`tags×${tags}`));
+  return out;
+}
+
 /** Action-specific call summary for any genie-registered tool. */
 export function callSegments(name: string, args: unknown): Segment[] {
   const a = rec(args);
@@ -338,6 +371,12 @@ export function callSegments(name: string, args: unknown): Segment[] {
       return teamSetStatusCall(a);
     case "team_stop":
       return teamStopCall(a);
+    case "docs_search":
+      return docsSearchCall(a);
+    case "docs_read":
+      return docsReadCall(a);
+    case "docs_note":
+      return docsNoteCall(a);
     default:
       return [TITLE(name)];
   }

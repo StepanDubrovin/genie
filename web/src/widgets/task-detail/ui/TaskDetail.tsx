@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
+import { DocDiagBadge, DocStaleBadge, DocStatusBadge } from "@/entities/doc";
 import { Avatar, Avatars } from "@/entities/member";
+import type { DocsImpactReason, DocsImpactResult } from "../../../../../src/docs/impact.ts";
 import {
+  ArtifactThumb,
   EpicIcon,
   EpicProgress,
   historyText,
@@ -15,6 +18,7 @@ import {
   useArtifactViewer,
   useCheck,
   useComment,
+  useDocsImpact,
   useEpicMap,
   useMoveTask,
   usePatchTask,
@@ -39,6 +43,8 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const [draft, setDraft] = useState("");
   const [editDesc, setEditDesc] = useState<string | undefined>();
   const epics = useEpicMap();
+  const impactEnabled = q.data?.status === "review" || q.data?.status === "done";
+  const impact = useDocsImpact(id, impactEnabled);
 
   useEffect(() => {
     setAnswer("");
@@ -221,6 +227,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
           </Link>
         )}
         {epic && <EpicBox id={epic.id} onArtifact={viewer.show} />}
+        {impactEnabled && <DocsImpactBlock result={impact.data} />}
 
         {t.needsOwner && (
           <section className="owner-box" aria-label="Нужно ваше решение">
@@ -332,7 +339,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
                   className="artifact"
                   onClick={() => viewer.show(t.id, a.id)}
                 >
-                  <Icon.file />
+                  <ArtifactThumb task={t.id} artifact={a} />
                   <span className="nm">{a.name}</span>
                   <span className="who">
                     {a.kind} · {a.author}
@@ -393,6 +400,93 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
 
       {viewer.modal}
     </aside>
+  );
+}
+
+
+/** Russian phrasing of the structured impact reasons; matching stays server-side (G-12 lesson). */
+function impactReasonText(reasons: DocsImpactReason[]): string {
+  return reasons
+    .map((reason) => (reason.kind === "changed-path" ? `меняет ${reason.path} — под paths: ${reason.pattern}` : `ссылается на задачу ${reason.id} в related`))
+    .join("; ");
+}
+
+/**
+ * Russian phrasing of the degradation notes (G-39 F2). The core keeps its note
+ * vocabulary stable and English for the CLI and logs, so the only Russian surface
+ * maps that fixed vocabulary here. An unmapped note falls back to a generic
+ * Russian line, so no English text ever becomes visible in the UI.
+ */
+function impactNoteText(note: string): string {
+  const mapping: [RegExp, (m: RegExpExecArray) => string][] = [
+    [/^no team worktree for this task$/, () => "у задачи нет рабочей копии команды"],
+    [/^worktree (.+) does not exist$/, (m) => `рабочая копия ${m[1]} не найдена`],
+    [/^worktree (.+) is not a git working tree$/, (m) => `${m[1]} — не git-рабочая копия`],
+    [/^worktree (.+) could not be inspected: .*$/, (m) => `рабочую копию ${m[1]} не удалось проверить`],
+    [/^no base commit recorded for the team$/, () => "для команды не записан базовый коммит"],
+    [/^base (.+) is not reachable from the worktree$/, (m) => `базовый коммит ${m[1]} недоступен из рабочей копии`],
+    [/^no changes found between (.+) and HEAD$/, (m) => `между ${m[1]} и HEAD изменений не найдено`],
+    [/^docs index unavailable: .*$/, () => "индекс документации недоступен"],
+  ];
+  for (const [pattern, render] of mapping) {
+    const match = pattern.exec(note);
+    if (match) return render(match);
+  }
+  return "не удалось получить данные об изменениях";
+}
+
+/** Mockup screen 9: pages the task's changes may have made stale. A hint, never a gate. */
+function DocsImpactBlock({ result }: { result: DocsImpactResult | undefined }) {
+  const navigate = useNavigate();
+  if (!result) return null;
+  const candidates = result.candidates;
+  const note = result.notes[0];
+  return (
+    <section className="doc-impact" aria-label="Документация, которую могла затронуть задача">
+      <div className="h">
+        <Icon.file size={14} />
+        Документация, которую могла затронуть задача
+        {candidates.length > 0 && <span className="n">{candidates.length}</span>}
+        <span className="hint">подсказка · не блокирует</span>
+      </div>
+      {candidates.length > 0 ? (
+        <div className="rows">
+          {candidates.map((candidate) => (
+            <button
+              type="button"
+              key={candidate.path}
+              className="row"
+              onClick={() => navigate(`/docs?page=${encodeURIComponent(candidate.path)}`)}
+            >
+              {/*
+                Screen 9: title + badges on the first line, the full reason on its
+                own wrapping line, so the matched pattern is never cut off (G-39 F1).
+                F5: `DocMarks` from `@/entities/doc` renders icon-only tree/search
+                marks and always draws a status icon (including «актуальна»/«без
+                статуса»), while the mockup wants text badges and only for
+                draft/deprecated — so the block reuses that module's badge
+                components instead of `DocMarks`.
+              */}
+              <span className="line">
+                <Icon.file size={13} />
+                <span className="nm">{candidate.title}</span>
+                {(candidate.status === "draft" || candidate.status === "deprecated") && <DocStatusBadge status={candidate.status} />}
+                {candidate.stale && <DocStaleBadge count={candidate.staleReasons.length} />}
+                {candidate.diagnostics.length > 0 && <DocDiagBadge count={candidate.diagnostics.length} />}
+              </span>
+              <span className="why">{impactReasonText(candidate.reasons)}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="muted">Затронутой документации не найдено</div>
+      )}
+      {note && (
+        <div className="why note">
+          {result.changedPathsAvailable ? `замечание: ${impactNoteText(note)}` : `нет данных об изменениях: ${impactNoteText(note)}`}
+        </div>
+      )}
+    </section>
   );
 }
 

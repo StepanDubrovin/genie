@@ -2,6 +2,9 @@
 // launching members, adding/removing them, stopping and deleting teams, and
 // stopping teams whose task was closed.
 
+import { buildL1Context } from "../docs/context.ts";
+import { DocsService } from "../docs/service.ts";
+import type { Db } from "../tracker/db.ts";
 import { CLOSED, type MemberRole, type Task } from "../tracker/model.ts";
 import type { Tracker } from "../tracker/store.ts";
 import { BROADCAST, type Member, ORCHESTRATOR, type StopReason, type Team, type TeamBus } from "./bus.ts";
@@ -18,11 +21,34 @@ export function resolveLaunchMode(requested: string | undefined, cfg: GenieConfi
   return process.env.HERDR_ENV === "1" ? "herdr" : "headless";
 }
 
+/** L1 docs context input for kickoff: the shared tracker DB plus root overrides. */
+export interface KickoffDocs {
+  db: Db;
+  trackerDir?: string;
+  docsRoot?: string;
+}
+
+/** One shared L1 builder for both spawn paths; errors never break a kickoff. */
+function l1Block(task: Task, cwd: string, epic: Task | undefined, docs: KickoffDocs): string {
+  try {
+    const service = new DocsService({ db: docs.db, cwd, trackerDir: docs.trackerDir, docsRoot: docs.docsRoot });
+    const context = buildL1Context(service, {
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      plan: task.plan,
+      acceptance: task.acceptance.map((criterion) => ({ text: criterion.text })),
+      epicId: epic?.id,
+    });
+    return context?.text ?? "";
+  } catch { return ""; }
+}
+
 /** The first message every member receives: who they are, the team, and what to do first. */
-export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team["worktree"], all: Named[], s: Named, extra?: string, joining = false, epic?: Task): string {
+export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team["worktree"], all: Named[], s: Named, extra?: string, joining = false, epic?: Task, docs?: KickoffDocs): string {
   const hasAnalyst = all.some((x) => x.role === "analyst");
   const tester = all.find((x) => x.role === "tester");
-  const notify = `message the reviewer${tester ? ` and the tester (${tester.name})` : ""}`;
+  const notify = `message the reviewer (or whoever owns the review step)${tester ? ` and the tester (${tester.name})` : ""}`;
   const refinement = !["ready", "changes_requested", "in_progress", "review"].includes(task.status);
   const first: Record<MemberRole, string> = {
     analyst: refinement
@@ -36,10 +62,10 @@ export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team[
       ? "Challenge the analyst's findings: when the analyst shares them, check them for gaps and risks and send your feedback directly to the analyst."
       : "Wait until the executor asks for review: publish a waiting status (team_set_status) and end your turn without messaging anyone. When reviewing: check each verified criterion, attach one review artifact, set status approved or changes_requested, then message the executor (and the orchestrator on approval).",
     tester:
-      "Wait until the executor submits the work for review, then test it: write/run tests against the acceptance criteria, attach a test-report artifact, and send the results to the executor and reviewer. If tests fail, set status changes_requested with a note.",
+      "Wait until the executor submits the work for review, then test it: write/run tests against the acceptance criteria, attach a test-report artifact, and send the results to the executor and reviewer, and the orchestrator when the team has no reviewer. If tests fail, set status changes_requested with a note.",
     documenter: "Wait until the implementation is approved or the orchestrator asks you, then write/update the documentation, attach a `doc` artifact and tell the orchestrator.",
   };
-  return [
+  const base = [
     `${joining ? "You are joining team" : "Welcome to team"} ${teamId}, ${displayName(s.name)}! You are the ${s.role}; teammates address you as "${s.name}". Task: ${task.id} — ${task.title} (status ${task.status}). Read it with genie_task {"action":"show"}.`,
     worktree ? `Working directory: ${cwd} (branch ${worktree.branch}, base ${String(worktree.base).slice(0, 10)}).` : `Working directory: ${cwd}.`,
     `Team: ${all.map((x) => `${memberLabel(x.name, x.role, "en")} (\`${x.name}\`)`).join(", ")}, plus orchestrator.`,
@@ -49,6 +75,8 @@ export function kickoff(teamId: string, task: Task, cwd: string, worktree: Team[
     first[s.role],
     extra ? `\nFrom ${joining ? "whoever added you" : "the orchestrator"}: ${extra}` : "",
   ].join("\n");
+  const l1 = docs ? l1Block(task, cwd, epic, docs) : "";
+  return l1 ? `${base}\n\n${l1}` : base;
 }
 
 /** Start member processes; never waits for them to become ready. */
@@ -100,7 +128,8 @@ export async function addMembers(
   const task = tracker.get(team.task);
   const all: Named[] = updated.members.map((m) => ({ name: m.name, role: m.role, model: m.model }));
   const epic = tracker.epicContext(task.id).epic;
-  for (const s of specs) bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(team.id, task, team.cwd, team.worktree, all, s, opts.note, true, epic) });
+  const docs = { db: tracker.db, trackerDir: tracker.dir, docsRoot: cfg.docs?.root };
+  for (const s of specs) bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(team.id, task, team.cwd, team.worktree, all, s, opts.note, true, epic, docs) });
   for (const m of team.members) {
     bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: m.name, kind: "system", text: `New teammate(s): ${specs.map((s) => memberLabel(s.name, s.role, "en")).join(", ")} (added by ${opts.by}).` });
   }

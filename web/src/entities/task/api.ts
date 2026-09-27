@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { keys, request, useInvalidating } from "@/shared/api";
+import type { DocsImpactResult } from "../../../../src/docs/impact.ts";
 import type { Status, Task, TaskSummary } from "./model.ts";
 
 /** Every task, closed ones included; views and the board filter on the client. */
@@ -14,6 +15,17 @@ export function useEpicMap(): Map<string, TaskSummary> {
 
 export const useTask = (id: string | undefined) =>
   useQuery({ queryKey: keys.task(id ?? ""), queryFn: () => request<Task>("GET", `/api/tasks/${encodeURIComponent(id!)}`), enabled: !!id });
+
+/**
+ * Non-blocking docs-impact hint for a task; the caller gates `enabled` on the
+ * review/done status. Purely additive: no existing URL shape or caching changes.
+ */
+export const useDocsImpact = (id: string, enabled: boolean) =>
+  useQuery({
+    queryKey: [...keys.task(id), "docs-impact"] as const,
+    queryFn: () => request<DocsImpactResult>("GET", `/api/tasks/${encodeURIComponent(id)}/docs-impact`),
+    enabled: enabled && !!id,
+  });
 
 export function useMoveTask() {
   const qc = useQueryClient();
@@ -45,6 +57,6 @@ export const useAddArtifact = () =>
     request<Task>("POST", `/api/tasks/${encodeURIComponent(v.id)}/artifacts`, { name: v.name, kind: v.kind, text: v.text, note: v.note }),
   );
 
-export async function fetchArtifact(task: string, n: number): Promise<{ name: string; kind: string; size: number; text?: string }> {
+export async function fetchArtifact(task: string, n: number): Promise<{ name: string; kind: string; size: number; text?: string; mime?: string }> {
   return request("GET", `/api/tasks/${encodeURIComponent(task)}/artifacts/${n}`);
 }

@@ -11,8 +11,13 @@ import * as path from "node:path";
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
+import { DocsContext, formatReadResult, formatSearchResults, writeDocNote } from "../docs/context.ts";
+import { DOC_STATUSES, DOC_TYPES } from "../docs/parser.ts";
+import { DocsService } from "../docs/service.ts";
 import { notifyOn } from "../notify.ts";
-import { BROADCAST, HEARTBEAT_STALE_MS, type Mail, type Member, ORCHESTRATOR, START_GRACE_MS, type Team, TeamBus } from "../team/bus.ts";
+import { artifactReadContent } from "../web/artifacts.ts";
+import { BROADCAST, HEARTBEAT_STALE_MS, type Mail, MAIL_INTENTS, MAIL_LEVELS, type Member, ORCHESTRATOR, START_GRACE_MS, type Team, TeamBus } from "../team/bus.ts";
+import { renderDigest } from "../team/digest.ts";
 import { type GenieConfig, languagePolicy, loadConfig, loadRole, type MemberSpec, PACKAGE_ROOT, resolveMember } from "../team/config.ts";
 import { assignNames, displayName, memberLabel } from "../team/names.ts";
 import { addMembers, deleteTeam, kickoff, launchMembers, type Named, reapClosedTeams, removeMember, stopTeam } from "../team/ops.ts";
@@ -27,8 +32,9 @@ import { settingsMenu } from "./settings.ts";
 
 type Mode = { kind: "off" } | { kind: "orchestrator" } | { kind: "member"; role: MemberRole; team: string; member: string; task: string };
 
-const ORCHESTRATOR_TOOLS = ["genie_task", "team_spawn", "team_add_member", "team_remove_member", "team_send", "team_status", "team_recover", "team_stop"];
-const MEMBER_TOOLS = ["genie_task", "team_send", "team_status", "team_set_status"];
+const DOCS_TOOLS = ["docs_search", "docs_read", "docs_note"];
+const ORCHESTRATOR_TOOLS = ["genie_task", "team_spawn", "team_add_member", "team_remove_member", "team_send", "team_status", "team_recover", "team_stop", ...DOCS_TOOLS];
+const MEMBER_TOOLS = ["genie_task", "team_send", "team_status", "team_set_status", ...DOCS_TOOLS];
 const ALL_TOOLS = [...new Set([...ORCHESTRATOR_TOOLS, ...MEMBER_TOOLS])];
 const POLL_MS = 1000;
 const HEARTBEAT_EVERY_MS = 5_000;
@@ -56,6 +62,7 @@ export default function genie(pi: ExtensionAPI) {
   let mode: Mode = { kind: "off" };
   let tracker: Tracker | undefined;
   let bus: TeamBus | undefined;
+  let docsContext: DocsContext | undefined;
   let lastCtx: ExtensionContext | undefined;
   let poller: ReturnType<typeof setInterval> | undefined;
   let animator: ReturnType<typeof setInterval> | undefined;
@@ -73,6 +80,13 @@ export default function genie(pi: ExtensionAPI) {
     if (!tracker || !bus) throw new GenieError("no genie tracker in this project; run /genie init (or `genie init`)");
     return { tracker, bus };
   };
+
+  /** Docs services always resolve against the caller's own project root (worktree or main checkout). */
+  function docsService(ctx: ExtensionContext): DocsService {
+    const { tracker } = need();
+    const c = cfg();
+    return new DocsService({ db: tracker.db, cwd: ctx.cwd, trackerDir: tracker.dir, docsRoot: c.docs?.root });
+  }
 
   function cachedSnapshot(teamId: string): TeamSnapshot | undefined {
     if (!tracker || !bus) return undefined;
@@ -95,6 +109,7 @@ export default function genie(pi: ExtensionAPI) {
     tracker = Tracker.tryOpen(ctx.cwd);
     bus = tracker ? new TeamBus(tracker) : undefined;
     if (tracker) tracker.gates = cfg().gates ?? {};
+    docsContext = tracker ? new DocsContext({ db: tracker.db, trackerDir: tracker.dir, docsRoot: cfg().docs?.root }) : undefined;
     mode = fromEnv ?? (tracker ? { kind: "orchestrator" } : { kind: "off" });
     if (mode.kind === "member" && !tracker) {
       ctx.ui.notify(`genie: GENIE_DIR not found for member ${mode.member}; team tools disabled`, "error");
@@ -110,21 +125,47 @@ export default function genie(pi: ExtensionAPI) {
   function formatMail(m: Mail): string {
     if (m.kind === "kickoff") return `[genie kickoff · team ${m.team}]\n\n${m.text}`;
     if (m.kind === "owner") return `[genie · owner activity${m.task ? ` · ${m.task}` : ""}]\n\n${m.text}`;
-    return `[genie mail · team ${m.team} · from ${m.from} (${m.fromRole})${m.urgent ? " · URGENT" : ""}]\n\n${m.text}`;
+    const intent = m.intent ? ` · ${m.intent}` : "";
+    return `[genie mail · team ${m.team} · from ${m.from} (${m.fromRole}) · ${m.level}${intent}]\n\n${m.text}`;
   }
 
-  function deliver(mails: Mail[]): void {
+  /** Orchestrator batch: specials (kickoff/owner/system) verbatim first, then the digest. */
+  function renderOrchestratorBatch(mails: Mail[]): string {
+    const specials = mails.filter((m) => m.kind !== "message");
+    const messages = mails.filter((m) => m.kind === "message");
+    const parts: string[] = [];
+    if (specials.length) parts.push(specials.map(formatMail).join("\n\n---\n\n"));
+    if (messages.length) parts.push(renderDigest(messages));
+    return parts.join("\n\n---\n\n");
+  }
+
+  function deliver(mails: Mail[], opts: { steer?: boolean } = {}): void {
     if (!mails.length) return;
     const hint =
       mode.kind === "orchestrator"
         ? "(Act only if a decision, answer, unblock or acceptance is needed; purely informational updates need no reply — just end your turn.)"
         : "(Reply with team_send only if a reply is needed; do not send acknowledgements.)";
-    const content = `${mails.map(formatMail).join("\n\n---\n\n")}\n\n${hint}`;
+    const body = mode.kind === "orchestrator" && !opts.steer ? renderOrchestratorBatch(mails) : mails.map(formatMail).join("\n\n---\n\n");
+    const content = `${body}\n\n${hint}`;
     const idle = safeIdle();
-    const urgent = mails.some((m) => m.urgent);
     // sendUserMessage goes through the regular prompt path, so before_agent_start
     // injects the role section; custom messages with triggerTurn would bypass it.
-    pi.sendUserMessage(content, idle ? undefined : { deliverAs: urgent ? "steer" : "followUp" });
+    if (idle) pi.sendUserMessage(content);
+    // Re-checked here so a slice claimed while idle is never dropped if the session
+    // became busy in between: it queues as a follow-up instead of being lost.
+    else pi.sendUserMessage(content, { deliverAs: opts.steer ? "steer" : "followUp" });
+  }
+
+  /**
+   * Claim mail at delivery time: while idle take the whole slice as ONE batch;
+   * while busy take nothing except urgent mail, which steers on its own.
+   */
+  function deliverFor(team: string | undefined, member: string): void {
+    if (!bus) return;
+    if (runMode === "print" || runMode === "json") return;
+    const { batch, steers } = bus.takeMail(team, member, safeIdle());
+    deliver(batch);
+    for (const m of steers) deliver([m], { steer: true });
   }
 
   /** A captured ctx goes stale after reload/session replacement; never let that break the timers. */
@@ -158,8 +199,8 @@ export default function genie(pi: ExtensionAPI) {
         lastSupervise = Date.now();
         supervise();
       }
-      if (mode.kind === "member") deliver(bus.receive(mode.team, mode.member));
-      else if (mode.kind === "orchestrator" && cfg().orchestrator?.autoWake !== false) deliver(bus.receive(undefined, ORCHESTRATOR));
+      if (mode.kind === "member") deliverFor(mode.team, mode.member);
+      else if (mode.kind === "orchestrator" && cfg().orchestrator?.autoWake !== false) deliverFor(undefined, ORCHESTRATOR);
       refreshStatus();
     } catch (err) {
       safeNotify(`genie: mail poll failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
@@ -498,6 +539,7 @@ export default function genie(pi: ExtensionAPI) {
     tracker?.close();
     tracker = undefined;
     bus = undefined;
+    docsContext = undefined;
     lastCtx = undefined;
     tui = undefined;
   });
@@ -505,7 +547,8 @@ export default function genie(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     lastCtx = ctx;
     const section = promptSection();
-    if (section) event.systemPromptOptions.sections.genie = section;
+    const inventory = docsContext?.l0(ctx.cwd);
+    if (section) event.systemPromptOptions.sections.genie = inventory ? `${section}\n\n${inventory.text}` : section;
   });
 
   pi.on("agent_start", async (_event, ctx) => {
@@ -519,6 +562,14 @@ export default function genie(pi: ExtensionAPI) {
       const m = mode;
       const current = bus.get(m.team).members.find((x) => x.name === m.member);
       if (current?.activity !== "error") bus.setActivity(m.team, m.member, "idle");
+    }
+    // The step just ended: deliver the freshly unblocked mail now instead of up
+    // to a tick later (the poller remains the backstop).
+    try {
+      if (mode.kind === "member") deliverFor(mode.team, mode.member);
+      else if (mode.kind === "orchestrator" && cfg().orchestrator?.autoWake !== false) deliverFor(undefined, ORCHESTRATOR);
+    } catch (err) {
+      safeNotify(`genie: mail delivery failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
     }
     refreshStatus();
   });
@@ -750,10 +801,12 @@ export default function genie(pi: ExtensionAPI) {
         }
         case "artifact_read": {
           if (p.artifact === undefined) throw new GenieError("artifact_read needs artifact (number)");
-          const a = tracker.readArtifact(requireId(), p.artifact);
-          if (a.text === undefined) return text(`artifact #${p.artifact} ${a.name} is binary (${a.content.byteLength} bytes)`);
-          const body = a.text.length > 60_000 ? `${a.text.slice(0, 60_000)}\n… (truncated, ${a.text.length} chars)` : a.text;
-          return text(`# artifact #${p.artifact} ${a.name} (${a.kind})\n\n${body}`, { id: requireId(), artifact: p.artifact });
+          const taskId = requireId();
+          const a = tracker.readArtifact(taskId, p.artifact);
+          // Supported raster images within the cap become an image block (see artifactReadContent).
+          // A non-vision session model gets the runtime's own "image omitted" note.
+          const content = artifactReadContent({ n: p.artifact, name: a.name, kind: a.kind, content: a.content, text: a.text, modelSupportsImages: ctx.model?.input.includes("image") });
+          return { content, details: { id: taskId, artifact: p.artifact } };
         }
         case "split": {
           if (!p.children?.length) throw new GenieError("split needs children");
@@ -898,7 +951,7 @@ export default function genie(pi: ExtensionAPI) {
       tracker.assignTeam(actor(), task.id, teamId, worktree ? { path: worktree.path, branch: worktree.branch } : undefined, specs.map((s) => `${s.name}@${teamId}`));
       const fresh = tracker.get(task.id);
       const epic = tracker.epicContext(fresh.id).epic;
-      for (const s of specs) bus.send({ team: teamId, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(teamId, fresh, cwd, worktree, specs, s, p.kickoff, false, epic) });
+      for (const s of specs) bus.send({ team: teamId, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(teamId, fresh, cwd, worktree, specs, s, p.kickoff, false, epic, { db: tracker.db, trackerDir: tracker.dir, docsRoot: c.docs?.root }) });
 
       const requested = p.mode ?? c.spawn.mode ?? "auto";
       const launchMode = requested === "auto" ? (process.env.HERDR_ENV === "1" ? "herdr" : "headless") : requested;
@@ -974,12 +1027,14 @@ export default function genie(pi: ExtensionAPI) {
     name: "team_send",
     label: "Team message",
     description:
-      'Send a message to a team member, to "orchestrator", or to "all" (broadcast). Delivery is push-based: the recipient is woken up (or gets it after its current step). Keep messages short and point to the task/artifacts for details.',
+      'Send a message to a team member, to "orchestrator", or to "all" (broadcast). The level decides the delivery mode: low waits quietly until the recipient is free, normal (default) is delivered after its current step, high (or urgent: true) steers and interrupts it. intent explains what the mail is for and shapes the orchestrator digest. Keep messages short and point to the task/artifacts for details.',
     promptSnippet: "Message a teammate or the orchestrator directly",
     parameters: Type.Object({
       to: Type.String({ description: 'Member name, "orchestrator" or "all"' }),
       text: Type.String(),
-      urgent: Type.Optional(Type.Boolean({ description: "Interrupt the recipient's current step" })),
+      level: Type.Optional(StringEnum(MAIL_LEVELS, { description: "low = quiet until the recipient is free, normal = after the current step (default), high = interrupt now" })),
+      intent: Type.Optional(StringEnum(MAIL_INTENTS, { description: "question | blocker | verdict | done | fyi — shapes the orchestrator's digest" })),
+      urgent: Type.Optional(Type.Boolean({ description: "Alias for level: high (backwards compatible)" })),
       team: Type.Optional(Type.String({ description: "Team id (orchestrator only; defaults to the only active team)" })),
     }),
     renderCall: (args, theme) => renderCallRow("team_send", args, theme),
@@ -996,7 +1051,7 @@ export default function genie(pi: ExtensionAPI) {
         else throw new GenieError(`specify team; active teams: ${active.map((t) => t.id).join(", ") || "none"}`);
       }
       const me = actor();
-      const sent = bus.send({ team: teamId, from: me.name, fromRole: me.role, to: p.to, text: p.text, urgent: p.urgent });
+      const sent = bus.send({ team: teamId, from: me.name, fromRole: me.role, to: p.to, text: p.text, level: p.level, intent: p.intent, urgent: p.urgent });
       return text(`delivered to ${sent.map((m) => m.to).join(", ")}`, { team: teamId });
     },
   });
@@ -1094,6 +1149,72 @@ export default function genie(pi: ExtensionAPI) {
       const out = await stopTeam(tracker, bus, p.team, { reason: "orchestrator", by: "orchestrator", removeWorktree: p.removeWorktree, forceRemove: p.forceRemove });
       snapCache.delete(p.team);
       return text(out.join("\n"));
+    },
+  });
+
+  pi.registerTool({
+    name: "docs_search",
+    label: "Search docs",
+    description:
+      "Full-text search (SQLite FTS5, BM25) over this project's documentation. Returns path, title, type, status, refresh date, stale/draft/diagnostic markers, the matched snippet and per-file frontmatter diagnostics. Russian is not stemmed: search literal forms or use page aliases.",
+    promptSnippet: "Search the project's docs",
+    parameters: Type.Object({
+      query: Type.String({ description: "Search terms (FTS5, no stemming)" }),
+      type: Type.Optional(StringEnum(DOC_TYPES)),
+      status: Type.Optional(StringEnum(DOC_STATUSES)),
+      limit: Type.Optional(Type.Number({ description: "Max results (default 20, max 100)" })),
+    }),
+    renderCall: (args, theme) => renderCallRow("docs_search", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("docs_search", result, options, theme, context),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      // Pass type/status/limit straight through: the "exclude deprecated unless
+      // requested" default belongs to the service (bug G-19), not this tool.
+      const results = docsService(ctx).search(p.query, { limit: p.limit, type: p.type, status: p.status });
+      return text(formatSearchResults(results, p.query), { count: results.length });
+    },
+  });
+
+  pi.registerTool({
+    name: "docs_read",
+    label: "Read docs",
+    description:
+      "Read one documentation page: metadata, staleness reasons, frontmatter diagnostics, wiki links/backlinks and content. Pass `heading` for one section or `wholePage: true` for the whole page (whole-page reads must be explicit). Content is clipped to `maxChars` (a character cap, because the docs service clips by characters; default 12000, max 100000) and carries a truncation marker.",
+    promptSnippet: "Read a documentation page or heading",
+    parameters: Type.Object({
+      path: Type.String({ description: "Docs-root-relative path, e.g. architecture.md or reference/auth" }),
+      heading: Type.Optional(Type.String({ description: "Read only this heading's section" })),
+      maxChars: Type.Optional(Type.Number({ description: "Character cap (default 12000, max 100000)" })),
+      wholePage: Type.Optional(Type.Boolean({ description: "Read the whole page (required without `heading`)" })),
+    }),
+    renderCall: (args, theme) => renderCallRow("docs_read", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("docs_read", result, options, theme, context),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      const result = docsService(ctx).read(p.path, { heading: p.heading, maxChars: p.maxChars, wholePage: p.wholePage });
+      return text(formatReadResult(result), { path: result.path });
+    },
+  });
+
+  pi.registerTool({
+    name: "docs_note",
+    label: "Capture a note",
+    description:
+      "Capture a quick note as <docs-root>/inbox/YYYY-MM-DD-slug.md (type note, status draft). The file is never overwritten and is written atomically; the index is refreshed so the note is immediately searchable. A note is a normal Markdown file: it is not automatically reviewed or merged, promotion and pruning are manual, and a note left uncommitted in a deleted worktree is lost — commit it if it matters.",
+    promptSnippet: "Capture a docs note in the inbox",
+    parameters: Type.Object({
+      title: Type.String({ description: "Note title (also the filename slug)" }),
+      body: Type.String({ description: "Markdown body" }),
+      tags: Type.Optional(Type.Array(Type.String())),
+      related: Type.Optional(Type.Array(Type.String(), { description: "Task/epic ids (defaults to your task)" })),
+    }),
+    renderCall: (args, theme) => renderCallRow("docs_note", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("docs_note", result, options, theme, context),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      const related = p.related ?? (mode.kind === "member" ? [mode.task] : undefined);
+      const written = writeDocNote(docsService(ctx), { title: p.title, body: p.body, tags: p.tags, related });
+      return text(`note written: docs/${written.path}\nA note is not automatically reviewed or merged; commit it or it can be lost with a deleted worktree.`, { path: written.path });
     },
   });
 

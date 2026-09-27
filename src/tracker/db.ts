@@ -94,12 +94,14 @@ export class Db {
   }
 }
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** Columns added after the first release; applied to existing databases on open. */
 export const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   { table: "members", column: "heartbeat_at", ddl: "ALTER TABLE members ADD COLUMN heartbeat_at TEXT" },
   { table: "teams", column: "stop_reason", ddl: "ALTER TABLE teams ADD COLUMN stop_reason TEXT" },
+  { table: "mail", column: "level", ddl: "ALTER TABLE mail ADD COLUMN level TEXT NOT NULL DEFAULT 'normal'" },
+  { table: "mail", column: "intent", ddl: "ALTER TABLE mail ADD COLUMN intent TEXT" },
 ];
 
 export function migrate(db: Db): void {
@@ -114,6 +116,10 @@ export function migrate(db: Db): void {
       }
     }
   }
+  // Legacy rows (schema v1/v2) only knew `urgent`; normalise them to the new level
+  // vocabulary. Idempotent, and also repairs rows written by an older process that
+  // still writes only `urgent`.
+  db.run("UPDATE mail SET level = 'high' WHERE urgent = 1 AND level <> 'high'");
 }
 
 export const SCHEMA = `
@@ -227,6 +233,8 @@ CREATE TABLE IF NOT EXISTS mail (
   recipient TEXT NOT NULL,
   text TEXT NOT NULL,
   urgent INTEGER NOT NULL DEFAULT 0,
+  level TEXT NOT NULL DEFAULT 'normal',
+  intent TEXT,
   kind TEXT NOT NULL,
   task TEXT,
   delivered_at TEXT

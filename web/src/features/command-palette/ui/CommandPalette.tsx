@@ -1,4 +1,5 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { DocFileIcon, DocStatusBadge, snippetParts, useDebounced, useDocSearch } from "@/entities/doc";
 import { StatusIcon, type ViewId, VIEWS, useTasks } from "@/entities/task";
 import { useTeams } from "@/entities/team";
 import { Icon, Modal } from "@/shared/ui";
@@ -9,6 +10,10 @@ export interface PaletteActions {
   layout: (l: "list" | "board") => void;
   openTask: (id: string) => void;
   openTeam: (id: string) => void;
+  openDoc: (path: string) => void;
+  openDocs: () => void;
+  newDoc: (kind: "page" | "note", title?: string) => void;
+  searchDocs: (q: string) => void;
 }
 
 interface Item {
@@ -16,47 +21,115 @@ interface Item {
   icon: ReactNode;
   label: string;
   hint?: string;
+  /** Second line of a docs hit (a highlighted snippet). */
+  sub?: ReactNode;
+  /** Rendered next to the label (docs status). */
+  mark?: ReactNode;
+  group: "ДЕЙСТВИЯ" | "ПЕРЕЙТИ" | "КОМАНДЫ" | "ЗАДАЧИ" | "ДОКУМЕНТАЦИЯ";
   run: () => void;
 }
+
+const GROUP_ORDER: Record<Item["group"], number> = { ЗАДАЧИ: 0, ДОКУМЕНТАЦИЯ: 1, ДЕЙСТВИЯ: 2, ПЕРЕЙТИ: 3, КОМАНДЫ: 4 };
 
 export function CommandPalette({ onClose, actions }: { onClose: () => void; actions: PaletteActions }) {
   const tasks = useTasks().data ?? [];
   const teams = useTeams().data ?? [];
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
+  const [docsOnly, setDocsOnly] = useState(false);
+  const query = q.trim();
+  const debounced = useDebounced(q, 180);
+  const docs = useDocSearch(debounced.trim(), debounced.trim().length > 0);
 
   const items = useMemo<Item[]>(() => {
     const base: Item[] = [
-      { key: "new", icon: <Icon.plus />, label: "Новая задача", hint: "C", run: actions.newTask },
-      { key: "list", icon: <Icon.list />, label: "Показать списком", run: () => actions.layout("list") },
-      { key: "board", icon: <Icon.board />, label: "Показать доской", hint: "B", run: () => actions.layout("board") },
-      ...(Object.keys(VIEWS) as ViewId[]).map((v) => ({ key: `v-${v}`, icon: <Icon.chevron />, label: `Перейти: ${VIEWS[v].name}`, run: () => actions.go(v) })),
-      ...teams.filter((t) => t.state === "active").map((t) => ({ key: `t-${t.id}`, icon: <span className="spin" />, label: `Команда ${t.id}`, hint: t.taskInfo?.title, run: () => actions.openTeam(t.id) })),
-      ...tasks.map((t) => ({ key: t.id, icon: <StatusIcon status={t.status} />, label: `${t.id}  ${t.title}`, hint: t.labels.join(", "), run: () => actions.openTask(t.id) })),
+      { key: "new", icon: <Icon.plus />, label: "Новая задача", hint: "C", group: "ДЕЙСТВИЯ", run: actions.newTask },
+      { key: "list", icon: <Icon.list />, label: "Показать списком", group: "ДЕЙСТВИЯ", run: () => actions.layout("list") },
+      { key: "board", icon: <Icon.board />, label: "Показать доской", hint: "B", group: "ДЕЙСТВИЯ", run: () => actions.layout("board") },
+      ...(Object.keys(VIEWS) as ViewId[]).map((v) => ({ key: `v-${v}`, icon: <Icon.chevron />, label: `Перейти: ${VIEWS[v].name}`, group: "ПЕРЕЙТИ" as const, run: () => actions.go(v) })),
+      { key: "docs", icon: <DocFileIcon />, label: "Документация", hint: "docs/", group: "ПЕРЕЙТИ", run: actions.openDocs },
+      ...teams.filter((t) => t.state === "active").map((t) => ({ key: `t-${t.id}`, icon: <span className="spin" />, label: `Команда ${t.id}`, hint: t.taskInfo?.title, group: "КОМАНДЫ" as const, run: () => actions.openTeam(t.id) })),
+      ...tasks.map((t) => ({ key: t.id, icon: <StatusIcon status={t.status} />, label: `${t.id}  ${t.title}`, hint: t.labels.join(", "), group: "ЗАДАЧИ" as const, run: () => actions.openTask(t.id) })),
     ];
-    const s = q.trim().toLowerCase();
-    return (s ? base.filter((i) => i.label.toLowerCase().includes(s) || (i.hint ?? "").toLowerCase().includes(s)) : base).slice(0, 60);
-  }, [q, tasks, teams, actions]);
 
-  const run = (i: Item | undefined) => {
-    if (!i) return;
+    const docsHits: Item[] = (docs.data?.results ?? []).slice(0, 6).map((result) => ({
+      key: `d-${result.path}`,
+      icon: <DocFileIcon />,
+      label: result.title,
+      hint: result.path,
+      mark: <DocStatusBadge status={result.status} />,
+      sub: (
+        <span className="pal-snippet">
+          {snippetParts(result.snippet)
+            .slice(0, 12)
+            .map((part, i) => (part.hit ? <mark key={i}>{part.text}</mark> : <span key={i}>{part.text}</span>))}
+        </span>
+      ),
+      group: "ДОКУМЕНТАЦИЯ",
+      run: () => actions.openDoc(result.path),
+    }));
+    if (query) {
+      if (!docsHits.length) {
+        docsHits.push({
+          key: "d-search",
+          icon: <Icon.search />,
+          label: `Найти в документации «${query}»`,
+          group: "ДОКУМЕНТАЦИЯ",
+          run: () => actions.searchDocs(query),
+        });
+      }
+      docsHits.push({
+        key: "d-note",
+        icon: <Icon.plus />,
+        label: `Быстрая заметка «${query}» в inbox/`,
+        group: "ДЕЙСТВИЯ",
+        run: () => actions.newDoc("note", query),
+      });
+      docsHits.push({
+        key: "d-page",
+        icon: <Icon.plus />,
+        label: `Новая страница «${query}»`,
+        group: "ДЕЙСТВИЯ",
+        run: () => actions.newDoc("page", query),
+      });
+    }
+
+    const all = [...base, ...docsHits];
+    const s = query.toLowerCase();
+    // Docs hits come from the server already ranked and matched (title, summary,
+    // headings, body, tags, aliases). Re-filtering them by substring would drop
+    // e.g. alias-only matches, so they only obey the `docsOnly` scope.
+    const isDocItem = (item: Item) => item.group === "ДОКУМЕНТАЦИЯ" || item.key === "d-note" || item.key === "d-page";
+    const matched = s ? all.filter((i) => isDocItem(i) || `${i.label} ${i.hint ?? ""}`.toLowerCase().includes(s)) : all;
+    const scoped = docsOnly ? matched.filter(isDocItem) : matched;
+    return scoped.sort((a, b) => GROUP_ORDER[a.group] - GROUP_ORDER[b.group]).slice(0, 60);
+  }, [query, tasks, teams, actions, docs.data, docsOnly]);
+
+  useEffect(() => setIdx(0), [q, docsOnly]);
+
+  const run = (item: Item | undefined) => {
+    if (!item) return;
     onClose();
-    i.run();
+    item.run();
   };
+
+  let lastGroup: string | undefined;
 
   return (
     <Modal label="Команды" onClose={onClose}>
       <div className="palette">
         <input
           autoFocus
-          aria-label="Поиск команд и задач"
-          placeholder="Задача, команда или действие…"
+          aria-label="Поиск команд, задач и документации"
+          placeholder="Задача, команда, документация или действие…"
           value={q}
-          onChange={(e) => {
-            setQ(e.target.value);
-            setIdx(0);
-          }}
+          onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
+            if (e.key === "Tab") {
+              e.preventDefault();
+              setDocsOnly((v) => !v);
+              return;
+            }
             if (e.key === "ArrowDown") setIdx((i) => Math.min(items.length - 1, i + 1));
             else if (e.key === "ArrowUp") setIdx((i) => Math.max(0, i - 1));
             else if (e.key === "Enter") run(items[idx]);
@@ -65,14 +138,39 @@ export function CommandPalette({ onClose, actions }: { onClose: () => void; acti
           }}
         />
         <div className="items" role="listbox">
-          {items.map((i, n) => (
-            <button key={i.key} type="button" role="option" aria-selected={n === idx} className={`item${n === idx ? " on" : ""}`} onMouseEnter={() => setIdx(n)} onClick={() => run(i)}>
-              {i.icon}
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.label}</span>
-              {i.hint && <span className="hint">{i.hint}</span>}
-            </button>
-          ))}
-          {!items.length && <div className="empty" style={{ padding: 30 }}>Ничего не найдено</div>}
+          {items.map((i, n) => {
+            const header = i.group !== lastGroup ? i.group : undefined;
+            lastGroup = i.group;
+            return (
+              <div key={i.key}>
+                {header && (
+                  <div className={`pal-group${docsOnly ? " on" : ""}`}>
+                    {header}
+                    {header === "ДОКУМЕНТАЦИЯ" && docsOnly ? <span className="muted"> · только документация</span> : null}
+                  </div>
+                )}
+                <button type="button" role="option" aria-selected={n === idx} className={`item${n === idx ? " on" : ""}`} onMouseEnter={() => setIdx(n)} onClick={() => run(i)}>
+                  {i.icon}
+                  <span className="pal-col">
+                    <span className="pal-label">
+                      {i.label}
+                      {i.mark}
+                    </span>
+                    {i.sub && <span className="pal-sub">{i.sub}</span>}
+                  </span>
+                  {i.hint && <span className="hint">{i.hint}</span>}
+                </button>
+              </div>
+            );
+          })}
+          {!items.length && (
+            <div className="empty" style={{ padding: 30 }}>
+              {docsOnly && !docs.isPending ? "В документации ничего не найдено" : "Ничего не найдено"}
+            </div>
+          )}
+        </div>
+        <div className="pal-foot muted">
+          <kbd>↑↓</kbd> выбрать <kbd>↵</kbd> открыть <kbd>Tab</kbd> только документация <kbd>Esc</kbd> закрыть
         </div>
       </div>
     </Modal>

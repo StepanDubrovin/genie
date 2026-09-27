@@ -2,6 +2,7 @@
 // lists, task lists, quotes, fenced code, inline code, bold, italics, links.
 
 import { Fragment, type ReactNode } from "react";
+import "./markdown.css";
 
 function inline(text: string, key = 0): ReactNode[] {
   const out: ReactNode[] = [];
@@ -27,6 +28,66 @@ function inline(text: string, key = 0): ReactNode[] {
   }
   if (last < text.length) out.push(text.slice(last));
   return out;
+}
+
+type Align = "left" | "center" | "right" | null;
+
+// Split a GFM table row into trimmed cells, honouring escaped pipes (`\|`)
+// and pipes inside code spans, and dropping one optional leading/trailing pipe.
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (/\|$/.test(s) && !/\\\|$/.test(s)) s = s.slice(0, -1);
+  const cells: string[] = [];
+  let cur = "";
+  let inCode = false;
+  for (let j = 0; j < s.length; j++) {
+    const ch = s[j];
+    if (ch === "\\" && s[j + 1] === "|") {
+      cur += "|";
+      j++;
+      continue;
+    }
+    if (ch === "`") inCode = !inCode;
+    if (ch === "|" && !inCode) {
+      cells.push(cur.trim());
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+function hasCellDivider(line: string): boolean {
+  let inCode = false;
+  for (let j = 0; j < line.length; j++) {
+    if (line[j] === "`") inCode = !inCode;
+    else if (line[j] === "|" && !inCode && line[j - 1] !== "\\") return true;
+  }
+  return false;
+}
+
+// The delimiter row (`--- | :--: | ---:`) that turns a row into a table header.
+function parseDelimiter(line: string): Align[] | null {
+  const cells = splitRow(line);
+  if (!cells.length) return null;
+  const align: Align[] = [];
+  for (const cell of cells) {
+    if (!/^:?-+:?$/.test(cell)) return null;
+    align.push(cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : cell.startsWith(":") ? "left" : null);
+  }
+  return align;
+}
+
+function tableStart(lines: string[], i: number): { header: string[]; align: Align[] } | null {
+  if (i + 1 >= lines.length || !hasCellDivider(lines[i])) return null;
+  const align = parseDelimiter(lines[i + 1]);
+  if (!align) return null;
+  const header = splitRow(lines[i]);
+  if (header.length !== align.length) return null;
+  return { header, align };
 }
 
 export function Markdown({ text, empty = "Пусто" }: { text: string; empty?: string }) {
@@ -88,8 +149,45 @@ export function Markdown({ text, empty = "Пусто" }: { text: string; empty?:
       blocks.push(<blockquote key={k++}>{inline(quote.join(" "), k)}</blockquote>);
       continue;
     }
+    const table = tableStart(lines, i);
+    if (table) {
+      const cols = table.header.length;
+      const cellAlign: (Align | undefined)[] = table.align;
+      const head = table.header.map((cell, ci) => (
+        <th key={ci} style={cellAlign[ci] ? { textAlign: cellAlign[ci] } : undefined}>
+          {inline(cell, ci)}
+        </th>
+      ));
+      i += 2;
+      const rows: ReactNode[] = [];
+      while (i < lines.length && lines[i].trim() && hasCellDivider(lines[i])) {
+        const cells = splitRow(lines[i]);
+        while (cells.length < cols) cells.push("");
+        rows.push(
+          <tr key={i}>
+            {cells.slice(0, cols).map((cell, ci) => (
+              <td key={ci} style={cellAlign[ci] ? { textAlign: cellAlign[ci] } : undefined}>
+                {inline(cell, ci)}
+              </td>
+            ))}
+          </tr>,
+        );
+        i++;
+      }
+      blocks.push(
+        <div className="md-table-wrap" key={k++}>
+          <table className="md-table">
+            <thead>
+              <tr>{head}</tr>
+            </thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
     const para: string[] = [];
-    while (i < lines.length && lines[i].trim() && !/^(```|#{1,4}\s|>|\s*([-*]|\d+\.)\s)/.test(lines[i])) para.push(lines[i++]);
+    while (i < lines.length && lines[i].trim() && !/^(```|#{1,4}\s|>|\s*([-*]|\d+\.)\s)/.test(lines[i]) && !tableStart(lines, i)) para.push(lines[i++]);
     blocks.push(
       <p key={k++}>
         {para.map((p, j) => (
