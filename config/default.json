@@ -60,15 +60,12 @@
       "worktree": true,
       "members": [
         {
-          "name": "analyst",
           "role": "analyst"
         },
         {
-          "name": "executor",
           "role": "executor"
         },
         {
-          "name": "reviewer",
           "role": "reviewer"
         }
       ]
@@ -78,11 +75,9 @@
       "worktree": true,
       "members": [
         {
-          "name": "executor",
           "role": "executor"
         },
         {
-          "name": "reviewer",
           "role": "reviewer"
         }
       ]
@@ -92,17 +87,14 @@
       "worktree": false,
       "members": [
         {
-          "name": "analyst",
           "role": "analyst",
           "instructions": "Use the read-only SAP MCP servers to study the objects involved. List every ABAP object (type + name) the change touches. Parallel teams must not touch the same objects."
         },
         {
-          "name": "executor",
           "role": "executor",
           "instructions": "The SAP system is read-only for you. Deliver the complete source of every changed or new ABAP object as `code` artifacts (one per object, named like zcl_foo.clas.abap), plus a short transfer guide (order of objects, activation notes). With abapGit repos, commit the files instead."
         },
         {
-          "name": "reviewer",
           "role": "reviewer",
           "instructions": "Review the ABAP code artifacts against clean ABAP guidelines and the current system state (read via MCP): syntax plausibility, naming, performance (SELECT in loops, buffering), authorisation checks, and that only agreed objects change."
         }
@@ -113,11 +105,9 @@
       "worktree": false,
       "members": [
         {
-          "name": "analyst",
           "role": "analyst"
         },
         {
-          "name": "reviewer",
           "role": "reviewer"
         }
       ]
@@ -127,11 +117,9 @@
       "worktree": false,
       "members": [
         {
-          "name": "analyst",
           "role": "analyst"
         },
         {
-          "name": "reviewer",
           "role": "reviewer"
         }
       ]
@@ -141,23 +129,18 @@
       "worktree": true,
       "members": [
         {
-          "name": "analyst",
           "role": "analyst"
         },
         {
-          "name": "executor",
           "role": "executor"
         },
         {
-          "name": "tester",
           "role": "tester"
         },
         {
-          "name": "reviewer",
           "role": "reviewer"
         },
         {
-          "name": "documenter",
           "role": "documenter"
         }
       ]

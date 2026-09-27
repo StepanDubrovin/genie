@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
-import { Avatar } from "@/entities/member";
+import { Avatar, displayName, memberLabel } from "@/entities/member";
 import { StageBars, STAGES, stageOf, STATUS_NAME } from "@/entities/task";
 import { type Mail, type TeamDetail, useSendMail, useTeam } from "@/entities/team";
 import { clock, dayLabel, timeAgo, useTick } from "@/shared/lib";
@@ -50,17 +50,17 @@ function toEntries(mail: Mail[]): Entry[] {
 function recipients(to: string[], team: TeamDetail): string {
   const everyone = team.members.length + 1;
   if (to.length >= everyone - 1 && to.length > 1) return "всем";
-  return to.map((x) => (x === "orchestrator" ? "orchestrator" : x)).join(", ");
+  return to.map((x) => (x === "orchestrator" ? "оркестратор" : displayName(x))).join(", ");
 }
 
 const EVENT_TEXT: Record<string, (e: Record<string, unknown>) => string> = {
   team_created: () => "команда создана",
-  member_started: (e) => `${e.member} запущен`,
-  member_stopped: (e) => `${e.member} остановлен`,
-  member_added: (e) => `добавлен ${String(e.member).split(":")[0]}`,
-  status: (e) => `${e.member}: ${e.status}`,
+  member_started: (e) => `${displayName(String(e.member))} запущен`,
+  member_stopped: (e) => `${displayName(String(e.member))} остановлен`,
+  member_added: (e) => `добавлен ${displayName(String(e.member).split(":")[0])}`,
+  status: (e) => `${displayName(String(e.member))}: ${e.status}`,
   task_status: (e) => `${e.task} → ${STATUS_NAME[e.status as keyof typeof STATUS_NAME] ?? e.status}`,
-  agent_error: (e) => `${e.member}: ошибка модели`,
+  agent_error: (e) => `${displayName(String(e.member))}: ошибка модели`,
   blocked: (e) => `${e.task} заблокирована: ${e.reason}`,
   team_stopped: () => "команда остановлена",
   launch_failed: () => "не удалось запустить участников",
@@ -152,9 +152,9 @@ export function TeamView() {
                     <div className="sys">
                       <div>
                         <b>
-                          {m.title ?? `${m.from} → ${recipients(m.to, team)}`} · {clock(m.at)}
+                          {m.title ?? `${m.fromRole === "orchestrator" ? "оркестратор" : displayName(m.from)} → ${recipients(m.to, team)}`} · {clock(m.at)}
                         </b>
-                        {m.title ? `Участники: ${m.to.join(", ")}` : m.text}
+                        {m.title ? `Участники: ${m.to.map(displayName).join(", ")}` : m.text}
                       </div>
                     </div>
                   ) : m.kind === "mine" ? (
@@ -180,7 +180,7 @@ export function TeamView() {
                       <div className="col2">
                         {!cont && (
                           <span className="who">
-                            <span className={`n c-${m.fromRole}`}>{m.from}</span>
+                            <span className={`n c-${m.fromRole}`}>{m.fromRole === "orchestrator" ? "Оркестратор" : memberLabel(m.from, m.fromRole)}</span>
                             <span className="m">
                               → {recipients(m.to, team)} · {clock(m.at)}
                               {m.urgent ? " · срочно" : ""}
@@ -205,7 +205,7 @@ export function TeamView() {
                   <span />
                   <span />
                 </span>
-                {working.map((w) => w.name).join(", ")} {working.length > 1 ? "работают" : "работает"}
+                {working.map((w) => displayName(w.name)).join(", ")} {working.length > 1 ? "работают" : "работает"}
               </div>
             )}
           </div>
@@ -224,7 +224,7 @@ export function TeamView() {
               {[{ name: "all", role: "" }, ...team.members.map((m) => ({ name: m.name, role: m.role })), { name: "orchestrator", role: "orchestrator" }].map((r) => (
                 <button key={r.name} type="button" className={`chip${to === r.name ? " on" : ""}`} aria-pressed={to === r.name} onClick={() => setTo(r.name)}>
                   <i className={r.role ? `r-${r.role}` : ""} style={r.role ? undefined : { background: "var(--text-2)" }} />
-                  {r.name === "all" ? "Всем" : r.name}
+                  {r.name === "all" ? "Всем" : r.name === "orchestrator" ? "оркестратор" : displayName(r.name)}
                 </button>
               ))}
             </div>
@@ -260,7 +260,7 @@ export function TeamView() {
               <Avatar role={m.role} name={m.name} activity={active ? m.activity : undefined} state={m.state} size="lg" />
               <span className="info">
                 <span className="nm">
-                  <b>{m.name}</b>
+                  <b>{memberLabel(m.name, m.role)}</b>
                   {m.activity === "error" ? <span className="e">ошибка</span> : m.activity === "working" && active ? <span className="w">работает</span> : <span>{m.state === "stopped" ? "остановлен" : "ждёт"}</span>}
                   {team.pending[m.name] ? <span style={{ color: "var(--amber)" }}>✉ {team.pending[m.name]}</span> : null}
                 </span>

@@ -371,3 +371,7 @@ button.title { background: none; border: 0; padding: 0; color: inherit; text-ali
 @media (max-width: 900px) {
   .board { scroll-padding-inline: 16px; }
 }
+
+/* member names: keep "Name — role" on one line, status wraps below */
+.mcard .nm { flex-wrap: wrap; row-gap: 2px; }
+.mcard .nm b { white-space: nowrap; }

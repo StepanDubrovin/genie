@@ -14,6 +14,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { notifyOn } from "../notify.ts";
 import { BROADCAST, type Mail, type Member, ORCHESTRATOR, type Team, TeamBus } from "../team/bus.ts";
 import { type GenieConfig, languagePolicy, loadConfig, loadRole, type MemberSpec, PACKAGE_ROOT, resolveMember } from "../team/config.ts";
+import { assignNames, displayName, memberLabel } from "../team/names.ts";
 import { createWorktree, herdrAgentName, launchHeadless, launchHerdr, type LaunchSpec, removeWorktree, stopAllHeadless, stopMember } from "../team/spawn.ts";
 import { defaultGenieDir, now, repoInfo } from "../tracker/fsutil.ts";
 import { type Actor, ARTIFACT_KINDS, CLOSED, COMMENT_KINDS, MEMBER_ROLES, type MemberRole, type Status, STATUSES, TASK_TYPES, type Task } from "../tracker/model.ts";
@@ -21,6 +22,8 @@ import { oneLine, renderTask } from "../tracker/render.ts";
 import { GenieError, Tracker } from "../tracker/store.ts";
 import { isAnimating, LiveLines, renderCard, renderWidgetLines, snapshot, type TeamSnapshot } from "./card.ts";
 import { settingsMenu } from "./settings.ts";
+
+type Named = MemberSpec & { name: string };
 
 type Mode = { kind: "off" } | { kind: "orchestrator" } | { kind: "member"; role: MemberRole; team: string; member: string; task: string };
 
@@ -202,7 +205,7 @@ export default function genie(pi: ExtensionAPI) {
       } catch {
         // ignore
       }
-      ctx.ui.setStatus("genie", `genie: ${mode.member} (${mode.role}) · team ${mode.team} · ${mode.task} ${status}`);
+      ctx.ui.setStatus("genie", `genie: ${memberLabel(mode.member, mode.role)} · team ${mode.team} · ${mode.task} ${status}`);
     }
   }
 
@@ -278,10 +281,10 @@ export default function genie(pi: ExtensionAPI) {
       languagePolicy(c),
       "",
       "## Your team",
-      `You are "${m.member}" (${m.role}) in team ${m.team}, working on task ${m.task}.`,
+      `You are ${displayName(m.member)}, the ${m.role} of team ${m.team}, working on task ${m.task}. Teammates call you "${m.member}".`,
       team?.worktree ? `Working directory: ${team.cwd} (git worktree, branch ${team.worktree.branch}, base commit ${team.worktree.base}).` : `Working directory: ${team?.cwd ?? "(unknown)"}.`,
-      "Teammates (message them directly with team_send; `orchestrator` is the task owner, `all` broadcasts):",
-      ...(team?.members.map((x) => `- ${x.name} — ${x.role}, model ${x.model ?? "default"}${x.name === m.member ? " (you)" : ""}`) ?? []),
+      "Teammates (message them with team_send using the lowercase id; `orchestrator` is the task owner, `all` broadcasts). Refer to teammates by name:",
+      ...(team?.members.map((x) => `- ${memberLabel(x.name, x.role, "en")} (id \`${x.name}\`), model ${x.model ?? "default"}${x.name === m.member ? " — you" : ""}`) ?? []),
       me?.instructions ? `\nSpecific instructions for you: ${me.instructions}` : "",
       role.mcp.includes("*") ? "" : `\nMCP servers you may use: ${role.mcp.join(", ") || "none"}.`,
       "",
@@ -582,14 +585,14 @@ export default function genie(pi: ExtensionAPI) {
   // ---------------------------------------------------------------- team_spawn / team_add_member
 
   const memberSchema = Type.Object({
-    name: Type.String({ description: "Unique member name within the team, e.g. executor or tester2" }),
+    name: Type.Optional(Type.String({ description: "Lowercase id, unique among active teams. Omit it: a playful name is picked automatically (e.g. sherlock the analyst, bender the executor)" })),
     role: StringEnum(MEMBER_ROLES),
     model: Type.Optional(Type.String({ description: "provider/model id; defaults to the role default from config" })),
     thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh, max" })),
     instructions: Type.Optional(Type.String({ description: "Extra instructions for this member" })),
   });
 
-  function validateSpecs(specs: MemberSpec[], existing: string[], ctx: ExtensionContext): void {
+  function validateSpecs(specs: Named[], existing: string[], ctx: ExtensionContext): void {
     const names = new Set(existing);
     for (const s of specs) {
       if (!/^[a-z][a-z0-9_-]*$/.test(s.name)) throw new GenieError(`member name "${s.name}" must match [a-z][a-z0-9_-]*`);
@@ -610,7 +613,7 @@ export default function genie(pi: ExtensionAPI) {
     }
   }
 
-  function kickoff(teamId: string, task: Task, cwd: string, worktree: Team["worktree"], all: MemberSpec[], s: MemberSpec, extra?: string, joining = false): string {
+  function kickoff(teamId: string, task: Task, cwd: string, worktree: Team["worktree"], all: Named[], s: Named, extra?: string, joining = false): string {
     const hasAnalyst = all.some((x) => x.role === "analyst");
     const refinement = !["ready", "changes_requested", "in_progress", "review"].includes(task.status);
     const first: Record<MemberRole, string> = {
@@ -629,15 +632,15 @@ export default function genie(pi: ExtensionAPI) {
       documenter: "Wait until the implementation is approved or the orchestrator asks you, then write/update the documentation, attach a `doc` artifact and tell the orchestrator.",
     };
     return [
-      `${joining ? "You are joining" : "You are"} "${s.name}" (${s.role}) in team ${teamId}. Task: ${task.id} — ${task.title} (status ${task.status}). Read it with genie_task {"action":"show"}.`,
+      `${joining ? "You are joining team" : "Welcome to team"} ${teamId}, ${displayName(s.name)}! You are the ${s.role}; teammates address you as "${s.name}". Task: ${task.id} — ${task.title} (status ${task.status}). Read it with genie_task {"action":"show"}.`,
       worktree ? `Working directory: ${cwd} (branch ${worktree.branch}, base ${String(worktree.base).slice(0, 10)}).` : `Working directory: ${cwd}.`,
-      `Team: ${all.map((x) => `${x.name} (${x.role})`).join(", ")}, plus orchestrator.`,
+      `Team: ${all.map((x) => `${memberLabel(x.name, x.role, "en")} (\`${x.name}\`)`).join(", ")}, plus orchestrator.`,
       first[s.role],
       extra ? `\nFrom the orchestrator: ${extra}` : "",
     ].join("\n");
   }
 
-  async function launch(specs: MemberSpec[], team: Team, launchMode: string, anchorPane?: string): Promise<void> {
+  async function launch(specs: Named[], team: Team, launchMode: string, anchorPane?: string): Promise<void> {
     const { tracker, bus } = need();
     const c = cfg();
     const launchSpecs: LaunchSpec[] = specs.map((s) => ({ team, member: s, role: loadRole(s.role, tracker.dir), genieDir: tracker.dir, cwd: team.cwd, cfg: c }));
@@ -683,7 +686,8 @@ export default function genie(pi: ExtensionAPI) {
       const templateName = p.template ?? (p.members?.length ? undefined : "standard");
       const template = templateName ? c.teams?.[templateName] : undefined;
       if (templateName && !template && !p.members?.length) throw new GenieError(`unknown team template ${templateName}; known: ${Object.keys(c.teams ?? {}).join(", ")}`);
-      const specs: MemberSpec[] = (p.members?.length ? (p.members as MemberSpec[]) : template!.members).map((m) => resolveMember(m, c));
+      const taken = new Set(bus.list().flatMap((t) => t.members.map((m) => m.name)));
+      const specs: Named[] = assignNames((p.members?.length ? (p.members as MemberSpec[]) : template!.members).map((m) => resolveMember(m, c)), taken, c.names);
       if (!specs.length) throw new GenieError("a team needs at least one member");
       if (specs.length > c.limits.maxMembersPerTeam) throw new GenieError(`limit: at most ${c.limits.maxMembersPerTeam} members per team (requested ${specs.length})`);
       const refinement = ["inbox", "draft", "refining"].includes(task.status);
@@ -764,7 +768,8 @@ export default function genie(pi: ExtensionAPI) {
       const c = cfg();
       const team = bus.get(p.team);
       if (team.state !== "active") throw new GenieError(`team ${team.id} is stopped`);
-      const specs = (p.members as MemberSpec[]).map((m) => resolveMember(m, c));
+      const taken = new Set(bus.list().flatMap((t) => t.members.map((m) => m.name)));
+      const specs: Named[] = assignNames((p.members as MemberSpec[]).map((m) => resolveMember(m, c)), taken, c.names);
       if (team.members.length + specs.length > c.limits.maxMembersPerTeam) throw new GenieError(`limit: at most ${c.limits.maxMembersPerTeam} members per team`);
       validateSpecs(
         specs,
@@ -775,7 +780,7 @@ export default function genie(pi: ExtensionAPI) {
       for (const s of specs) bus.addMember(team.id, { name: s.name, role: s.role, model: s.model, thinking: s.thinking, instructions: s.instructions, status: "starting", statusAt: at, state: "starting" });
       const updated = bus.get(team.id);
       const task = tracker.get(team.task);
-      const all: MemberSpec[] = updated.members.map((m) => ({ name: m.name, role: m.role, model: m.model }));
+      const all: Named[] = updated.members.map((m) => ({ name: m.name, role: m.role, model: m.model }));
       for (const s of specs) bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(team.id, task, team.cwd, team.worktree, all, s, p.kickoff, true) });
       const others = team.members.map((m) => m.name);
       for (const name of others) bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: name, kind: "system", text: `New teammate(s): ${specs.map((s) => `${s.name} (${s.role})`).join(", ")}.` });

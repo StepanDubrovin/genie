@@ -14,7 +14,8 @@ import type { Gates, MemberRole } from "../tracker/model.ts";
 export const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export interface MemberSpec {
-  name: string;
+  /** Lowercase id used in team_send; a playful name is picked automatically when omitted. */
+  name?: string;
   role: MemberRole;
   /** provider/model, e.g. "openai-codex/gpt-6-luna" or "litellm/claude-opus-5-5" */
   model?: string;
@@ -64,6 +65,8 @@ export interface GenieConfig {
   };
   gates: Gates;
   web: { port: number };
+  /** Name pools per role for automatic member names (defaults in src/team/names.ts). */
+  names?: Partial<Record<MemberRole, string[]>>;
   /** Default model per role, used when a member spec has none. */
   roleModels: Record<string, { model?: string; thinking?: string }>;
   teams: Record<string, TeamTemplate>;

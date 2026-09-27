@@ -13,7 +13,7 @@ import {
 } from "@dnd-kit/core";
 import { useState } from "react";
 import { Link } from "react-router";
-import { Avatar, Avatars } from "@/entities/member";
+import { Avatar, Avatars, memberLabel } from "@/entities/member";
 import { COLUMNS, type Column, Labels, PriorityIcon, type Status, STATUS_NAME, StatusIcon, type TaskSummary, useMoveTask } from "@/entities/task";
 import type { Team } from "@/entities/team";
 import { Icon, Modal, useToast } from "@/shared/ui";
@@ -137,7 +137,7 @@ function Peek({ t, team, onClose, onOpen, onMove }: { t: TaskSummary; team?: Tea
           team.members.map((m) => (
             <span key={m.name} className="member-line">
               <Avatar role={m.role} name={m.name} activity={m.activity} state={m.state} size="solo" />
-              {m.name}
+              {memberLabel(m.name, m.role)}
               <span className="st">{m.activity === "working" ? "работает" : m.activity === "error" ? "ошибка" : m.state === "stopped" ? "остановлен" : "ждёт"}</span>
             </span>
           ))

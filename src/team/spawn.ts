@@ -68,7 +68,7 @@ export function installedAsPackage(cwd: string): boolean {
 
 export interface LaunchSpec {
   team: Team;
-  member: MemberSpec;
+  member: MemberSpec & { name: string };
   role: RoleDef;
   genieDir: string;
   cwd: string;

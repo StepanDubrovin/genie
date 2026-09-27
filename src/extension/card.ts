@@ -6,6 +6,7 @@ import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import type { Member, Team, TeamBus } from "../team/bus.ts";
 import type { Status } from "../tracker/model.ts";
 import type { Tracker } from "../tracker/store.ts";
+import { displayName, memberLabel } from "../team/names.ts";
 
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -88,7 +89,7 @@ export function renderCard(s: TeamSnapshot | undefined, theme: Theme, frame: num
   for (const m of team.members) {
     const mail = s.pending[m.name] ? theme.fg("warning", ` ✉${s.pending[m.name]}`) : "";
     const statusText = m.activity === "error" ? theme.fg("error", m.status) : theme.fg(m.activity === "working" ? "text" : "muted", m.status);
-    lines.push(`  ${memberGlyph(m, team, frame, theme)} ${m.name.padEnd(11)} ${theme.fg("dim", shortModel(m.model).padEnd(23))} ${statusText}${mail}`);
+    lines.push(`  ${memberGlyph(m, team, frame, theme)} ${memberLabel(m.name, m.role).padEnd(24)} ${theme.fg("dim", shortModel(m.model).padEnd(23))} ${statusText}${mail}`);
   }
   return lines.map((l) => truncateToWidth(l, width));
 }
@@ -99,7 +100,7 @@ export function renderWidgetLines(snaps: TeamSnapshot[], theme: Theme, frame: nu
     const working = s.team.members.filter((m) => m.activity === "working").length;
     const head = s.status === "needs_owner" ? theme.fg("warning", "!") : working ? theme.fg("accent", SPINNER[frame % SPINNER.length]) : theme.fg("muted", "○");
     const members = s.team.members
-      .map((m) => `${memberGlyph(m, s.team, frame, theme)} ${m.name}${s.pending[m.name] ? theme.fg("warning", `✉${s.pending[m.name]}`) : ""}`)
+      .map((m) => `${memberGlyph(m, s.team, frame, theme)} ${displayName(m.name)}${s.pending[m.name] ? theme.fg("warning", `✉${s.pending[m.name]}`) : ""}`)
       .join("  ");
     return truncateToWidth(`${head} ${theme.bold(s.team.id)} ${bar(theme, stageOf(s.status, s.previous), STAGES.length)} ${theme.fg("muted", s.status.replace("_", " "))}  ${members}`, width);
   });

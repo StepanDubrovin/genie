@@ -220,3 +220,19 @@ test("mailboxes: direct, broadcast, exactly-once receive", () => {
   assert.equal(bus.freeId("G-1"), "G-1b");
   assert.ok(bus.readLog("G-1").some((e) => e.event === "mail"));
 });
+
+test("members get unique playful names shown as 'Name — role'", async () => {
+  const { assignNames, memberLabel, initial } = await import("../src/team/names.ts");
+  const taken = new Set(["sherlock"]);
+  const named = assignNames([{ role: "analyst" as const }, { role: "analyst" as const }, { role: "executor" as const, name: "walle" }], taken);
+  const names = named.map((m) => m.name);
+  assert.equal(new Set(names).size, 3);
+  assert.ok(!names.slice(0, 2).includes("sherlock"), "names already used by active teams are skipped");
+  assert.equal(names[2], "walle", "explicit names are kept");
+  assert.equal(memberLabel("walle", "executor"), "WALL-E — исполнитель");
+  assert.equal(memberLabel("gandalf", "reviewer", "en"), "Gandalf — reviewer");
+  assert.equal(memberLabel("analyst", "analyst"), "Аналитик", "legacy role-like names show the role only");
+  assert.equal(initial("baymax", "executor"), "B");
+  const exhausted = assignNames([{ role: "tester" as const }], new Set(["murphy", "gremlin", "loki", "jinx", "chaos", "moriarty"]));
+  assert.equal(exhausted[0].name, "murphy2");
+});
