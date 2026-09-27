@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Db } from "../tracker/db.ts";
+import { repoInfo } from "../tracker/fsutil.ts";
 import { matchesAnyGlob } from "./glob.ts";
 import { toDocRelative } from "./root.ts";
 import { DocsService, type DocPage, type DocReadResult, type DocSearchResult } from "./service.ts";
@@ -288,18 +289,28 @@ function pageTermMatch(surface: Set<string>, token: string): boolean {
   return surface.has(normalizeTerm(token));
 }
 
+function packageName(root: string): string | undefined {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as { name?: unknown };
+    return typeof pkg.name === "string" && pkg.name.trim() ? pkg.name : undefined;
+  } catch { return undefined; }
+}
+
 /**
- * Tokens from the project directory name and `package.json` name ("meta.project").
- * Note: inside a linked worktree the directory basename is the worktree name
- * (e.g. `G-23`), not the project name, so `package.json` `name` is the reliable
- * source there and the directory name only helps outside a worktree.
+ * Tokens from the project identity: the **main checkout** directory name and
+ * `package.json` `name` ("meta.project").
+ *
+ * The directory name is only used from the main checkout, never from a linked
+ * worktree: there the checkout directory is the worktree name (`G-23`,
+ * `feature-docs-system`), and e.g. a worktree called `feature-docs-system`
+ * would damp the genuine corpus term `docs`. Outside git (or when git metadata
+ * is unavailable) the current project root is the identity.
  */
 function projectNameStopwords(projectRoot: string): Set<string> {
-  const names = [path.basename(projectRoot)];
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")) as { name?: unknown };
-    if (typeof pkg.name === "string" && pkg.name.trim()) names.push(pkg.name);
-  } catch { /* no readable package.json: the directory name still carries the project name */ }
+  const identityRoot = repoInfo(projectRoot)?.mainRoot ?? projectRoot;
+  const names = [path.basename(identityRoot)];
+  const name = packageName(identityRoot) ?? packageName(projectRoot);
+  if (name) names.push(name);
   const tokens = new Set<string>();
   for (const name of names) {
     for (const token of name.match(TERM_TOKEN) ?? []) {
