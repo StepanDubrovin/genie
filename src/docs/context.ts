@@ -288,7 +288,12 @@ function pageTermMatch(surface: Set<string>, token: string): boolean {
   return surface.has(normalizeTerm(token));
 }
 
-/** Tokens from the project directory name and `package.json` name ("meta.project"). */
+/**
+ * Tokens from the project directory name and `package.json` name ("meta.project").
+ * Note: inside a linked worktree the directory basename is the worktree name
+ * (e.g. `G-23`), not the project name, so `package.json` `name` is the reliable
+ * source there and the directory name only helps outside a worktree.
+ */
 function projectNameStopwords(projectRoot: string): Set<string> {
   const names = [path.basename(projectRoot)];
   try {

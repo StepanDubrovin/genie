@@ -221,24 +221,35 @@ test("real-repo L0 measurement stays under the target and reports units/chars/pa
 });
 
 // D4 before/after baseline is G-13's artifact #4 §7. These are the pilot's own
-// real-corpus examples, pinned here so the term-class fix cannot silently regress.
-test("real-repo L1 D4: heading task selects, project-name-only task and unrelated task select nothing", () => {
+// exact task texts (`/tmp/g13-l1-probe.ts`), pinned here so the term-class fix
+// cannot silently regress.
+test("real-repo L1 D4: heading task selects, pilot G-93 keeps one lowest-class match, project-name-only task selects nothing", () => {
   const db = new Db(":memory:");
   const docs = new DocsService({ db, cwd: REPO_ROOT });
+  const pilot = (id: string, title: string, description: string): L1Task => ({ id, title, description, plan: "", acceptance: [] });
 
-  const russian = selectL1Pages(docs, { id: "G-95", title: "Надёжность доставки писем", description: "", plan: "", acceptance: [] });
+  const russian = selectL1Pages(docs, pilot("G-95", "Надёжность доставки писем", "Разобраться с доставкой почты в командах."));
   assert.deepEqual(russian.map((item) => item.page.path), ["architecture.md"], "a Russian task whose words live in a heading now selects that page");
   assert.deepEqual(russian[0].reasons, ["term match Надёжность"]);
 
-  const typo = selectL1Pages(docs, { id: "G-93", title: "Поправить опечатки в CHANGELOG", description: "В проекте genie поправить опечатки в CHANGELOG.", plan: "", acceptance: [] });
-  assert.deepEqual(typo, [], "merely naming the project no longer selects architecture/contract pages");
+  const architecture = selectL1Pages(docs, pilot("G-94", "Архитектура genie: обновить схему", "Привести диаграмму компонентов в порядок."));
+  assert.deepEqual(architecture.map((item) => item.page.path), ["architecture.md"], "genie is damped; Архитектура still selects and the contract page is gone");
 
-  const architecture = selectL1Pages(docs, { id: "G-94", title: "Архитектура genie: обновить схему", description: "", plan: "", acceptance: [] });
-  assert.deepEqual(architecture.map((item) => item.page.path), ["architecture.md"], "genie is damped, Архитектура still selects");
+  // The pilot's own G-93 text literally contains "docs", so the contract page
+  // (tags: docs) is still returned, now via `docs` instead of the damped `genie`.
+  // That single lowest-class match is the known residual false positive: pinned
+  // deliberately rather than hidden.
+  const typo = selectL1Pages(docs, pilot("G-93", "Поправить опечатки в CHANGELOG", "Никакого отношения к коду/genie docs."));
+  assert.deepEqual(typo.map((item) => item.page.path), ["reference/genie-docs-system.md"], "the docs tag still matches the pilot G-93 text; architecture no longer does");
+  assert.deepEqual(typo[0].reasons, ["term match docs"]);
 
-  const trackerTask = selectL1Pages(docs, { id: "G-96", title: "Tracker: add a new task status", description: "Touch src/tracker/model.ts and src/tracker/store.ts.", plan: "", acceptance: [] });
+  // The same task without "docs": only the project name is left, and it is damped.
+  const projectNameOnly = selectL1Pages(docs, pilot("G-70", "Обновить CHANGELOG проекта genie", "Только опечатки."));
+  assert.deepEqual(projectNameOnly, [], "a project-name-only task selects nothing (must-still-select-nothing case)");
+
+  const trackerTask = selectL1Pages(docs, pilot("G-96", "Tracker: add a new task status", "Statuses live in `src/tracker/model.ts` and are persisted in `src/tracker/store.ts`."));
   assert.deepEqual(trackerTask.map((item) => item.page.path), ["architecture.md", "decisions.md"], "a path task selects exactly its path pages; the function word \"and\" must not drag in the contract page");
-  console.log(`[G-23 measurement] G-95 -> ${russian.map((item) => `${item.page.path} (${item.reasons.join(", ")})`).join("; ") || "<none>"}; G-93 -> ${typo.length ? "unexpected pages" : "<none>"}; G-94 -> ${architecture.map((item) => item.page.path).join("; ") || "<none>"}`);
+  console.log(`[G-23 measurement] G-95 -> ${russian.map((item) => `${item.page.path} (${item.reasons.join(", ")})`).join("; ")}; G-93 -> ${typo.map((item) => `${item.page.path} (${item.reasons.join(", ")})`).join("; ") || "<none>"}; G-94 -> ${architecture.map((item) => item.page.path).join("; ")}; G-70 -> ${projectNameOnly.length ? "unexpected pages" : "<none>"}`);
   db.close();
 });
 
