@@ -33,6 +33,13 @@ export type StopReason = "orchestrator" | "owner" | "task_closed" | "launch_fail
 export const DELIBERATE_STOPS: StopReason[] = ["orchestrator", "owner", "task_closed"];
 const DELIBERATE_SQL = DELIBERATE_STOPS.map((r) => `'${r}'`).join(", ");
 
+/** Importance levels for agent mail; the level determines the delivery mode. */
+export const MAIL_LEVELS = ["low", "normal", "high"] as const;
+/** What a message is for; shapes the orchestrator's digest. */
+export const MAIL_INTENTS = ["question", "blocker", "verdict", "done", "fyi"] as const;
+export type MailLevel = (typeof MAIL_LEVELS)[number];
+export type MailIntent = (typeof MAIL_INTENTS)[number];
+
 export interface Member {
   name: string;
   role: MemberRole;
@@ -74,6 +81,10 @@ export interface Mail {
   to: string;
   text: string;
   urgent?: boolean;
+  /** Importance level; `high` is what `urgent` means. Legacy rows default to `normal`. */
+  level: MailLevel;
+  /** What the message is for; unclassified (undefined) is a valid legacy/default state. */
+  intent?: MailIntent;
   kind: "message" | "kickoff" | "system" | "owner";
   task?: string;
   deliveredAt?: string;
@@ -105,24 +116,33 @@ interface MailRow {
   recipient: string;
   text: string;
   urgent: number;
+  level: string;
+  intent: string | null;
   kind: Mail["kind"];
   task: string | null;
   delivered_at: string | null;
 }
 
-const toMail = (r: MailRow): Mail => ({
-  id: r.id,
-  at: r.at,
-  team: r.team,
-  from: r.sender,
-  fromRole: r.sender_role,
-  to: r.recipient,
-  text: r.text,
-  urgent: !!r.urgent,
-  kind: r.kind,
-  task: r.task ?? undefined,
-  deliveredAt: r.delivered_at ?? undefined,
-});
+const toMail = (r: MailRow): Mail => {
+  // `urgent` wins over a stale column so an older writer that only knows the
+  // boolean keeps meaning `high`.
+  const level: MailLevel = r.urgent ? "high" : r.level === "low" ? "low" : r.level === "high" ? "high" : "normal";
+  return {
+    id: r.id,
+    at: r.at,
+    team: r.team,
+    from: r.sender,
+    fromRole: r.sender_role,
+    to: r.recipient,
+    text: r.text,
+    urgent: level === "high",
+    level,
+    intent: r.intent ? (r.intent as MailIntent) : undefined,
+    kind: r.kind,
+    task: r.task ?? undefined,
+    deliveredAt: r.delivered_at ?? undefined,
+  };
+};
 
 const toMember = (r: MemberRow): Member => ({
   name: r.name,
@@ -347,7 +367,10 @@ export class TeamBus {
   }
 
   /** Deliver a message. `to` is a member name, "orchestrator" or "all" (everyone except the sender). */
-  send(input: { team: string; from: string; fromRole: string; to: string; text: string; urgent?: boolean; kind?: Mail["kind"] }): Mail[] {
+  send(input: { team: string; from: string; fromRole: string; to: string; text: string; urgent?: boolean; level?: MailLevel; intent?: MailIntent; kind?: Mail["kind"] }): Mail[] {
+    const level: MailLevel = input.level ?? (input.urgent ? "high" : "normal");
+    if (!MAIL_LEVELS.includes(level)) throw new Error(`invalid mail level "${level}"; expected one of ${MAIL_LEVELS.join(", ")}`);
+    if (input.intent !== undefined && !MAIL_INTENTS.includes(input.intent)) throw new Error(`invalid mail intent "${input.intent}"; expected one of ${MAIL_INTENTS.join(", ")}`);
     const team = this.get(input.team);
     const names = [...team.members.map((m) => m.name), ORCHESTRATOR];
     let recipients: string[];
@@ -362,22 +385,43 @@ export class TeamBus {
       const out = recipients.map(
         (to) =>
           this.db.run(
-            "INSERT INTO mail(team, at, sender, sender_role, recipient, text, urgent, kind, task) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO mail(team, at, sender, sender_role, recipient, text, urgent, level, intent, kind, task) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             team.id,
             at,
             input.from,
             input.fromRole,
             to,
             input.text,
-            input.urgent ? 1 : 0,
+            // Keep `urgent` in sync with `level` so an older reader (web, older genie) still works.
+            level === "high" ? 1 : 0,
+            level,
+            input.intent ?? null,
             input.kind ?? "message",
             team.task,
           ).lastInsertRowid,
       );
-      this.log(team.id, { event: "mail", from: input.from, to: input.to, urgent: !!input.urgent, text: truncate(input.text, 500) });
+      this.log(team.id, { event: "mail", from: input.from, to: input.to, urgent: level === "high", level, intent: input.intent, text: truncate(input.text, 500) });
       return out;
     });
     return ids.map((id) => toMail(this.db.get<MailRow>("SELECT * FROM mail WHERE id = ?", id)!));
+  }
+
+  /**
+   * Unclaimed rows for a recipient, ordered by id. For the orchestrator (team
+   * omitted) this includes its global mailbox and every active team, but excludes
+   * teams the orchestrator stopped on purpose. `urgentOnly` additionally filters
+   * to high-level mail (legacy `urgent` rows included).
+   */
+  private unclaimed(team: string | undefined, member: string, urgentOnly: boolean): MailRow[] {
+    const urgent = urgentOnly ? " AND (level = 'high' OR urgent = 1)" : "";
+    return team === undefined
+      ? this.db.all<MailRow>(
+          // Everything except teams the orchestrator stopped on purpose: a team that
+          // looked dead (failed launch, lost heartbeat) must still be heard.
+          `SELECT * FROM mail WHERE recipient = ? AND delivered_at IS NULL AND (team IS NULL OR team NOT IN (SELECT id FROM teams WHERE state = 'stopped' AND COALESCE(stop_reason, 'orchestrator') IN (${DELIBERATE_SQL})))${urgent} ORDER BY id`,
+          member,
+        )
+      : this.db.all<MailRow>(`SELECT * FROM mail WHERE team = ? AND recipient = ? AND delivered_at IS NULL${urgent} ORDER BY id`, team, member);
   }
 
   /**
@@ -387,19 +431,36 @@ export class TeamBus {
    */
   receive(team: string | undefined, member: string): Mail[] {
     return this.db.tx(() => {
-      const rows =
-        team === undefined
-          ? this.db.all<MailRow>(
-              // Everything except teams the orchestrator stopped on purpose: a team that
-              // looked dead (failed launch, lost heartbeat) must still be heard.
-              `SELECT * FROM mail WHERE recipient = ? AND delivered_at IS NULL AND (team IS NULL OR team NOT IN (SELECT id FROM teams WHERE state = 'stopped' AND COALESCE(stop_reason, 'orchestrator') IN (${DELIBERATE_SQL}))) ORDER BY id`,
-              member,
-            )
-          : this.db.all<MailRow>("SELECT * FROM mail WHERE team = ? AND recipient = ? AND delivered_at IS NULL ORDER BY id", team, member);
+      const rows = this.unclaimed(team, member, false);
       const at = now();
       for (const r of rows) this.db.run("UPDATE mail SET delivered_at = ? WHERE id = ?", at, r.id);
       return rows.map(toMail);
     });
+  }
+
+  /** Non-claiming peek: is there urgent mail waiting for this recipient? */
+  hasUrgent(team: string | undefined, member: string): boolean {
+    return this.unclaimed(team, member, true).length > 0;
+  }
+
+  /** Claim ONLY urgent rows (ordered by id), leaving normal/low mail unclaimed. */
+  receiveUrgent(team: string | undefined, member: string): Mail[] {
+    return this.db.tx(() => {
+      const rows = this.unclaimed(team, member, true);
+      const at = now();
+      for (const r of rows) this.db.run("UPDATE mail SET delivered_at = ?, level = 'high' WHERE id = ?", at, r.id);
+      return rows.map(toMail);
+    });
+  }
+
+  /**
+   * Claim-at-delivery rule: while idle take the whole slice as one batch; while
+   * busy claim nothing except urgent mail, which steers on its own.
+   */
+  takeMail(team: string | undefined, member: string, idle: boolean): { batch: Mail[]; steers: Mail[] } {
+    if (idle) return { batch: this.receive(team, member), steers: [] };
+    if (!this.hasUrgent(team, member)) return { batch: [], steers: [] };
+    return { batch: [], steers: this.receiveUrgent(team, member) };
   }
 
   pending(team: string, member: string): number {
