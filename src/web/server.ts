@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { DOC_STATUSES, DOC_TYPES, parseDoc, type DocStatus, type DocType } from "../docs/parser.ts";
 import { DocsService } from "../docs/service.ts";
-import { ORCHESTRATOR, TeamBus } from "../team/bus.ts";
+import { MAIL_INTENTS, MAIL_LEVELS, ORCHESTRATOR, TeamBus, type MailIntent, type MailLevel } from "../team/bus.ts";
 import { loadConfig, type MemberSpec, PACKAGE_ROOT } from "../team/config.ts";
 import { addMembers, deleteTeam, reapClosedTeams, removeMember, stopTeam } from "../team/ops.ts";
 import { repoInfo } from "../tracker/fsutil.ts";
@@ -473,7 +473,23 @@ export function createWebApp(tracker: Tracker, opts: WebAppOptions): WebApp {
       }
       if (id && parts[2] === "mail" && method === "POST") {
         const to = String(body.to ?? "all");
-        const sent = bus.send({ team: id, from: `owner (${me!.name})`, fromRole: "human", to: to === "orchestrator" ? ORCHESTRATOR : to, text: String(body.text ?? ""), urgent: !!body.urgent });
+        // The owner's send parity with agents: an omitted level stays `normal`
+        // (backwards compatible) and the values are validated before they reach
+        // the bus, so a bad one is a 400 rather than a generic server error.
+        const level = body.level === undefined || body.level === "" ? "normal" : String(body.level);
+        if (!MAIL_LEVELS.includes(level as MailLevel)) throw new HttpError(400, `unknown mail level ${level}; expected one of ${MAIL_LEVELS.join(", ")}`);
+        const intent = body.intent === undefined || body.intent === "" ? undefined : String(body.intent);
+        if (intent !== undefined && !MAIL_INTENTS.includes(intent as MailIntent)) throw new HttpError(400, `unknown mail intent ${intent}; expected one of ${MAIL_INTENTS.join(", ")}`);
+        const sent = bus.send({
+          team: id,
+          from: `owner (${me!.name})`,
+          fromRole: "human",
+          to: to === "orchestrator" ? ORCHESTRATOR : to,
+          text: String(body.text ?? ""),
+          urgent: !!body.urgent,
+          level: level as MailLevel,
+          intent: intent as MailIntent | undefined,
+        });
         changed();
         return send(res, 201, sent);
       }

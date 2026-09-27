@@ -105,6 +105,7 @@ export function TeamView() {
   const send = useSendMail();
   const toast = useToast();
   const [to, setTo] = useState("all");
+  const [level, setLevel] = useState<Mail["level"]>("normal");
   const [draft, setDraft] = useState("");
   const chatRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -129,7 +130,7 @@ export function TeamView() {
     const text = draft.trim();
     if (!text) return;
     stick.current = true;
-    send.mutate({ team: team.id, to, text }, { onSuccess: () => setDraft(""), onError: (e) => toast(`Не отправлено: ${e.message}`, "error") });
+    send.mutate({ team: team.id, to, text, level }, { onSuccess: () => setDraft(""), onError: (e) => toast(`Не отправлено: ${e.message}`, "error") });
   };
 
   let lastDay = "";
@@ -219,7 +220,6 @@ export function TeamView() {
                             <span className={`n c-${m.fromRole}`}>{m.fromRole === "orchestrator" ? "Оркестратор" : memberLabel(m.from, m.fromRole)}</span>
                             <span className="m">
                               → {recipients(m.to, team)} · {clock(m.at)}
-                              {m.urgent ? " · срочно" : ""}
                             </span>
                             <MailBadges level={m.level} intent={m.intent} />
                           </span>
@@ -264,6 +264,14 @@ export function TeamView() {
                 <button key={r.name} type="button" className={`chip${to === r.name ? " on" : ""}`} aria-pressed={to === r.name} onClick={() => setTo(r.name)}>
                   <i className={r.role ? `r-${r.role}` : ""} style={r.role ? undefined : { background: "var(--text-2)" }} />
                   {r.name === "all" ? "Всем" : r.name === "orchestrator" ? "оркестратор" : displayName(r.name)}
+                </button>
+              ))}
+            </div>
+            <div className="to" role="group" aria-label="Уровень">
+              Уровень
+              {(["low", "normal", "high"] as Mail["level"][]).map((l) => (
+                <button key={l} type="button" className={`chip${level === l ? " on" : ""}`} aria-pressed={level === l} onClick={() => setLevel(l)}>
+                  {LEVEL_LABEL[l]}
                 </button>
               ))}
             </div>

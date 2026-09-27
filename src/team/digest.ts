@@ -51,14 +51,21 @@ export function renderDigest(mails: Mail[]): string {
   const messages = mails.filter((m) => m.kind === "message");
   if (!messages.length) return "";
 
-  const fyiSenders = new Map<string, Mail>();
-  const byTeam = new Map<string, Mail[]>();
+  // One line per sender: its latest message decides both the line and the section.
+  // Classifying after picking the latest keeps a sender from showing twice — in
+  // its team section and again under FYI — when its latest mail is an FYI.
+  const latestBySender = new Map<string, Mail>();
   for (const m of messages) {
+    const key = `${teamOf(m)}/${m.from}`;
+    const prev = latestBySender.get(key);
+    if (!prev || prev.id < m.id) latestBySender.set(key, m);
+  }
+
+  const fyiSenders: Mail[] = [];
+  const byTeam = new Map<string, Mail[]>();
+  for (const m of latestBySender.values()) {
     if (m.intent === "fyi") {
-      // One FYI line per sender, its latest; never a team section of its own.
-      const key = `${teamOf(m)}/${m.from}`;
-      const prev = fyiSenders.get(key);
-      if (!prev || prev.id < m.id) fyiSenders.set(key, m);
+      fyiSenders.push(m);
       continue;
     }
     const list = byTeam.get(teamOf(m)) ?? [];
@@ -66,20 +73,11 @@ export function renderDigest(mails: Mail[]): string {
     byTeam.set(teamOf(m), list);
   }
 
-  // One line per sender: keep only the latest message of each.
-  const latestBySender = (rows: Mail[]): Mail[] => {
-    const latest = new Map<string, Mail>();
-    for (const m of rows) {
-      const prev = latest.get(m.from);
-      if (!prev || prev.id < m.id) latest.set(m.from, m);
-    }
-    return [...latest.values()].sort((a, b) => a.id - b.id);
-  };
-
-  const sections = [...byTeam.entries()].map(([team, rows]) => {
-    const lines = latestBySender(rows);
+  const sections = [...byTeam.entries()].map(([team, lines]) => {
     const latest = lines.reduce((a, b) => (a.id > b.id ? a : b));
-    return { team, count: messages.filter((m) => teamOf(m) === team).length, lines, rank: rankIntent(latest.intent), at: latest.id };
+    lines.sort((a, b) => a.id - b.id);
+    // The count describes the section's own rows, not FYI rows moved to `## FYI`.
+    return { team, count: lines.length, lines, rank: rankIntent(latest.intent), at: latest.id };
   });
   // Teams standing by (question/blocker) first; ties by the earlier latest message.
   sections.sort((a, b) => a.rank - b.rank || a.at - b.at);
@@ -87,7 +85,7 @@ export function renderDigest(mails: Mail[]): string {
   const teams = new Set(messages.map(teamOf));
   const out: string[] = [`[genie digest · ${messages.length} message${messages.length === 1 ? "" : "s"} from ${teams.size} team${teams.size === 1 ? "" : "s"}]`];
   for (const s of sections) out.push("", `## ${s.team} (${s.count})`, ...s.lines.map(digestLine));
-  const fyi = [...fyiSenders.values()].sort((a, b) => a.id - b.id);
+  const fyi = fyiSenders.sort((a, b) => a.id - b.id);
   if (fyi.length) out.push("", "## FYI", ...fyi.map(digestLine));
   return out.join("\n");
 }

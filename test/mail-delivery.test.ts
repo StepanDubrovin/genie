@@ -4,12 +4,15 @@
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { MAIL_INTENTS, MAIL_LEVELS, type Mail, TeamBus } from "../src/team/bus.ts";
 import { rankIntent, renderDigest } from "../src/team/digest.ts";
 import { Tracker } from "../src/tracker/store.ts";
+import { createWebApp, type WebApp } from "../src/web/server.ts";
 
 const ORCH = "orchestrator";
 const at = "2026-09-27T14:00:00.000Z";
@@ -181,7 +184,7 @@ test("digest: grouped by team, one line per sender, ordered by importance", () =
     [
       "[genie digest · 6 messages from 3 teams]",
       "",
-      "## G-7 (4)",
+      "## G-7 (2)",
       "- ada (analyst) · normal · question · Need ZPR1?",
       "- bender (executor) · normal · done · done, tests green",
       "",
@@ -212,6 +215,62 @@ test("digest: a standing-by team outranks a later verdict; unclassified sits in 
   assert.equal(rankIntent("done"), 1);
   assert.equal(rankIntent(undefined), 2);
   assert.equal(rankIntent("fyi"), 3);
+});
+
+test("digest: a sender whose latest mail is an FYI appears only in the FYI line", () => {
+  const mails: Mail[] = [
+    // walle sent a real update first, then only an FYI: the latest mail decides.
+    mail({ id: 1, team: "G-7", from: "walle", intent: "done", text: "shipped" }),
+    mail({ id: 2, team: "G-7", from: "walle", intent: "fyi", level: "low", text: "just a note" }),
+    mail({ id: 3, team: "G-7", from: "yoda", intent: "verdict", text: "LGTM" }),
+  ];
+  const out = renderDigest(mails);
+  assert.equal(out.match(/walle/g)?.length, 1, `walle appears exactly once:\n${out}`);
+  assert.equal((out.match(/## G-7/g) ?? []).length, 1);
+  assert.equal((out.match(/## FYI/g) ?? []).length, 1, "the FYI section holds the sender");
+  assert.ok(out.indexOf("## G-7 (1)") >= 0, `the team section counts only its own row:\n${out}`);
+  assert.ok(out.indexOf("- walle (executor) · low · fyi · just a note") > out.indexOf("## FYI"), "walle is printed under FYI");
+  assert.ok(!out.includes("shipped"), "the earlier, superseded mail does not resurface");
+});
+
+test("the web send route accepts, validates and forwards level and intent", async () => {
+  // A real open task keeps the reaper from stopping the team of a missing task.
+  const { t, bus } = fresh();
+  const task = t.create({ name: "owner", role: "human" }, { title: "web mail" });
+  bus.create({ id: "G-1", task: task.id, cwd: "/tmp", members: [member("walle", "executor"), member("yoda", "reviewer")] });
+  bus.receive(undefined, ORCH); // drain the task's owner-inbox notification
+  let app: WebApp | undefined;
+  const server = http.createServer((req, res) => void app!.handler(req, res));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  app = createWebApp(t, { port });
+  const post = (body: unknown) =>
+    fetch(`http://127.0.0.1:${port}/api/teams/G-1/mail`, { method: "POST", headers: { "content-type": "application/json", "x-genie": "1" }, body: JSON.stringify(body) });
+  try {
+    // Both values travel from the browser through the route into the mail row.
+    assert.equal((await post({ to: "orchestrator", text: "from the browser", level: "high", intent: "fyi" })).status, 201);
+    const [carried] = bus.receive(undefined, ORCH);
+    assert.equal(carried.level, "high");
+    assert.equal(carried.intent, "fyi");
+    assert.equal(carried.fromRole, "human");
+    assert.match(carried.from, /^owner \(/);
+
+    // A missing level is backwards compatible: normal, no intent.
+    assert.equal((await post({ to: "orchestrator", text: "default" })).status, 201);
+    const [fallback] = bus.receive(undefined, ORCH);
+    assert.equal(fallback.level, "normal");
+    assert.equal(fallback.intent, undefined);
+
+    // Bad values are rejected at the route (400), not stored.
+    assert.equal((await post({ to: "orchestrator", text: "nope", level: "bogus" })).status, 400);
+    assert.equal((await post({ to: "orchestrator", text: "nope", intent: "bogus" })).status, 400);
+    assert.equal(bus.pending("G-1", ORCH), 0, "nothing invalid was written");
+  } finally {
+    app.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    t.db.close();
+  }
 });
 
 test("digest ignores non-message kinds and is empty without messages", () => {
