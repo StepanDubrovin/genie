@@ -12,10 +12,11 @@ import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { notifyOn } from "../notify.ts";
-import { BROADCAST, type Mail, type Member, ORCHESTRATOR, type Team, TeamBus } from "../team/bus.ts";
+import { BROADCAST, HEARTBEAT_STALE_MS, type Mail, type Member, ORCHESTRATOR, START_GRACE_MS, type Team, TeamBus } from "../team/bus.ts";
 import { type GenieConfig, languagePolicy, loadConfig, loadRole, type MemberSpec, PACKAGE_ROOT, resolveMember } from "../team/config.ts";
 import { assignNames, displayName, memberLabel } from "../team/names.ts";
-import { createWorktree, herdrAgentName, launchHeadless, launchHerdr, type LaunchSpec, removeWorktree, stopAllHeadless, stopMember } from "../team/spawn.ts";
+import { addMembers, deleteTeam, kickoff, launchMembers, type Named, reapClosedTeams, removeMember, stopTeam } from "../team/ops.ts";
+import { createWorktree, discoverMembers, herdrAgentName, isAlive, launchHeadless, launchHerdr, type LaunchSpec, removeWorktree, stopMember } from "../team/spawn.ts";
 import { defaultGenieDir, now, repoInfo } from "../tracker/fsutil.ts";
 import { type Actor, ARTIFACT_KINDS, CLOSED, COMMENT_KINDS, MEMBER_ROLES, type MemberRole, type Status, STATUSES, TASK_TYPES, type Task } from "../tracker/model.ts";
 import { oneLine, renderTask } from "../tracker/render.ts";
@@ -23,14 +24,14 @@ import { GenieError, Tracker } from "../tracker/store.ts";
 import { isAnimating, LiveLines, renderCard, renderWidgetLines, snapshot, type TeamSnapshot } from "./card.ts";
 import { settingsMenu } from "./settings.ts";
 
-type Named = MemberSpec & { name: string };
-
 type Mode = { kind: "off" } | { kind: "orchestrator" } | { kind: "member"; role: MemberRole; team: string; member: string; task: string };
 
-const ORCHESTRATOR_TOOLS = ["genie_task", "team_spawn", "team_add_member", "team_send", "team_status", "team_stop"];
+const ORCHESTRATOR_TOOLS = ["genie_task", "team_spawn", "team_add_member", "team_remove_member", "team_send", "team_status", "team_recover", "team_stop"];
 const MEMBER_TOOLS = ["genie_task", "team_send", "team_status", "team_set_status"];
 const ALL_TOOLS = [...new Set([...ORCHESTRATOR_TOOLS, ...MEMBER_TOOLS])];
 const POLL_MS = 1000;
+const HEARTBEAT_EVERY_MS = 5_000;
+const SUPERVISE_EVERY_MS = 10_000;
 const FRAME_MS = 120;
 /** Roles allowed in a team for a task that is not ready yet (research / refinement teams). */
 const REFINEMENT_ROLES: MemberRole[] = ["analyst", "reviewer", "documenter"];
@@ -148,12 +149,151 @@ export default function genie(pi: ExtensionAPI) {
     // One-shot print/json runs must not be extended by queued mail.
     if (runMode === "print" || runMode === "json") return;
     try {
+      if (mode.kind === "member" && Date.now() - lastBeat >= HEARTBEAT_EVERY_MS) {
+        lastBeat = Date.now();
+        bus.heartbeat(mode.team, mode.member, process.pid);
+      }
+      if (mode.kind === "orchestrator" && Date.now() - lastSupervise >= SUPERVISE_EVERY_MS) {
+        lastSupervise = Date.now();
+        supervise();
+      }
       if (mode.kind === "member") deliver(bus.receive(mode.team, mode.member));
       else if (mode.kind === "orchestrator" && cfg().orchestrator?.autoWake !== false) deliver(bus.receive(undefined, ORCHESTRATOR));
       refreshStatus();
     } catch (err) {
       safeNotify(`genie: mail poll failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
     }
+  }
+
+  // ---------------------------------------------------------------- supervision & recovery
+
+  let lastBeat = 0;
+  let lastSupervise = 0;
+
+  /** Is the member's process still there? Uses the recorded pid, then a /proc scan. */
+  function processAlive(teamId: string, m: Member, found: () => Map<string, number>): boolean {
+    if (m.runtime?.pid && isAlive(m.runtime.pid)) return true;
+    const pid = found().get(`${teamId}/${m.name}`);
+    return !!pid && isAlive(pid);
+  }
+
+  function lazyDiscovery(): () => Map<string, number> {
+    let cache: Map<string, number> | undefined;
+    return () => (cache ??= new Map(discoverMembers(tracker!.dir).map((f) => [`${f.team}/${f.member}`, f.pid])));
+  }
+
+  /**
+   * Orchestrator-side watchdog: members that never check in after launch or stop
+   * sending heartbeats (and whose process is gone) are marked lost, and the
+   * orchestrator gets one urgent message suggesting team_recover.
+   */
+  function supervise(): void {
+    if (!bus || !tracker) return;
+    // Teams whose task was closed elsewhere (e.g. dragged to Done in the web UI) are stopped.
+    void reapClosedTeams(tracker, bus)
+      .then((ids) => ids.length && safeNotify(`genie: stopped team(s) of closed tasks: ${ids.join(", ")}`, "info"))
+      .catch(() => undefined);
+    const found = lazyDiscovery();
+    for (const team of bus.recoverable()) {
+      for (const m of team.members) {
+        if (m.state === "stopped" || m.state === "lost") continue;
+        const beat = m.heartbeatAt ? Date.parse(m.heartbeatAt) : 0;
+        const age = Date.now() - (beat || Date.parse(m.statusAt));
+        if (age < (beat ? HEARTBEAT_STALE_MS : START_GRACE_MS)) continue;
+        if (processAlive(team.id, m, found)) {
+          // Alive but silent (e.g. an older genie version): adopt it.
+          bus.heartbeat(team.id, m.name, found().get(`${team.id}/${m.name}`));
+          continue;
+        }
+        reportLost(team.id, m, beat ? `stopped responding (last heartbeat ${Math.round(age / 1000)}s ago)` : "did not start");
+      }
+    }
+  }
+
+  /** Mark a member lost and tell the orchestrator once, so it can run team_recover. */
+  function reportLost(teamId: string, m: Member, why: string): void {
+    if (!bus) return;
+    bus.markLost(teamId, m.name, why);
+    bus.send({
+      team: teamId,
+      from: "genie",
+      fromRole: "system",
+      to: ORCHESTRATOR,
+      kind: "system",
+      urgent: true,
+      text: `${memberLabel(m.name, m.role, "en")} in team ${teamId} ${why}. Run team_recover to restart it — its conversation continues from its saved session.`,
+    });
+  }
+
+  /**
+   * Find running member processes, reconnect them, and optionally restart lost members
+   * (continuing their saved pi session). Returns a human-readable report.
+   */
+  async function recoverTeams(opts: { team?: string; restart: boolean }): Promise<{ report: string; changed: boolean }> {
+    const { tracker, bus } = need();
+    const found = discoverMembers(tracker.dir);
+    const alive = new Map(found.map((f) => [`${f.team}/${f.member}`, f.pid]));
+    const lines: string[] = [];
+    let changed = false;
+    for (const f of found) {
+      if (opts.team && f.team !== opts.team) continue;
+      try {
+        const r = bus.heartbeat(f.team, f.member, f.pid);
+        if (r.revived || r.teamRevived) changed = true;
+      } catch {
+        // process of a team this tracker no longer knows
+      }
+    }
+    const teams = bus.recoverable().filter((t) => !opts.team || t.id === opts.team);
+    for (const team of teams) {
+      const parts: string[] = [];
+      const lost: Member[] = [];
+      for (const m of team.members) {
+        const pid = alive.get(`${team.id}/${m.name}`) ?? (m.runtime?.pid && isAlive(m.runtime.pid) ? m.runtime.pid : undefined);
+        if (m.state === "stopped") parts.push(`${memberLabel(m.name, m.role, "en")}: stopped`);
+        else if (pid) parts.push(`${memberLabel(m.name, m.role, "en")}: running (pid ${pid})`);
+        else if (m.state === "starting" && Date.now() - Date.parse(m.statusAt) < START_GRACE_MS) parts.push(`${memberLabel(m.name, m.role, "en")}: starting`);
+        else lost.push(m);
+      }
+      if (lost.length && opts.restart) {
+        const c = cfg();
+        const anchor = team.members.find((m) => m.runtime?.kind === "herdr" && m.runtime.paneId && !lost.includes(m))?.runtime?.paneId;
+        const useHerdr = process.env.HERDR_ENV === "1" && lost.some((m) => m.runtime?.kind === "herdr");
+        const specs: Named[] = lost.map((m) => resolveMember({ name: m.name, role: m.role, model: m.model, thinking: m.thinking, instructions: m.instructions }, c) as Named);
+        const at = now();
+        for (const m of lost) bus.updateMember(team.id, m.name, { state: "starting", status: "restarting after lost contact" });
+        if (team.state === "stopped") bus.setState(team.id, "active");
+        try {
+          await launch(specs, bus.get(team.id), useHerdr ? "herdr" : "headless", anchor, new Map(lost.map((m) => [m.name, m.sessionFile])));
+          for (const m of lost) {
+            bus.send({
+              team: team.id,
+              from: ORCHESTRATOR,
+              fromRole: "orchestrator",
+              to: m.name,
+              kind: "system",
+              text: `You were restarted after the team lost contact with you (${at}). Re-read the task (genie_task show) and the latest messages, tell your teammates where you stand, then continue your work.`,
+            });
+            parts.push(`${memberLabel(m.name, m.role, "en")}: restarted${m.sessionFile ? " (session resumed)" : " (fresh session)"}`);
+          }
+          bus.log(team.id, { event: "team_restarted", members: lost.map((m) => m.name) });
+          changed = true;
+        } catch (err) {
+          for (const m of lost) bus.markLost(team.id, m.name, `restart failed: ${err instanceof Error ? err.message : String(err)}`);
+          parts.push(`restart failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        for (const m of lost) {
+          if (m.state !== "lost") {
+            reportLost(team.id, m, "is not running (process not found)");
+            changed = true;
+          }
+          parts.push(`${memberLabel(m.name, m.role, "en")}: LOST${m.sessionFile ? " (session saved, restartable)" : ""}`);
+        }
+      }
+      lines.push(`team ${team.id} (${bus.get(team.id).state}) → ${team.task}\n  ${parts.join("\n  ")}`);
+    }
+    return { report: lines.join("\n") || "no teams to recover", changed };
   }
 
   // ---------------------------------------------------------------- UI: widget, status, animation
@@ -301,6 +441,8 @@ export default function genie(pi: ExtensionAPI) {
     if (mode.kind === "member" && bus) {
       try {
         bus.updateMember(mode.team, mode.member, { state: "active", sessionFile: ctx.sessionManager.getSessionFile() });
+        bus.heartbeat(mode.team, mode.member, process.pid);
+        lastBeat = Date.now();
         bus.log(mode.team, { event: "member_started", member: mode.member });
       } catch {
         // team missing: messages will fail loudly
@@ -309,6 +451,16 @@ export default function genie(pi: ExtensionAPI) {
     installWidget(ctx);
     startTimers();
     refreshStatus();
+    // After a restart/reload the orchestrator reconnects to teams that kept working.
+    if (mode.kind === "orchestrator" && bus && (runMode === "tui" || runMode === "rpc")) {
+      setTimeout(() => {
+        recoverTeams({ restart: false })
+          .then((r) => {
+            if (r.changed) safeNotify(`genie: reconnected to running teams\n${r.report}`, "info");
+          })
+          .catch(() => undefined);
+      }, 3000).unref?.();
+    }
   });
 
   pi.on("session_shutdown", async () => {
@@ -325,7 +477,7 @@ export default function genie(pi: ExtensionAPI) {
         // ignore
       }
     }
-    if (mode.kind === "orchestrator") stopAllHeadless();
+    // Members are independent processes: they keep working while the orchestrator restarts.
     tracker?.close();
     tracker = undefined;
     bus = undefined;
@@ -393,6 +545,11 @@ export default function genie(pi: ExtensionAPI) {
     }
     if (event.toolName === "bash") {
       const cmd = String(input.command ?? "");
+      // The orchestrator never waits for teams: messages wake it up.
+      const sleepFor = Math.max(0, ...[...cmd.matchAll(/\bsleep\s+(\d+)/g)].map((m) => Number(m[1])));
+      if (mode.kind === "orchestrator" && sleepFor >= 20 && bus?.list().length) {
+        return { block: true, reason: "genie: do not wait for teams — end your turn. Team messages wake you automatically, and you are warned if a member is lost (then use team_recover)." };
+      }
       if (touchesTracker(cmd) && !/^\s*genie\s/.test(cmd)) return { block: true, reason: "genie: use genie_task (or the `genie` CLI) instead of reading the tracker files" };
       if (mode.kind === "member" && /(^|[;&|(]\s*|\bexec\s+)(pi|claude|codex|opencode)(\s|$)|herdr\s+(agent\s+start|pane\s+split|tab\s+create)/.test(cmd)) {
         return { block: true, reason: "genie: team members cannot start other agents; ask the orchestrator (team_send) if more help is needed" };
@@ -540,6 +697,7 @@ export default function genie(pi: ExtensionAPI) {
           if (!p.status) throw new GenieError("status action needs status");
           const t = tracker.setStatus(me, write(), p.status as Status, { note: p.note, force: p.force });
           if (t.team && bus?.exists(t.team)) bus.log(t.team, { event: "task_status", task: t.id, status: t.status, by: me.name });
+          if (CLOSED.includes(t.status) && bus && mode.kind === "orchestrator") await reapClosedTeams(tracker, bus);
           return text(`${t.id} → ${t.status}`, { id: t.id, status: t.status });
         }
         case "comment": {
@@ -613,39 +771,9 @@ export default function genie(pi: ExtensionAPI) {
     }
   }
 
-  function kickoff(teamId: string, task: Task, cwd: string, worktree: Team["worktree"], all: Named[], s: Named, extra?: string, joining = false): string {
-    const hasAnalyst = all.some((x) => x.role === "analyst");
-    const refinement = !["ready", "changes_requested", "in_progress", "review"].includes(task.status);
-    const first: Record<MemberRole, string> = {
-      analyst: refinement
-        ? "The task is not ready yet: research it, propose a precise description and verifiable acceptance criteria (genie_task update), write your findings as an `analysis` artifact, then report to the orchestrator."
-        : "Start now: analyse the task, save the plan (genie_task update → plan), then hand over to the executor with team_send.",
-      executor:
-        hasAnalyst && !joining
-          ? "Wait for the analyst's handoff before implementing: publish a waiting status (team_set_status) and end your turn without messaging anyone. When you start: genie_task status → in_progress; when you hand over: commit, attach a test-report artifact, genie_task status → review, then message the reviewer."
-          : "Start now: genie_task status → in_progress, implement, commit, attach a test-report artifact, genie_task status → review, then message the reviewer.",
-      reviewer: refinement
-        ? "Challenge the analyst's findings: when the analyst shares them, check them for gaps and risks and send your feedback directly to the analyst."
-        : "Wait until the executor asks for review: publish a waiting status (team_set_status) and end your turn without messaging anyone. When reviewing: check each verified criterion, attach one review artifact, set status approved or changes_requested, then message the executor (and the orchestrator on approval).",
-      tester:
-        "Wait until the executor submits the work for review, then test it: write/run tests against the acceptance criteria, attach a test-report artifact, and send the results to the executor and reviewer. If tests fail, set status changes_requested with a note.",
-      documenter: "Wait until the implementation is approved or the orchestrator asks you, then write/update the documentation, attach a `doc` artifact and tell the orchestrator.",
-    };
-    return [
-      `${joining ? "You are joining team" : "Welcome to team"} ${teamId}, ${displayName(s.name)}! You are the ${s.role}; teammates address you as "${s.name}". Task: ${task.id} — ${task.title} (status ${task.status}). Read it with genie_task {"action":"show"}.`,
-      worktree ? `Working directory: ${cwd} (branch ${worktree.branch}, base ${String(worktree.base).slice(0, 10)}).` : `Working directory: ${cwd}.`,
-      `Team: ${all.map((x) => `${memberLabel(x.name, x.role, "en")} (\`${x.name}\`)`).join(", ")}, plus orchestrator.`,
-      first[s.role],
-      extra ? `\nFrom the orchestrator: ${extra}` : "",
-    ].join("\n");
-  }
-
-  async function launch(specs: Named[], team: Team, launchMode: string, anchorPane?: string): Promise<void> {
+  async function launch(specs: Named[], team: Team, launchMode: string, anchorPane?: string, resume?: Map<string, string | undefined>): Promise<void> {
     const { tracker, bus } = need();
-    const c = cfg();
-    const launchSpecs: LaunchSpec[] = specs.map((s) => ({ team, member: s, role: loadRole(s.role, tracker.dir), genieDir: tracker.dir, cwd: team.cwd, cfg: c }));
-    const runtimes = launchMode === "herdr" ? await launchHerdr(launchSpecs, anchorPane) : launchSpecs.map((s) => launchHeadless(s, bus.runtimeDir(team.id)));
-    specs.forEach((s, i) => bus.updateMember(team.id, s.name, { runtime: runtimes[i] }));
+    await launchMembers(tracker, bus, team, specs, launchMode === "herdr" ? "herdr" : "headless", { anchorPane, resume, cfg: cfg() });
   }
 
   function teamCard(details: unknown, theme: Theme, invalidate: () => void, fallback: string) {
@@ -732,7 +860,7 @@ export default function genie(pi: ExtensionAPI) {
       try {
         await launch(specs, team, launchMode);
       } catch (err) {
-        bus.setState(teamId, "stopped");
+        bus.setState(teamId, "stopped", "launch_failed");
         bus.log(teamId, { event: "launch_failed", error: String(err) });
         tracker.assignTeam(actor(), task.id, undefined);
         throw new GenieError(`launch failed: ${err instanceof Error ? err.message : String(err)}${worktree ? ` (worktree ${worktree.path} kept)` : ""}`);
@@ -744,7 +872,7 @@ export default function genie(pi: ExtensionAPI) {
           ...specs.map((s) => `- ${s.name}: ${s.role}, ${s.model ?? "default model"}${launchMode === "herdr" ? ` (herdr agent ${herdrAgentName(teamId, s.name)})` : ""}`),
           worktree ? `worktree: ${worktree.path} (branch ${worktree.branch})` : `cwd: ${cwd}`,
           ...notes,
-          "Members coordinate directly; you will receive their messages automatically. End your turn now.",
+          "Members are starting in the background and check in on their own; you do not wait for them. You receive their messages automatically, and a warning if one fails to start. End your turn now.",
         ].join("\n"),
         { team: teamId },
       );
@@ -765,29 +893,29 @@ export default function genie(pi: ExtensionAPI) {
       lastCtx = ctx;
       if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can add members");
       const { tracker, bus } = need();
-      const c = cfg();
-      const team = bus.get(p.team);
-      if (team.state !== "active") throw new GenieError(`team ${team.id} is stopped`);
-      const taken = new Set(bus.list().flatMap((t) => t.members.map((m) => m.name)));
-      const specs: Named[] = assignNames((p.members as MemberSpec[]).map((m) => resolveMember(m, c)), taken, c.names);
-      if (team.members.length + specs.length > c.limits.maxMembersPerTeam) throw new GenieError(`limit: at most ${c.limits.maxMembersPerTeam} members per team`);
-      validateSpecs(
-        specs,
-        team.members.map((m) => m.name),
-        ctx,
-      );
-      const at = now();
-      for (const s of specs) bus.addMember(team.id, { name: s.name, role: s.role, model: s.model, thinking: s.thinking, instructions: s.instructions, status: "starting", statusAt: at, state: "starting" });
-      const updated = bus.get(team.id);
-      const task = tracker.get(team.task);
-      const all: Named[] = updated.members.map((m) => ({ name: m.name, role: m.role, model: m.model }));
-      for (const s of specs) bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: s.name, kind: "kickoff", text: kickoff(team.id, task, team.cwd, team.worktree, all, s, p.kickoff, true) });
-      const others = team.members.map((m) => m.name);
-      for (const name of others) bus.send({ team: team.id, from: ORCHESTRATOR, fromRole: "orchestrator", to: name, kind: "system", text: `New teammate(s): ${specs.map((s) => `${s.name} (${s.role})`).join(", ")}.` });
-      const herdrPane = team.members.find((m) => m.runtime?.kind === "herdr")?.runtime?.paneId;
-      await launch(specs, updated, herdrPane ? "herdr" : "headless", herdrPane);
-      snapCache.delete(team.id);
-      return text(`added ${specs.map((s) => `${s.name} (${s.role}, ${s.model ?? "default"})`).join(", ")} to team ${team.id}`, { team: team.id });
+      for (const m of p.members as MemberSpec[]) {
+        const model = resolveMember(m, cfg()).model;
+        const slash = model?.indexOf("/") ?? -1;
+        if (model && !(slash > 0 && ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1)))) throw new GenieError(`model ${model} is not known to pi`);
+      }
+      const added = await addMembers(tracker, bus, p.team, p.members as MemberSpec[], { by: "orchestrator", note: p.kickoff });
+      snapCache.delete(p.team);
+      return text(`added ${added.map((s) => `${memberLabel(s.name, s.role, "en")} [${s.name}] (${s.model ?? "default"})`).join(", ")} to team ${p.team}`, { team: p.team });
+    },
+  });
+
+  pi.registerTool({
+    name: "team_remove_member",
+    label: "Remove team member",
+    description: "Remove a member from a team: its process is stopped and the rest of the team is told not to wait for it.",
+    parameters: Type.Object({ team: Type.String(), member: Type.String({ description: "Member name (lowercase id)" }) }),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can remove members");
+      const { tracker, bus } = need();
+      await removeMember(tracker, bus, p.team, p.member, "orchestrator");
+      snapCache.delete(p.team);
+      return text(`removed ${p.member} from team ${p.team}`, { team: p.team });
     },
   });
 
@@ -832,7 +960,10 @@ export default function genie(pi: ExtensionAPI) {
     }
     const lines = [
       `team ${t.id} (${t.state}) — task ${t.task} [${taskStatus}]${t.worktree ? ` — ${t.worktree.path} @ ${t.worktree.branch}` : ""}`,
-      ...t.members.map((m) => `  ${m.name} (${m.role}, ${m.model ?? "default"}, ${m.state}/${m.activity}): ${m.status}${bus.pending(t.id, m.name) ? ` — ${bus.pending(t.id, m.name)} unread` : ""}`),
+      ...t.members.map((m) => {
+        const seen = m.heartbeatAt ? ` · seen ${Math.round((Date.now() - Date.parse(m.heartbeatAt)) / 1000)}s ago` : "";
+        return `  ${memberLabel(m.name, m.role, "en")} [${m.name}] (${m.model ?? "default"}, ${m.state}/${m.activity}${seen}): ${m.status}${bus.pending(t.id, m.name) ? ` — ${bus.pending(t.id, m.name)} unread` : ""}`;
+      }),
     ];
     if (verbose) {
       lines.push("  recent events:");
@@ -870,6 +1001,25 @@ export default function genie(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "team_recover",
+    label: "Recover teams",
+    description:
+      "Find running team member processes and reconnect to them (also teams whose launch looked failed), and restart members that were lost — a restarted member continues its saved conversation. Use it when a member is reported lost, after an orchestrator restart, or when a team seems silent.",
+    promptSnippet: "Reconnect to running teams and restart lost members",
+    parameters: Type.Object({
+      team: Type.Optional(Type.String({ description: "Limit to one team" })),
+      restart: Type.Optional(Type.Boolean({ description: "Restart lost members (default true)" })),
+    }),
+    async execute(_id, p, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can recover teams");
+      const r = await recoverTeams({ team: p.team, restart: p.restart ?? true });
+      snapCache.clear();
+      return text(r.report, { team: p.team });
+    },
+  });
+
+  pi.registerTool({
     name: "team_stop",
     label: "Stop team",
     description: "Stop all members of a team. Optionally remove its git worktree (the branch is kept for merging). If the task is not done, it is released from the team so it can be re-dispatched.",
@@ -882,31 +1032,8 @@ export default function genie(pi: ExtensionAPI) {
       lastCtx = ctx;
       if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can stop teams");
       const { tracker, bus } = need();
-      const team = bus.get(p.team);
-      for (const m of team.members) await stopMember(team.id, m.name, m.runtime);
-      bus.setState(team.id, "stopped");
-      bus.log(team.id, { event: "team_stopped" });
-      snapCache.delete(team.id);
-      const out = [`team ${team.id} stopped`];
-      if (p.removeWorktree && team.worktree) {
-        try {
-          removeWorktree(team.worktree.path, p.forceRemove);
-          out.push(`worktree ${team.worktree.path} removed; branch ${team.worktree.branch} kept`);
-        } catch (err) {
-          out.push(`worktree not removed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      } else if (team.worktree) {
-        out.push(`worktree kept: ${team.worktree.path} (branch ${team.worktree.branch})`);
-      }
-      try {
-        const task = tracker.get(team.task);
-        if (!CLOSED.includes(task.status) && task.team === team.id) {
-          tracker.assignTeam(actor(), task.id, undefined);
-          out.push(`${task.id} released (status ${task.status})`);
-        }
-      } catch {
-        // task gone
-      }
+      const out = await stopTeam(tracker, bus, p.team, { reason: "orchestrator", by: "orchestrator", removeWorktree: p.removeWorktree, forceRemove: p.forceRemove });
+      snapCache.delete(p.team);
       return text(out.join("\n"));
     },
   });
@@ -928,7 +1055,7 @@ export default function genie(pi: ExtensionAPI) {
   }
 
   pi.registerCommand("genie", {
-    description: "genie: board | init | settings | web [--tailscale] | team <id> | mail <id> | on | off",
+    description: "genie: board | init | settings | web [--tailscale] | recover [team] | team <id> [stop|delete|add <role>|remove <member>] | mail <id> | on | off",
     handler: async (args, ctx) => {
       lastCtx = ctx;
       const [sub = "board", ...rest] = args.trim().split(/\s+/).filter(Boolean);
@@ -949,6 +1076,11 @@ export default function genie(pi: ExtensionAPI) {
             return;
           case "web":
             return startWeb(ctx, rest);
+          case "recover": {
+            const r = await recoverTeams({ team: rest.find((x) => !x.startsWith("--")), restart: !rest.includes("--no-restart") });
+            snapCache.clear();
+            return say(r.report);
+          }
           case "on":
             if (!Tracker.tryOpen(ctx.cwd)) return say("no tracker here; run /genie init", "warning");
             process.env.GENIE_ROLE = "orchestrator";
@@ -964,8 +1096,25 @@ export default function genie(pi: ExtensionAPI) {
             ctx.ui.setStatus("genie", undefined);
             return say("genie off for this session");
           case "team": {
-            const { bus } = need();
-            return say(describeTeam(bus.get(rest[0] ?? (mode.kind === "member" ? mode.team : "")), true));
+            const { tracker, bus } = need();
+            const [id = mode.kind === "member" ? mode.team : "", action, ...more] = rest;
+            const flags = new Set(more.filter((x) => x.startsWith("--")));
+            const args = more.filter((x) => !x.startsWith("--"));
+            if (!action) return say(describeTeam(bus.get(id), true));
+            if (action === "stop") return say((await stopTeam(tracker, bus, id, { reason: "owner", by: "owner", removeWorktree: flags.has("--rm-worktree") })).join("\n"));
+            if (action === "delete") {
+              if (!(await ctx.ui.confirm("Delete team", `Stop and delete team ${id} with its chat history?`))) return;
+              return say((await deleteTeam(tracker, bus, id, { by: "owner", removeWorktree: flags.has("--rm-worktree") })).join("\n"));
+            }
+            if (action === "remove" && args[0]) {
+              await removeMember(tracker, bus, id, args[0], "owner");
+              return say(`removed ${args[0]} from team ${id}`);
+            }
+            if (action === "add" && args[0]) {
+              const added = await addMembers(tracker, bus, id, [{ role: args[0] as MemberSpec["role"], name: args[1] }], { by: "owner" });
+              return say(`added ${added.map((a) => memberLabel(a.name, a.role)).join(", ")} to team ${id}`);
+            }
+            return say("usage: /genie team <id> [stop|delete [--rm-worktree] | add <role> [name] | remove <member>]", "warning");
           }
           case "mail": {
             const { bus } = need();

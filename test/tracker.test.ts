@@ -236,3 +236,99 @@ test("members get unique playful names shown as 'Name — role'", async () => {
   const exhausted = assignNames([{ role: "tester" as const }], new Set(["murphy", "gremlin", "loki", "jinx", "chaos", "moriarty"]));
   assert.equal(exhausted[0].name, "murphy2");
 });
+
+test("heartbeats revive lost members and accidentally stopped teams; mail keeps flowing", () => {
+  const t = fresh();
+  const bus = new TeamBus(t);
+  const at = new Date().toISOString();
+  bus.create({ id: "G-1", task: "G-1", cwd: "/tmp", members: [{ name: "bender", role: "executor", status: "starting", statusAt: at, state: "starting" }] });
+  bus.setState("G-1", "stopped", "launch_failed");
+  bus.send({ team: "G-1", from: "bender", fromRole: "executor", to: "orchestrator", text: "I am actually running" });
+  assert.equal(bus.receive(undefined, "orchestrator").length, 1, "mail from a team that looked dead still reaches the orchestrator");
+
+  const r = bus.heartbeat("G-1", "bender", 4242);
+  assert.deepEqual(r, { revived: false, teamRevived: true });
+  const team = bus.get("G-1");
+  assert.equal(team.state, "active");
+  assert.equal(team.members[0].state, "active");
+  assert.equal(team.members[0].runtime?.pid, 4242);
+  assert.ok(team.members[0].heartbeatAt);
+
+  bus.markLost("G-1", "bender", "no heartbeat");
+  assert.equal(bus.get("G-1").members[0].state, "lost");
+  assert.equal(bus.heartbeat("G-1", "bender").revived, true);
+  assert.ok(bus.readLog("G-1").some((e) => e.event === "member_recovered"));
+
+  bus.setState("G-1", "stopped", "orchestrator");
+  bus.send({ team: "G-1", from: "bender", fromRole: "executor", to: "orchestrator", text: "late" });
+  assert.equal(bus.receive(undefined, "orchestrator").length, 0, "a team stopped on purpose is silenced");
+  assert.equal(bus.heartbeat("G-1", "bender").teamRevived, false, "and is not revived by a straggler");
+  assert.deepEqual(bus.recoverable().map((x) => x.id), []);
+});
+
+test("discoverMembers finds member processes by label and tracker dir", async () => {
+  const { discoverMembers, parseEnviron } = await import("../src/team/spawn.ts");
+  assert.deepEqual(parseEnviron("A=1\0B=x=y\0"), { A: "1", B: "x=y" });
+  const t = fresh();
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)", "--", "--name", "G-9:baymax"], {
+    env: { ...process.env, GENIE_DIR: t.dir, GENIE_TEAM: "G-9", GENIE_MEMBER: "baymax" },
+    stdio: "ignore",
+  });
+  const decoy = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { env: { ...process.env, GENIE_DIR: t.dir, GENIE_TEAM: "G-9", GENIE_MEMBER: "yoda" }, stdio: "ignore" });
+  try {
+    await new Promise((r) => setTimeout(r, 300));
+    const found = discoverMembers(t.dir);
+    assert.deepEqual(found.map((f) => [f.team, f.member, f.pid]), [["G-9", "baymax", child.pid]], "only labelled processes of this tracker count");
+  } finally {
+    child.kill();
+    decoy.kill();
+  }
+});
+
+test("team ops: remove member, reap teams of closed tasks, stop and delete", async () => {
+  const { removeMember, reapClosedTeams, deleteTeam, stopTeam } = await import("../src/team/ops.ts");
+  const { spawn } = await import("node:child_process");
+  const t = fresh();
+  const bus = new TeamBus(t);
+  const fake = (team: string, member: string) =>
+    spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", "--", "--name", `${team}:${member}`], {
+      env: { ...process.env, GENIE_DIR: t.dir, GENIE_TEAM: team, GENIE_MEMBER: member },
+      stdio: "ignore",
+      detached: true,
+    });
+  const exited = (p: ReturnType<typeof fake>) => new Promise<boolean>((resolve) => (p.exitCode !== null || p.signalCode !== null ? resolve(true) : p.once("exit", () => resolve(true))));
+  const at = new Date().toISOString();
+  t.create(orch, { title: "one", description: "d", acceptance: ["a"] });
+  t.create(orch, { title: "two", description: "d", acceptance: ["a"] });
+  const p1 = fake("G-1", "bender");
+  const p2 = fake("G-1", "yoda");
+  const p3 = fake("G-2", "sherlock");
+  const member = (name: string, role: "executor" | "reviewer" | "analyst", pid?: number) => ({ name, role, status: "working", statusAt: at, state: "active" as const, runtime: { kind: "headless" as const, pid } });
+  bus.create({ id: "G-1", task: "G-1", cwd: "/tmp", members: [member("bender", "executor", p1.pid), member("yoda", "reviewer", p2.pid)] });
+  bus.create({ id: "G-2", task: "G-2", cwd: "/tmp", members: [member("sherlock", "analyst", p3.pid)] });
+  t.assignTeam(orch, "G-1", "G-1");
+  t.assignTeam(orch, "G-2", "G-2");
+
+  await removeMember(t, bus, "G-1", "yoda", "owner");
+  assert.ok(await exited(p2), "removed member process is stopped");
+  assert.deepEqual(bus.get("G-1").members.map((m) => m.name), ["bender"]);
+  assert.match(bus.receive("G-1", "bender")[0].text, /Yoda — reviewer left the team/);
+
+  t.setStatus(human, "G-1", "done", { force: true });
+  assert.deepEqual(await reapClosedTeams(t, bus), ["G-1"]);
+  assert.ok(await exited(p1), "the team of a closed task is stopped");
+  assert.equal(bus.get("G-1").stopReason, "task_closed");
+  bus.send({ team: "G-1", from: "bender", fromRole: "executor", to: "orchestrator", text: "late" });
+  assert.equal(bus.receive(undefined, "orchestrator").filter((m) => m.team === "G-1").length, 0, "a reaped team is silenced");
+  assert.deepEqual(await reapClosedTeams(t, bus), [], "open tasks keep their teams");
+
+  const report = await stopTeam(t, bus, "G-2", { reason: "owner", by: "me" });
+  assert.ok(await exited(p3));
+  assert.ok(report.some((l) => /G-2 released/.test(l)), "an open task is released");
+  assert.equal(t.get("G-2").team, undefined);
+  assert.ok(bus.receive(undefined, "orchestrator").some((m) => /owner stopped team G-2/.test(m.text)));
+  await deleteTeam(t, bus, "G-2", { by: "me" });
+  assert.equal(bus.exists("G-2"), false);
+  assert.equal(bus.history("G-2").length, 0);
+});

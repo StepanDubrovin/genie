@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Db, SCHEMA, SCHEMA_VERSION } from "./db.ts";
+import { Db, migrate, SCHEMA, SCHEMA_VERSION } from "./db.ts";
 import { excludeFromGit, findGenieDir, now } from "./fsutil.ts";
 import {
   type Actor,
@@ -128,6 +128,7 @@ export class Tracker {
     this.dir = dir;
     this.db = new Db(path.join(dir, DB_FILE));
     this.db.exec(SCHEMA);
+    migrate(this.db);
   }
 
   static init(dir: string, opts: { prefix?: string; project?: string } = {}): Tracker {

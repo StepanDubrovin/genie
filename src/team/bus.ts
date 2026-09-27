@@ -22,6 +22,17 @@ export interface MemberRuntime {
 
 export type Activity = "idle" | "working" | "error";
 
+/** A member that has not sent a heartbeat for this long is considered lost. */
+export const HEARTBEAT_STALE_MS = 60_000;
+/** A member that has not checked in this long after launch failed to start. */
+export const START_GRACE_MS = 150_000;
+/** Why a team was stopped: only an explicit orchestrator/owner stop silences its mail. */
+export type StopReason = "orchestrator" | "owner" | "task_closed" | "launch_failed" | "all_lost";
+
+/** Stops made on purpose: such teams are not revived and their late mail is dropped. */
+export const DELIBERATE_STOPS: StopReason[] = ["orchestrator", "owner", "task_closed"];
+const DELIBERATE_SQL = DELIBERATE_STOPS.map((r) => `'${r}'`).join(", ");
+
 export interface Member {
   name: string;
   role: MemberRole;
@@ -31,9 +42,11 @@ export interface Member {
   instructions?: string;
   status: string;
   statusAt: string;
-  state: "starting" | "active" | "stopped";
+  state: "starting" | "active" | "stopped" | "lost";
   activity: Activity;
   activityAt?: string;
+  /** Last sign of life from the member's pi process. */
+  heartbeatAt?: string;
   runtime?: MemberRuntime;
   sessionFile?: string;
 }
@@ -45,6 +58,7 @@ export interface Team {
   cwd: string;
   worktree?: { path: string; branch: string; base?: string };
   state: "active" | "stopped";
+  stopReason?: StopReason;
   created: string;
   updated: string;
   members: Member[];
@@ -77,6 +91,7 @@ interface MemberRow {
   state: Member["state"];
   activity: Activity;
   activity_at: string | null;
+  heartbeat_at: string | null;
   runtime: string | null;
   session_file: string | null;
 }
@@ -120,6 +135,7 @@ const toMember = (r: MemberRow): Member => ({
   state: r.state,
   activity: r.activity,
   activityAt: r.activity_at ?? undefined,
+  heartbeatAt: r.heartbeat_at ?? undefined,
   runtime: r.runtime ? (JSON.parse(r.runtime) as MemberRuntime) : undefined,
   sessionFile: r.session_file ?? undefined,
 });
@@ -138,7 +154,7 @@ export class TeamBus {
   }
 
   get(team: string): Team {
-    const t = this.db.get<{ id: string; task: string; template: string | null; cwd: string; worktree: string | null; state: Team["state"]; created: string; updated: string }>(
+    const t = this.db.get<{ id: string; task: string; template: string | null; cwd: string; worktree: string | null; state: Team["state"]; stop_reason: StopReason | null; created: string; updated: string }>(
       "SELECT * FROM teams WHERE id = ?",
       team,
     );
@@ -150,6 +166,7 @@ export class TeamBus {
       cwd: t.cwd,
       worktree: t.worktree ? JSON.parse(t.worktree) : undefined,
       state: t.state,
+      stopReason: t.stop_reason ?? undefined,
       created: t.created,
       updated: t.updated,
       members: this.db.all<MemberRow>("SELECT * FROM members WHERE team = ? ORDER BY ord", team).map(toMember),
@@ -220,11 +237,83 @@ export class TeamBus {
     return this.get(team);
   }
 
-  setState(team: string, state: Team["state"]): void {
+  setState(team: string, state: Team["state"], reason?: StopReason): void {
     this.db.tx(() => {
-      this.db.run("UPDATE teams SET state = ?, updated = ? WHERE id = ?", state, now(), team);
-      if (state === "stopped") this.db.run("UPDATE members SET state = 'stopped', activity = 'idle' WHERE team = ?", team);
+      this.db.run("UPDATE teams SET state = ?, stop_reason = ?, updated = ? WHERE id = ?", state, state === "stopped" ? (reason ?? "orchestrator") : null, now(), team);
+      if (state === "stopped" && DELIBERATE_STOPS.includes(reason ?? "orchestrator")) this.db.run("UPDATE members SET state = 'stopped', activity = 'idle' WHERE team = ?", team);
     });
+  }
+
+  /**
+   * Sign of life from a member process. Revives a member marked lost (and its team,
+   * unless the orchestrator stopped it on purpose). Returns what changed.
+   */
+  heartbeat(team: string, member: string, pid?: number): { revived: boolean; teamRevived: boolean } {
+    return this.db.tx(() => {
+      const row = this.db.get<{ state: Member["state"]; runtime: string | null }>("SELECT state, runtime FROM members WHERE team = ? AND name = ?", team, member);
+      if (!row) return { revived: false, teamRevived: false };
+      const runtime = { ...(row.runtime ? (JSON.parse(row.runtime) as MemberRuntime) : { kind: "manual" as const }), ...(pid ? { pid } : {}) };
+      const revived = row.state === "lost";
+      const at = now();
+      this.db.run(
+        "UPDATE members SET heartbeat_at = ?, runtime = ?, state = CASE WHEN state IN ('starting', 'lost') THEN 'active' ELSE state END WHERE team = ? AND name = ?",
+        at,
+        JSON.stringify(runtime),
+        team,
+        member,
+      );
+      const t = this.db.get<{ state: Team["state"]; stop_reason: string | null }>("SELECT state, stop_reason FROM teams WHERE id = ?", team);
+      const teamRevived = !!t && t.state === "stopped" && !DELIBERATE_STOPS.includes((t.stop_reason ?? "orchestrator") as StopReason);
+      if (teamRevived) this.db.run("UPDATE teams SET state = 'active', stop_reason = NULL, updated = ? WHERE id = ?", at, team);
+      if (revived) this.log(team, { event: "member_recovered", member });
+      if (teamRevived) this.log(team, { event: "team_recovered", member });
+      return { revived, teamRevived };
+    });
+  }
+
+  /** Remove a member from the roster (its messages stay in the history). */
+  removeMember(team: string, member: string): void {
+    this.db.tx(() => {
+      const res = this.db.run("DELETE FROM members WHERE team = ? AND name = ?", team, member);
+      if (!res.changes) throw new Error(`team ${team} has no member ${member}`);
+      this.db.run("UPDATE mail SET delivered_at = ? WHERE team = ? AND recipient = ? AND delivered_at IS NULL", now(), team, member);
+      this.db.run("UPDATE teams SET updated = ? WHERE id = ?", now(), team);
+      this.log(team, { event: "member_removed", member });
+    });
+  }
+
+  /** Delete a team with its roster, mail and log. */
+  deleteTeam(team: string): void {
+    this.db.tx(() => {
+      for (const table of ["mail", "log", "members"]) this.db.run(`DELETE FROM ${table} WHERE team = ?`, team);
+      this.db.run("DELETE FROM teams WHERE id = ?", team);
+    });
+  }
+
+  /** A message to the orchestrator that does not belong to a (possibly stopped) team. */
+  notifyOrchestrator(from: string, text: string, task?: string): void {
+    this.db.run(
+      "INSERT INTO mail(team, at, sender, sender_role, recipient, text, urgent, kind, task) VALUES (NULL, ?, ?, 'human', ?, ?, 0, 'owner', ?)",
+      now(),
+      from,
+      ORCHESTRATOR,
+      text,
+      task ?? null,
+    );
+  }
+
+  markLost(team: string, member: string, reason: string): void {
+    this.db.tx(() => {
+      this.db.run("UPDATE members SET state = 'lost', activity = 'idle' WHERE team = ? AND name = ?", team, member);
+      this.log(team, { event: "member_lost", member, reason });
+    });
+  }
+
+  /** Teams whose members may still run: active ones and ones stopped by accident. */
+  recoverable(): Team[] {
+    return this.db
+      .all<{ id: string }>(`SELECT id FROM teams WHERE state = 'active' OR COALESCE(stop_reason, 'orchestrator') NOT IN (${DELIBERATE_SQL}) ORDER BY created`)
+      .map((r) => this.get(r.id));
   }
 
   updateMember(team: string, member: string, patch: Partial<Pick<Member, "state" | "runtime" | "sessionFile" | "status">>): void {
@@ -301,7 +390,9 @@ export class TeamBus {
       const rows =
         team === undefined
           ? this.db.all<MailRow>(
-              "SELECT * FROM mail WHERE recipient = ? AND delivered_at IS NULL AND (team IS NULL OR team IN (SELECT id FROM teams WHERE state = 'active')) ORDER BY id",
+              // Everything except teams the orchestrator stopped on purpose: a team that
+              // looked dead (failed launch, lost heartbeat) must still be heard.
+              `SELECT * FROM mail WHERE recipient = ? AND delivered_at IS NULL AND (team IS NULL OR team NOT IN (SELECT id FROM teams WHERE state = 'stopped' AND COALESCE(stop_reason, 'orchestrator') IN (${DELIBERATE_SQL}))) ORDER BY id`,
               member,
             )
           : this.db.all<MailRow>("SELECT * FROM mail WHERE team = ? AND recipient = ? AND delivered_at IS NULL ORDER BY id", team, member);

@@ -11,6 +11,22 @@ export const useTeam = (id: string | undefined) =>
 export const useSendMail = () =>
   useInvalidating((v: { team: string; to: string; text: string }) => request<unknown>("POST", `/api/teams/${encodeURIComponent(v.team)}/mail`, { to: v.to, text: v.text }));
 
+export const useStopTeam = () =>
+  useInvalidating((v: { team: string; removeWorktree?: boolean }) => request<{ report: string[] }>("POST", `/api/teams/${encodeURIComponent(v.team)}/stop`, { removeWorktree: v.removeWorktree }));
+
+export const useDeleteTeam = () =>
+  useInvalidating((v: { team: string; removeWorktree?: boolean }) =>
+    request<{ report: string[] }>("DELETE", `/api/teams/${encodeURIComponent(v.team)}${v.removeWorktree ? "?removeWorktree=1" : ""}`),
+  );
+
+export const useAddMember = () =>
+  useInvalidating((v: { team: string; role: string; name?: string; model?: string; instructions?: string }) =>
+    request<{ name: string; role: string; model?: string }[]>("POST", `/api/teams/${encodeURIComponent(v.team)}/members`, v),
+  );
+
+export const useRemoveMember = () =>
+  useInvalidating((v: { team: string; member: string }) => request<unknown>("DELETE", `/api/teams/${encodeURIComponent(v.team)}/members/${encodeURIComponent(v.member)}`));
+
 export function useTeamMap(): Map<string, Team> {
   const teams = useTeams().data;
   return useMemo(() => new Map((teams ?? []).map((t) => [t.id, t])), [teams]);

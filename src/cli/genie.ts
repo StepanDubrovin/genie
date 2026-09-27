@@ -3,12 +3,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { parseArgs } from "node:util";
-import { type Actor, ARTIFACT_KINDS, type ArtifactKind, COMMENT_KINDS, type CommentKind, isRole, isStatus, STATUSES, type Status, TASK_TYPES, type TaskType } from "../tracker/model.ts";
+import { type Actor, isMemberRole, ARTIFACT_KINDS, type ArtifactKind, COMMENT_KINDS, type CommentKind, isRole, isStatus, STATUSES, type Status, TASK_TYPES, type TaskType } from "../tracker/model.ts";
 import { loadConfig } from "../team/config.ts";
 import { oneLine, renderTask, statusIcon } from "../tracker/render.ts";
 import { GenieError, Tracker } from "../tracker/store.ts";
 import { defaultGenieDir } from "../tracker/fsutil.ts";
 import { TeamBus } from "../team/bus.ts";
+import { memberLabel } from "../team/names.ts";
+import { addMembers, deleteTeam, removeMember, stopTeam } from "../team/ops.ts";
 import { startWebServer } from "../web/server.ts";
 
 const HELP = `genie — local task tracker for pi orchestrator + focus teams
@@ -41,6 +43,10 @@ Web
 Teams
   genie teams [--all]                       list teams
   genie team <TEAM>                         roster, statuses, recent events
+  genie team <TEAM> stop [--rm-worktree]    stop all members (the task is released if still open)
+  genie team <TEAM> delete [--rm-worktree]  stop and delete the team with its chat history
+  genie team <TEAM> add <role> [name] [--model provider/id] [-m instructions]
+  genie team <TEAM> remove <member>         stop a member and drop it from the team
   genie send <TEAM> <to|all> <text> [--urgent]
   genie mail <TEAM> [-n 30]                 message history
 
@@ -80,6 +86,8 @@ async function main(argv: string[]): Promise<void> {
       open: { type: "boolean" },
       port: { type: "string" },
       out: { type: "string" },
+      model: { type: "string" },
+      "rm-worktree": { type: "boolean" },
       urgent: { type: "boolean" },
       prefix: { type: "string" },
       title: { type: "string" },
@@ -280,7 +288,30 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "team": {
-      need(1, "team <TEAM>");
+      need(1, "team <TEAM> [stop|delete|add <role> [name]|remove <member>]");
+      const action = args[1];
+      if (action === "stop") {
+        console.log((await stopTeam(tracker, bus, args[0], { reason: "owner", by: me.name, removeWorktree: values["rm-worktree"] })).join("\n"));
+        return;
+      }
+      if (action === "delete") {
+        console.log((await deleteTeam(tracker, bus, args[0], { by: me.name, removeWorktree: values["rm-worktree"] })).join("\n"));
+        return;
+      }
+      if (action === "add") {
+        need(3, "team <TEAM> add <role> [name] [--model provider/id]");
+        if (!isMemberRole(args[2])) throw new GenieError(`unknown role ${args[2]}`);
+        const added = await addMembers(tracker, bus, args[0], [{ role: args[2], name: args[3], model: values.model }], { by: me.name, note: values.message });
+        out(json, added, () => `added ${added.map((a) => `${memberLabel(a.name, a.role)} [${a.name}]`).join(", ")} to team ${args[0]}`);
+        return;
+      }
+      if (action === "remove") {
+        need(3, "team <TEAM> remove <member>");
+        await removeMember(tracker, bus, args[0], args[2], me.name);
+        out(json, { removed: args[2] }, () => `removed ${args[2]} from team ${args[0]}`);
+        return;
+      }
+      if (action) throw new GenieError(`unknown team action ${action}`);
       const team = bus.get(args[0]);
       const log = bus.readLog(team.id, 20);
       out(json, { team, log }, () =>

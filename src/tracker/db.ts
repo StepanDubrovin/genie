@@ -94,7 +94,27 @@ export class Db {
   }
 }
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+
+/** Columns added after the first release; applied to existing databases on open. */
+export const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
+  { table: "members", column: "heartbeat_at", ddl: "ALTER TABLE members ADD COLUMN heartbeat_at TEXT" },
+  { table: "teams", column: "stop_reason", ddl: "ALTER TABLE teams ADD COLUMN stop_reason TEXT" },
+];
+
+export function migrate(db: Db): void {
+  for (const m of MIGRATIONS) {
+    const cols = db.all<{ name: string }>(`PRAGMA table_info(${m.table})`).map((c) => c.name);
+    if (!cols.includes(m.column)) {
+      try {
+        db.exec(m.ddl);
+      } catch (err) {
+        // another process migrated concurrently
+        if (!String(err).includes("duplicate column")) throw err;
+      }
+    }
+  }
+}
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);

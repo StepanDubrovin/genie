@@ -12,8 +12,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { ORCHESTRATOR, TeamBus } from "../team/bus.ts";
-import { PACKAGE_ROOT } from "../team/config.ts";
-import { type Actor, MEMBER_ROLES, STATUSES, type Status, TASK_TYPES, isStatus } from "../tracker/model.ts";
+import { loadConfig, type MemberSpec, PACKAGE_ROOT } from "../team/config.ts";
+import { addMembers, deleteTeam, reapClosedTeams, removeMember, stopTeam } from "../team/ops.ts";
+import { type Actor, isMemberRole, MEMBER_ROLES, STATUSES, type Status, TASK_TYPES, isStatus } from "../tracker/model.ts";
 import { GenieError, type Tracker } from "../tracker/store.ts";
 
 const execFileAsync = promisify(execFile);
@@ -115,6 +116,20 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
     for (const c of clients) c.write(": ping\n\n");
   }, 20_000).unref();
 
+  // Teams keep running only while their task is open: closing a task here (or
+  // anywhere) stops its team. Checked right after status changes and periodically.
+  const reap = () =>
+    reapClosedTeams(tracker, bus)
+      .then((ids) => {
+        if (ids.length) {
+          console.log(`genie web: stopped team(s) of closed tasks: ${ids.join(", ")}`);
+          version = -1;
+        }
+      })
+      .catch((err) => console.error(`genie web: reaping failed: ${err instanceof Error ? err.message : String(err)}`));
+  setInterval(reap, 20_000).unref();
+  void reap();
+
   async function actorFor(req: http.IncomingMessage): Promise<Actor> {
     const remote = req.socket.remoteAddress ?? "";
     const octets = remote.replace(/^::ffff:/, "").split(".").map(Number);
@@ -153,7 +168,8 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
     // GET /api/meta
     if (parts[0] === "meta" && method === "GET") {
       const actor = await actorFor(req);
-      return send(res, 200, { ...tracker.meta(), counts: tracker.counts(), statuses: STATUSES, roles: MEMBER_ROLES, types: TASK_TYPES, user: actor.name, tailnet: tailnet?.dnsName });
+      const cfg = loadConfig(tracker.dir);
+      return send(res, 200, { ...tracker.meta(), counts: tracker.counts(), statuses: STATUSES, roles: MEMBER_ROLES, roleModels: cfg.roleModels ?? {}, types: TASK_TYPES, user: actor.name, tailnet: tailnet?.dnsName });
     }
 
     if (parts[0] === "tasks") {
@@ -192,6 +208,7 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
         const to = String(body.status ?? "");
         if (!isStatus(to)) throw new HttpError(400, `unknown status ${to}`);
         const task = tracker.setStatus(me!, id, to, { note: body.note ? String(body.note) : undefined, force: true });
+        if (to === "done" || to === "cancelled") await reap();
         changed();
         return send(res, 200, task);
       }
@@ -219,6 +236,35 @@ export async function startWebServer(tracker: Tracker, opts: Options): Promise<v
       const id = parts[1];
       if (!id && method === "GET") return send(res, 200, bus.list({ includeStopped: url.searchParams.get("all") === "1" }).map((t) => teamView(t.id)));
       if (id && !parts[2] && method === "GET") return send(res, 200, { ...teamView(id), mail: bus.history(id, 200), log: bus.readLog(id, 200) });
+      if (id && !parts[2] && method === "DELETE") {
+        const out = await deleteTeam(tracker, bus, id, { by: me!.name, removeWorktree: url.searchParams.get("removeWorktree") === "1" });
+        changed();
+        return send(res, 200, { ok: true, report: out });
+      }
+      if (id && parts[2] === "stop" && method === "POST") {
+        const out = await stopTeam(tracker, bus, id, { reason: "owner", by: me!.name, removeWorktree: !!body.removeWorktree });
+        changed();
+        return send(res, 200, { ok: true, report: out });
+      }
+      if (id && parts[2] === "members" && !parts[3] && method === "POST") {
+        const role = String(body.role ?? "");
+        if (!isMemberRole(role)) throw new HttpError(400, `unknown role ${role}`);
+        const spec: MemberSpec = {
+          role,
+          name: body.name ? String(body.name).trim().toLowerCase() || undefined : undefined,
+          model: body.model ? String(body.model).trim() || undefined : undefined,
+          thinking: body.thinking ? String(body.thinking) : undefined,
+          instructions: body.instructions ? String(body.instructions) : undefined,
+        };
+        const added = await addMembers(tracker, bus, id, [spec], { by: me!.name, note: spec.instructions });
+        changed();
+        return send(res, 201, added);
+      }
+      if (id && parts[2] === "members" && parts[3] && method === "DELETE") {
+        await removeMember(tracker, bus, id, decodeURIComponent(parts[3]), me!.name);
+        changed();
+        return send(res, 200, { ok: true });
+      }
       if (id && parts[2] === "mail" && method === "POST") {
         const to = String(body.to ?? "all");
         const sent = bus.send({ team: id, from: `owner (${me!.name})`, fromRole: "human", to: to === "orchestrator" ? ORCHESTRATOR : to, text: String(body.text ?? ""), urgent: !!body.urgent });

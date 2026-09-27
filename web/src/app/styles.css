@@ -375,3 +375,14 @@ button.title { background: none; border: 0; padding: 0; color: inherit; text-ali
 /* member names: keep "Name — role" on one line, status wraps below */
 .mcard .nm { flex-wrap: wrap; row-gap: 2px; }
 .mcard .nm b { white-space: nowrap; }
+
+/* member that lost contact with the orchestrator */
+.av.lost { opacity: 0.55; box-shadow: 0 0 0 2px var(--amber); }
+
+/* owner team controls */
+.btn.danger { background: var(--red); border-color: var(--red); color: #1b0b0b; font-weight: 600; }
+.btn.danger:hover { filter: brightness(1.08); }
+.mcard .member-remove { width: 20px; height: 20px; margin-left: auto; opacity: 0; }
+.mcard:hover .member-remove, .mcard .member-remove:focus-visible { opacity: 1; }
+@media (hover: none) { .mcard .member-remove { opacity: 1; } }
+.team-head .line .btn { height: 28px; }

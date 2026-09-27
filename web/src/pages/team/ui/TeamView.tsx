@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import { Avatar, displayName, memberLabel } from "@/entities/member";
+import { RemoveMemberButton, TeamActions } from "@/features/manage-team";
 import { StageBars, STAGES, stageOf, STATUS_NAME } from "@/entities/task";
 import { type Mail, type TeamDetail, useSendMail, useTeam } from "@/entities/team";
 import { clock, dayLabel, timeAgo, useTick } from "@/shared/lib";
@@ -63,6 +64,10 @@ const EVENT_TEXT: Record<string, (e: Record<string, unknown>) => string> = {
   agent_error: (e) => `${displayName(String(e.member))}: ошибка модели`,
   blocked: (e) => `${e.task} заблокирована: ${e.reason}`,
   team_stopped: () => "команда остановлена",
+  member_lost: (e) => `${displayName(String(e.member))}: связь потеряна (${e.reason})`,
+  member_recovered: (e) => `${displayName(String(e.member))}: снова на связи`,
+  team_recovered: () => "связь с командой восстановлена",
+  team_restarted: (e) => `перезапущены: ${(e.members as string[]).map(displayName).join(", ")}`,
   launch_failed: () => "не удалось запустить участников",
 };
 
@@ -123,6 +128,7 @@ export function TeamView() {
             <span className="muted" style={{ fontSize: 12 }}>
               {timeAgo(team.created)}
             </span>
+            <TeamActions team={team} />
           </div>
           <StageBars stage={stage} big amber={status === "needs_owner"} />
           <div className="stage-labels d-only">
@@ -261,7 +267,8 @@ export function TeamView() {
               <span className="info">
                 <span className="nm">
                   <b>{memberLabel(m.name, m.role)}</b>
-                  {m.activity === "error" ? <span className="e">ошибка</span> : m.activity === "working" && active ? <span className="w">работает</span> : <span>{m.state === "stopped" ? "остановлен" : "ждёт"}</span>}
+                  {active && <RemoveMemberButton team={team.id} name={m.name} role={m.role} />}
+                  {m.activity === "error" ? <span className="e">ошибка</span> : m.activity === "working" && active ? <span className="w">работает</span> : m.state === "lost" ? <span className="e">нет связи</span> : <span>{m.state === "stopped" ? "остановлен" : "ждёт"}</span>}
                   {team.pending[m.name] ? <span style={{ color: "var(--amber)" }}>✉ {team.pending[m.name]}</span> : null}
                 </span>
                 <span className="model">

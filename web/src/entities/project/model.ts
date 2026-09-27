@@ -6,5 +6,7 @@ export interface Meta {
   created: string;
   counts: Partial<Record<Status, number>>;
   user: string;
+  roles: string[];
+  roleModels: Record<string, { model?: string; thinking?: string }>;
   tailnet?: string;
 }

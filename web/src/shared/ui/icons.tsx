@@ -63,6 +63,22 @@ export const Icon = {
       <path d="M3.5 8.5l3 3 6-7" />
     </svg>
   ),
+  trash: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v5M9.2 6.5v5" />
+    </svg>
+  ),
+  stop: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
+    </svg>
+  ),
+  userPlus: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <circle cx="6.5" cy="5.5" r="2.5" />
+      <path d="M2 13.5c.6-2.3 2.3-3.5 4.5-3.5s3.9 1.2 4.5 3.5M12.5 5v4M10.5 7h4" />
+    </svg>
+  ),
   spark: ({ size, ...p }: IconProps) => (
     <svg {...stroke(size, p)}>
       <path d="M8 1.5v4M8 10.5v4M1.5 8h4M10.5 8h4M3.4 3.4l2.2 2.2M10.4 10.4l2.2 2.2M12.6 3.4l-2.2 2.2M5.6 10.4l-2.2 2.2" />

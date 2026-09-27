@@ -37,6 +37,7 @@ function shortModel(model?: string): string {
 }
 
 function memberGlyph(m: Member, team: Team, frame: number, theme: Theme): string {
+  if (m.state === "lost") return theme.fg("warning", "?");
   if (team.state === "stopped" || m.state === "stopped") return theme.fg("dim", "■");
   if (m.activity === "error") return theme.fg("error", "✗");
   if (m.state === "starting") return theme.fg("warning", SPINNER[frame % SPINNER.length]);
@@ -88,7 +89,12 @@ export function renderCard(s: TeamSnapshot | undefined, theme: Theme, frame: num
   ];
   for (const m of team.members) {
     const mail = s.pending[m.name] ? theme.fg("warning", ` ✉${s.pending[m.name]}`) : "";
-    const statusText = m.activity === "error" ? theme.fg("error", m.status) : theme.fg(m.activity === "working" ? "text" : "muted", m.status);
+    const statusText =
+      m.state === "lost"
+        ? theme.fg("warning", "lost contact — team_recover restarts it")
+        : m.activity === "error"
+          ? theme.fg("error", m.status)
+          : theme.fg(m.activity === "working" ? "text" : "muted", m.status);
     lines.push(`  ${memberGlyph(m, team, frame, theme)} ${memberLabel(m.name, m.role).padEnd(24)} ${theme.fg("dim", shortModel(m.model).padEnd(23))} ${statusText}${mail}`);
   }
   return lines.map((l) => truncateToWidth(l, width));

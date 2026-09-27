@@ -84,7 +84,7 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
 }
 
 function statusShort(s: string): string {
-  return ({ refining: "уточнение", ready: "готово", in_progress: "в работе", changes_requested: "доработка", review: "ревью", approved: "одобрено", done: "принято" } as Record<string, string>)[s] ?? s;
+  return ({ inbox: "входящие", draft: "черновик", refining: "уточнение", ready: "готово", in_progress: "в работе", changes_requested: "доработка", review: "ревью", approved: "одобрено", done: "принято" } as Record<string, string>)[s] ?? s;
 }
 
 export function keepLayout(search: string): string {
