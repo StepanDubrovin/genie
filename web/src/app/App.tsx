@@ -6,6 +6,7 @@ import { CommandPalette, type PaletteActions } from "@/features/command-palette"
 import { NewTaskDialog, type NewTaskPreset } from "@/features/create-task";
 import { EpicPage } from "@/pages/epic";
 import { EpicsPage } from "@/pages/epics";
+import { DocsPage } from "@/pages/docs";
 import { TasksPage } from "@/pages/tasks";
 import { TeamView } from "@/pages/team";
 import { useLiveUpdates } from "@/shared/api";
@@ -28,8 +29,9 @@ function Shell() {
   const teams = useTeamMap();
   const tasks = useTasks().data;
   const teamRoute = location.pathname.startsWith("/team/");
+  const docsRoute = location.pathname.startsWith("/docs");
   // Pages without a task list: palette actions that need one go to "active".
-  const ownPage = teamRoute || location.pathname.startsWith("/epic");
+  const ownPage = teamRoute || location.pathname.startsWith("/epic") || docsRoute;
   const openTaskId = teamRoute ? undefined : (sp.get("task") ?? undefined);
   const openTask = tasks?.find((t) => t.id === openTaskId);
 
@@ -46,6 +48,10 @@ function Shell() {
       layout: (l) => navigate({ pathname: ownPage ? "/active" : location.pathname, search: `?layout=${l}` }),
       openTask: (id) => navigate({ pathname: ownPage ? "/active" : location.pathname, search: `?${new URLSearchParams({ ...(sp.get("layout") ? { layout: sp.get("layout")! } : {}), task: id })}` }),
       openTeam: (id) => navigate(`/team/${encodeURIComponent(id)}`),
+      openDoc: (path) => navigate(`/docs?page=${encodeURIComponent(path)}`),
+      openDocs: () => navigate("/docs"),
+      newDoc: (kind, title) => navigate(`/docs?new=${kind}${title ? `&title=${encodeURIComponent(title)}` : ""}`),
+      searchDocs: (q) => navigate(`/docs?q=${encodeURIComponent(q)}`),
     }),
     [navigate, sp, location.pathname, ownPage, newTask],
   );
@@ -139,6 +145,8 @@ export const router = createBrowserRouter([
       { path: "team/:teamId", element: <TeamView /> },
       { path: "epics", element: <EpicsRoute /> },
       { path: "epic/:epicId", element: <EpicRoute /> },
+      { path: "docs", element: <DocsPage /> },
+      { path: "docs/edit", element: <DocsPage /> },
       { path: ":view", element: <TasksRoute /> },
     ],
   },
