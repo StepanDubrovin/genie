@@ -1,5 +1,7 @@
 # Genie project documentation contract
 
+**Schema frozen:** the docs index schema is frozen at `DOCS_SCHEMA_VERSION = 1` and its DDL is unchanged since G-8; frontmatter-contract changes follow their own path.
+
 Genie indexes Markdown files below the configured project docs root (`docs.root`, default `docs`). Markdown files remain the source of truth; the SQLite index is a rebuildable cache. The current index schema is intentionally independent of task tracking.
 
 ## Frontmatter
