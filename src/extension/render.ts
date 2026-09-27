@@ -263,6 +263,21 @@ function teamAddMemberCall(a: Record<string, unknown>): Segment[] {
   return mergeDetails(out, details);
 }
 
+function teamRemoveMemberCall(a: Record<string, unknown>): Segment[] {
+  const out: Segment[] = [TITLE("team_remove_member")];
+  const team = str(a.team);
+  if (team) out.push(ACCENT(` ${team}`));
+  const member = str(a.member);
+  if (member) out.push(ARROW, ACCENT(member));
+  return out;
+}
+
+function teamRecoverCall(a: Record<string, unknown>): Segment[] {
+  const out: Segment[] = [TITLE("team_recover"), ACCENT(` ${str(a.team) || "all teams"}`)];
+  const restart = a.restart !== false;
+  return mergeDetails(out, [[MUTED(restart ? "restart lost members" : "reconnect only")]]);
+}
+
 function teamSendCall(a: Record<string, unknown>): Segment[] {
   const out: Segment[] = [TITLE("team_send"), ARROW, ACCENT(str(a.to) || "…")];
   if (a.urgent) out.push({ text: " !", tone: "warning", strong: true });
@@ -310,6 +325,10 @@ export function callSegments(name: string, args: unknown): Segment[] {
       return teamSpawnCall(a);
     case "team_add_member":
       return teamAddMemberCall(a);
+    case "team_remove_member":
+      return teamRemoveMemberCall(a);
+    case "team_recover":
+      return teamRecoverCall(a);
     case "team_send":
       return teamSendCall(a);
     case "team_status":

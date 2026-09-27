@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { callText, preview, renderResult, resultText, snippet, statusTone } from "../src/extension/render.ts";
 
 test("genie_task call rows show the action and its target", () => {
@@ -31,6 +32,9 @@ test("team call rows summarize their roster and flags", () => {
   assert.equal(callText("team_status", {}), "team_status");
   assert.equal(callText("team_set_status", { status: "implementing parser" }), 'team_set_status "implementing parser"');
   assert.equal(callText("team_stop", { team: "G-2", removeWorktree: true }), "team_stop G-2 remove worktree");
+  assert.equal(callText("team_recover", { team: "G-2", restart: false }), "team_recover G-2 reconnect only");
+  assert.equal(callText("team_recover", {}), "team_recover all teams restart lost members");
+  assert.equal(callText("team_remove_member", { team: "G-2", member: "sherlock" }), "team_remove_member G-2 → sherlock");
 });
 
 test("unknown tools fall back to their label", () => {
@@ -82,7 +86,7 @@ test("result rendering strips control characters and truncates safely", () => {
   assert.deepEqual(component.render(40).map((l) => l.trimEnd()), ["✓ abc"]);
 });
 
-test("all seven genie tools register call and result renderers", async () => {
+test("all nine genie tools register and run call and result renderers", async () => {
   const { default: genie } = await import("../src/extension/index.ts");
   const tools = new Map<string, { renderCall?: unknown; renderResult?: unknown }>();
   const pi = {
@@ -91,11 +95,55 @@ test("all seven genie tools register call and result renderers", async () => {
     registerCommand: () => {},
   };
   genie(pi as never);
-  const expected = ["genie_task", "team_spawn", "team_add_member", "team_send", "team_status", "team_set_status", "team_stop"];
+  const expected = [
+    "genie_task",
+    "team_spawn",
+    "team_add_member",
+    "team_remove_member",
+    "team_send",
+    "team_status",
+    "team_set_status",
+    "team_recover",
+    "team_stop",
+  ];
   assert.deepEqual([...tools.keys()].sort(), [...expected].sort());
+
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as never;
+  const component = (value: unknown) => value as { render(width: number): string[] };
   for (const name of expected) {
     const def = tools.get(name)!;
     assert.equal(typeof def.renderCall, "function", `${name} renderCall`);
     assert.equal(typeof def.renderResult, "function", `${name} renderResult`);
+    const renderCall = def.renderCall as (args: unknown, theme: never) => unknown;
+    const args =
+      name === "team_remove_member"
+        ? { team: "G-2", member: "sherlock".repeat(12) }
+        : { team: "G-2", member: "sherlock", restart: false };
+    const callComponent = component(renderCall(args, theme));
+    assert.match(callComponent.render(120).join("\n"), new RegExp(name));
+    for (const width of [80, 36, 12, 6]) {
+      for (const line of callComponent.render(width)) {
+        assert.ok(visibleWidth(line) <= width, `${name} call overflows width ${width}: ${line}`);
+      }
+    }
+    const renderResult = def.renderResult as (
+      result: { content: { type: string; text?: string }[] },
+      options: { expanded: boolean; isPartial: boolean },
+      theme: never,
+      context: { isError: boolean; expanded: boolean; invalidate: () => void },
+    ) => unknown;
+    const resultComponent = component(
+      renderResult({ content: [{ type: "text", text: "completed" }] }, { expanded: false, isPartial: false }, theme, {
+        isError: false,
+        expanded: false,
+        invalidate: () => {},
+      }),
+    );
+    assert.deepEqual(resultComponent.render(80).map((line) => line.trimEnd()), ["✓ completed"], `${name} result renderer`);
+    for (const width of [80, 36, 12, 6]) {
+      for (const line of resultComponent.render(width)) {
+        assert.ok(visibleWidth(line) <= width, `${name} result overflows width ${width}: ${line}`);
+      }
+    }
   }
 });

@@ -925,6 +925,8 @@ export default function genie(pi: ExtensionAPI) {
     label: "Remove team member",
     description: "Remove a member from a team: its process is stopped and the rest of the team is told not to wait for it.",
     parameters: Type.Object({ team: Type.String(), member: Type.String({ description: "Member name (lowercase id)" }) }),
+    renderCall: (args, theme) => renderCallRow("team_remove_member", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("team_remove_member", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
       if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can remove members");
@@ -1032,6 +1034,8 @@ export default function genie(pi: ExtensionAPI) {
       team: Type.Optional(Type.String({ description: "Limit to one team" })),
       restart: Type.Optional(Type.Boolean({ description: "Restart lost members (default true)" })),
     }),
+    renderCall: (args, theme) => renderCallRow("team_recover", args, theme),
+    renderResult: (result, options, theme, context) => renderToolResult("team_recover", result, options, theme, context),
     async execute(_id, p, _signal, _onUpdate, ctx) {
       lastCtx = ctx;
       if (mode.kind !== "orchestrator") throw new GenieError("only the orchestrator can recover teams");
