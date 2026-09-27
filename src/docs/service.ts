@@ -98,6 +98,21 @@ export interface DocSearchResult extends DocPage {
   snippet: string;
 }
 
+export interface DocSearchOptions {
+  limit?: number;
+  type?: DocType;
+  /** Explicit status filter. Setting `deprecated` returns deprecated pages; any other value already excludes them. */
+  status?: DocStatus;
+  /** Explicit opt-in for the full result set, including deprecated pages. */
+  includeDeprecated?: boolean;
+  /**
+   * Task/epic ids the caller works on. Deprecated pages whose `related` frontmatter
+   * lists one of these ids stay in the default result set (analysis §3: deprecated
+   * pages are "excluded unless explicitly requested/related").
+   */
+  related?: string[];
+}
+
 export interface DocReadResult extends DocPage {
   content: string;
   truncated: boolean;
@@ -574,7 +589,13 @@ export class DocsService {
     return row ? toPage(rowToStored(row)) : undefined;
   }
 
-  search(query: string, options: { limit?: number; type?: DocType; status?: DocStatus } = {}): DocSearchResult[] {
+  /**
+   * Search the ranked FTS result set. Deprecated pages are filtered out of the default
+   * result set; `status`, `includeDeprecated` and `related` are the explicit opt-ins.
+   * The FTS5 query, BM25 ranking and snippets are unchanged, and tree/list/read still
+   * expose deprecated pages with their marker.
+   */
+  search(query: string, options: DocSearchOptions = {}): DocSearchResult[] {
     this.refresh();
     const tokens = normalizeText(query).match(/[\p{L}\p{N}_]+/gu) ?? [];
     if (!tokens.length) return [];
@@ -584,7 +605,16 @@ export class DocsService {
     const conditions = ["docs_pages_fts MATCH ?", "p.root_id = ?"];
     const params: (string | number)[] = [expression, this.rootId];
     if (options.type) { conditions.push("p.type = ?"); params.push(options.type); }
-    if (options.status) { conditions.push("p.status = ?"); params.push(options.status); }
+    if (options.status) {
+      conditions.push("p.status = ?");
+      params.push(options.status);
+    } else if (options.includeDeprecated !== true) {
+      const relatedIds = [...new Set((options.related ?? []).map((id) => id.trim().toUpperCase()).filter(Boolean))];
+      const kept = ["p.status IS NULL", "p.status <> 'deprecated'"];
+      for (const id of relatedIds) kept.push("upper(p.related_json) LIKE ?");
+      conditions.push(`(${kept.join(" OR ")})`);
+      for (const id of relatedIds) params.push(`%"${id}"%`);
+    }
     params.push(limit);
     try {
       const rows = this.db.all<PageRow & { score: number; snippet: string }>(

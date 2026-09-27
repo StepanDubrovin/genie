@@ -227,6 +227,42 @@ test("FTS5 English/Russian snippets rank matches and normalize ё/е symmetrical
   tracker.db.close();
 });
 
+test("search omits deprecated pages by default and returns them only on explicit request", () => {
+  const root = tmp();
+  const tracker = createTracker(root);
+  write(root, "docs/current.md", fm("# Current auth\n\nauthentication current guide, see [[old]]", "title: Current auth\ntype: guide\nstatus: current\n"));
+  write(root, "docs/draft.md", fm("# Draft auth\n\nauthentication draft notes", "title: Draft auth\ntype: note\nstatus: draft\n"));
+  write(root, "docs/old.md", fm("# Old auth\n\nauthentication legacy flow", "title: Old auth\ntype: guide\nstatus: deprecated\nrelated: [G-42]\n"));
+  write(root, "docs/untyped.md", fm("# Untyped auth\n\nauthentication without status", "title: Untyped auth\ntype: reference\n"));
+  const docs = service(root, tracker);
+  const paths = (results: { path: string }[]): string[] => results.map((result) => result.path).sort();
+
+  // Default: current, draft and untyped stay; deprecated is filtered before LIMIT.
+  assert.deepEqual(paths(docs.search("authentication")), ["current.md", "draft.md", "untyped.md"]);
+  assert.equal(docs.search("authentication", { limit: 1 }).length, 1);
+  assert.equal(docs.search("authentication").some((result) => result.status === "deprecated"), false);
+
+  // Explicit status filter (CLI/web/agent pass it through unchanged) is an opt-in.
+  assert.deepEqual(paths(docs.search("authentication", { status: "deprecated" })), ["old.md"]);
+  assert.equal(docs.search("authentication", { status: "deprecated" })[0].status, "deprecated");
+  assert.deepEqual(paths(docs.search("authentication", { status: "current" })), ["current.md"]);
+  assert.deepEqual(paths(docs.search("authentication", { status: "draft" })), ["draft.md"]);
+
+  // Explicit include flag; and an explicit related id keeps the related deprecated page.
+  assert.deepEqual(paths(docs.search("authentication", { includeDeprecated: true })), ["current.md", "draft.md", "old.md", "untyped.md"]);
+  assert.deepEqual(paths(docs.search("authentication", { related: ["G-42"] })), ["current.md", "draft.md", "old.md", "untyped.md"]);
+  assert.deepEqual(paths(docs.search("authentication", { related: ["g-42"] })), ["current.md", "draft.md", "old.md", "untyped.md"]);
+  assert.deepEqual(paths(docs.search("authentication", { related: ["G-99"] })), ["current.md", "draft.md", "untyped.md"]);
+
+  // Filtering is search-only: tree/list/read and backlinks still expose deprecated pages marked.
+  assert.equal(docs.list().find((page) => page.path === "old.md")?.status, "deprecated");
+  assert.equal(docs.getPage("old.md")?.status, "deprecated");
+  const read = docs.read("old.md", { wholePage: true });
+  assert.equal(read.status, "deprecated");
+  assert.deepEqual(read.backlinks, ["current.md"]);
+  tracker.db.close();
+});
+
 test("links resolve canonically, expose ambiguity, and return backlinks", () => {
   const root = tmp();
   const tracker = createTracker(root);
