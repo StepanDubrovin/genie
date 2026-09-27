@@ -17,6 +17,7 @@ import {
   docCrumbs,
   fieldsFromPage,
   isIsoDate,
+  readDocPage,
   serializeDoc,
   useDocPage,
   useDocsVersion,
@@ -75,8 +76,11 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
   const [initial, setInitial] = useState<{ fields: DocFields; body: string } | null>(null);
   const [serverDiags, setServerDiags] = useState<string[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
-  /** 404/409 from the API: the page on disk is not the page being edited. */
-  const [conflict, setConflict] = useState<number | null>(null);
+  /**
+   * `gone` = 404, the file vanished; `exists` = 409, somebody created it;
+   * `lost-update` = the file changed on disk since it was loaded.
+   */
+  const [conflict, setConflict] = useState<{ kind: "gone" | "exists" | "lost-update"; disk?: DocReadResult } | null>(null);
   const [caret, setCaret] = useState({ line: 1, column: 1 });
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
@@ -117,15 +121,55 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
   const dirty = !!fields && !!initial && (body !== initial.body || JSON.stringify(fields) !== JSON.stringify(initial.fields));
   const changedLines = initial && body !== initial.body ? Math.abs(lineCount(body) - lineCount(initial.body)) : 0;
   /** Only a real move of the docs signature after this page was loaded counts. */
-  const externallyChanged = dirty && !!baseline && !!version && version !== baseline;
+  const externallyChanged = !!baseline && !!version && version !== baseline;
+
+  // The version query may resolve after the page did; adopt it as the baseline once.
+  useEffect(() => {
+    if (fields && baseline === undefined && version !== undefined) setBaseline(version);
+  }, [fields, baseline, version]);
+
+  /** Serialized form of a read state: the comparable fingerprint of the file. */
+  const fingerprint = (state: { fields: DocFields; body: string }) => serializeDoc(state.fields, state.body);
+
+  /**
+   * Lost-update guard: the API has no optimistic-concurrency token, so the disk
+   * copy is re-read and compared with what the editor loaded. Returns true when a
+   * conflict is on screen (and the caller must not save).
+   */
+  const checkDisk = async (): Promise<boolean> => {
+    if (!initial) return false;
+    try {
+      const fresh = await readDocPage(path);
+      if (fingerprint({ fields: fieldsFromPage(fresh), body: fresh.content }) !== fingerprint(initial)) {
+        setConflict({ kind: "lost-update", disk: fresh });
+        return true;
+      }
+      setBaseline(versionRef.current);
+      return false;
+    } catch (error) {
+      if (error instanceof DocRequestError && error.status === 404) {
+        setConflict({ kind: "gone" });
+        return true;
+      }
+      return false;
+    }
+  };
 
   // The page disappeared (or became unreadable) after it was loaded: keep the
   // editor content and surface it as a save conflict instead of losing the edits.
   useEffect(() => {
     if (!fields || !pageQ.isError) return;
     const status = pageQ.error instanceof DocRequestError ? pageQ.error.status : 0;
-    if (status === 404 || status === 0) setConflict((current) => current ?? 404);
+    if (status === 404 || status === 0) setConflict((current) => current ?? { kind: "gone" });
   }, [fields, pageQ.isError, pageQ.error]);
+
+  // The change signal moved: find out whether *this* page changed and warn
+  // before the author saves over it. Other files moving only reset the baseline.
+  useEffect(() => {
+    if (!externallyChanged || conflict || save.isPending) return;
+    void checkDisk();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externallyChanged, conflict, save.isPending]);
 
   const trackCaret = () => {
     const area = areaRef.current;
@@ -136,15 +180,17 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
     setCaret({ line, column });
   };
 
-  const submit = async (mode: "update" | "create" = "update") => {
+  const submit = async (mode: "update" | "create" = "update", force = false) => {
     if (!fields || errors.length) return;
     if (!body.trim()) {
-      setSaveError("Содержимое страницы пустое — сервер отклонит такое сохранение");
+      setSaveError("Содержимое страницы пустое — сервер не примет такое сохранение");
       return;
     }
     setSaveError(null);
     setServerDiags([]);
     setConflict(null);
+    // Never overwrite silently: re-read the file first (mode "update" only).
+    if (mode === "update" && !force && (await checkDisk())) return;
     try {
       await save.mutateAsync({ path, content: serializeDoc(fields, body), mode });
       onSaved(path);
@@ -152,7 +198,7 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
       if (error instanceof DocSaveError) {
         // 404 = the file was deleted/moved, 409 = somebody created it meanwhile.
         if (error.status === 404 || error.status === 409) {
-          setConflict(error.status);
+          setConflict(error.status === 409 ? { kind: "exists" } : { kind: "gone" });
           return;
         }
         setServerDiags(error.diagnostics);
@@ -165,9 +211,15 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
 
   /** Re-read the page from disk, dropping the local form/body state. */
   const reload = async () => {
-    const fresh = await pageQ.refetch();
-    const freshPage = fresh.data;
-    if (!freshPage) return;
+    let freshPage: DocReadResult | undefined = conflict?.kind === "lost-update" ? conflict.disk : undefined;
+    if (!freshPage) {
+      const fresh = await pageQ.refetch();
+      freshPage = fresh.data;
+    }
+    if (!freshPage) {
+      setSaveError("Страница недоступна на диске");
+      return;
+    }
     const next = fieldsFromPage(freshPage);
     setFields(next);
     setInitial({ fields: next, body: freshPage.content });
@@ -239,26 +291,26 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
         </button>
       </header>
 
-      {conflict === 404 && (
+      {conflict?.kind === "gone" && (
         <div className="doc-banner diag editor">
           <DiagIcon size={15} />
           <div className="doc-banner-body">
-            <b>Конфликт сохранения:</b> файла <span className="mono">{path}</span> больше нет на диске — его удалили или переместили после открытия редактора.
+            <b>Конфликт сохранения: страница исчезла.</b> Файла <span className="mono">{path}</span> больше нет на диске — его удалили или переместили после открытия редактора.
           </div>
           <button type="button" className="btn" onClick={() => void reload()}>
             Перечитать
           </button>
-          <button type="button" className="btn primary" onClick={() => void submit("create")}>
+          <button type="button" className="btn primary" onClick={() => void submit("create", true)}>
             Создать заново
           </button>
         </div>
       )}
 
-      {conflict === 409 && (
+      {conflict?.kind === "exists" && (
         <div className="doc-banner diag editor">
           <DiagIcon size={15} />
           <div className="doc-banner-body">
-            <b>Конфликт сохранения:</b> страница <span className="mono">{path}</span> уже существует — её создали параллельно. Откройте текущую версию, чтобы не перезаписать чужие правки.
+            <b>Конфликт сохранения: страница уже существует.</b> <span className="mono">{path}</span> создали параллельно — откройте текущую версию, чтобы не перезаписать чужие правки.
           </div>
           <Link className="btn" to={`/docs?page=${encodeURIComponent(path)}`}>
             Открыть текущую версию
@@ -266,14 +318,17 @@ export function DocEditor({ path, pages, onClose, onSaved }: { path: string; pag
         </div>
       )}
 
-      {externallyChanged && !conflict && (
+      {conflict?.kind === "lost-update" && (
         <div className="doc-banner stale editor">
           <StaleIcon size={15} />
           <div className="doc-banner-body">
-            <b>Документация изменилась на диске</b> после того, как редактор открыл эту страницу. Сохранение перезапишет версию с диска.
+            <b>Страница изменилась на диске</b> после того, как редактор её открыл (сигнал обновления документации). Чтобы не перезаписать чужие правки, выберите, что делать.
           </div>
-          <button type="button" className="btn" onClick={() => void reload()} title="Правки в форме и в тексте будут потеряны">
-            Перечитать страницу
+          <button type="button" className="btn" onClick={() => void reload()} title="Ваши правки в форме и тексте будут потеряны">
+            Обновить из файла
+          </button>
+          <button type="button" className="btn primary" onClick={() => void submit("update", true)} title="Сохранить вашу версию поверх файла на диске">
+            Перезаписать
           </button>
         </div>
       )}
