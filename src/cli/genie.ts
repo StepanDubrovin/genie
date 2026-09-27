@@ -45,7 +45,8 @@ Tasks
 Docs
   genie docs tree [--json]                  indexed pages with draft/stale/diagnostic markers
   genie docs search <query> [--type T] [--status S] [--limit N] [--json]
-                                            full-text search over the caller's project docs
+                                            full-text search over the caller's project docs;
+                                            deprecated pages are excluded unless --status asks for them
   genie docs read <path> (--heading H | --whole) [--max-chars N] [--json]
                                             read a page or one of its heading sections
   genie docs note <title> [-d body] [--tag T]... [--related ID]... [--json]

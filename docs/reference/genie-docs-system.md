@@ -24,7 +24,7 @@ verified: 2026-09-27
 |---|---|---|
 | `title` | non-empty, single-line string | Display title. If omitted or invalid, Genie uses the first H1, then the filename. |
 | `type` | `guide`, `reference`, `decision`, `glossary`, `runbook`, or `note` | Page kind. |
-| `status` | `draft`, `current`, or `deprecated` | Editorial state. Missing is unknown, not implicitly current. |
+| `status` | `draft`, `current`, or `deprecated` | Editorial state. Missing is unknown, not implicitly current. Deprecated pages are excluded from search unless explicitly requested (see Search and reads). |
 | `summary` | optional, single-line string | L0/index summary. If omitted or invalid, Genie uses the first body paragraph. |
 | `tags` | optional list of strings | Searchable terms. |
 | `aliases` | optional list of strings | Alternate searchable names, including translations and synonyms. |
@@ -43,5 +43,7 @@ Use `[[architecture/auth]]` for a Genie wiki-link. A target may include a headin
 ## Search and reads
 
 Search indexes title, summary, headings, body, tags, and aliases using SQLite FTS5. English diacritics are normalized by the tokenizer, and Russian `ё`/`е` are treated symmetrically. Heading reads return that heading's subtree and mark truncated content explicitly.
+
+Pages with `status: deprecated` are excluded from search results by default. They are returned only when explicitly requested: an explicit `status` filter (`genie docs search --status deprecated`), a page whose `related` list contains a requested task/epic id, or the service's `includeDeprecated: true` opt-in. The exclusion is applied before the result limit, so a default search never drops a non-deprecated match to make room for a deprecated one. Tree, page reads, and backlinks still list deprecated pages with their `deprecated` marker.
 
 The index is scoped to the canonical project checkout, including linked worktrees. Configure `docs.root` as a non-empty relative path inside the project; traversal and symlink escapes are rejected. Rebuild recreates only the docs cache tables, leaving Genie task data untouched.
