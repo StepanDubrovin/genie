@@ -52,7 +52,7 @@ CLI: `genie board`, `genie new "…"` (во входящие), `genie epic "…"
 
 Порядок слияния: `config/default.json` → `~/.pi/agent/genie/config.json` → `<.genie>/config.json`. Проще всего — `/genie settings`.
 
-Роли — `agents/<role>.md` (переопределяются в `~/.pi/agent/genie/agents/` или `<.genie>/agents/`); во frontmatter `excludeTools` (read-only роли) и `mcp` (разрешённые MCP-серверы).
+Роли — `agents/<role>.md` (переопределяются в `~/.pi/agent/genie/agents/` или `<.genie>/agents/`); во frontmatter `excludeTools` (read-only роли) и `mcp` (разрешённые MCP-серверы). Контракт frontmatter для проектных документов описан в [спецификации docs](docs/reference/genie-docs-system.md).
 
 Сейчас для проб все роли назначены на `litellm/deepseek-v4-flash-vision-exp` (`~/.pi/agent/genie/config.json`).
 

@@ -25,6 +25,9 @@
     "requireTestReport": false,
     "requireReviewArtifact": false
   },
+  "docs": {
+    "root": "docs"
+  },
   "web": {
     "port": 7420
   },

@@ -64,6 +64,7 @@ export interface GenieConfig {
     statuses: string[];
   };
   gates: Gates;
+  docs: { root: string };
   web: { port: number };
   /** Name pools per role for automatic member names (defaults in src/team/names.ts). */
   names?: Partial<Record<MemberRole, string[]>>;
