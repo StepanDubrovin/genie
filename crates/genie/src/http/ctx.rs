@@ -56,6 +56,10 @@ pub struct Access {
     pub role: ProjectRole,
     pub user: Option<User>,
     pub agent: bool,
+    /// Team of an agent member (its token is bound to it).
+    pub agent_team: Option<String>,
+    /// Job of a one-shot agent.
+    pub agent_job: Option<i64>,
 }
 
 impl Access {
@@ -168,7 +172,7 @@ impl Ctx {
         let wanted = explicit.map(str::to_string).or_else(|| self.project_hint.clone());
         match &self.who {
             Who::Anonymous => Err(ApiError::unauthorized()),
-            Who::Agent { project, role, name, .. } => {
+            Who::Agent { project, role, name, team, job } => {
                 if let Some(w) = &wanted
                     && w != project
                 {
@@ -180,6 +184,8 @@ impl Ctx {
                     role: ProjectRole::Member,
                     user: None,
                     agent: true,
+                    agent_team: team.clone(),
+                    agent_job: *job,
                 })
             }
             Who::User { user, .. } => {
@@ -200,6 +206,8 @@ impl Ctx {
                                     role,
                                     user: Some(user.clone()),
                                     agent: false,
+                                    agent_team: None,
+                                    agent_job: None,
                                 }));
                             }
                         }

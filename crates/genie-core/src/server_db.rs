@@ -601,6 +601,13 @@ impl ServerDb {
         })
     }
 
+    /// Revoke one token by its secret (an agent's per-turn token when the turn ends).
+    pub fn revoke_token(&self, token: &str) -> Result<()> {
+        let secret = token.strip_prefix("gnu_").or_else(|| token.strip_prefix("gna_")).unwrap_or(token);
+        self.conn().execute("UPDATE api_tokens SET revoked = 1 WHERE token_hash = ?1", [hash_secret(secret)])?;
+        Ok(())
+    }
+
     pub fn revoke_agent_tokens(&self, project: &str, team: Option<&str>, job: Option<i64>) -> Result<()> {
         self.conn().execute(
             "UPDATE api_tokens SET revoked = 1 WHERE kind = 'agent' AND project = ?1 AND (?2 IS NULL OR team = ?2) AND (?3 IS NULL OR job = ?3)",

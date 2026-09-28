@@ -239,6 +239,11 @@ impl Tracker {
         self.db.conn()
     }
 
+    /// Write transaction on the tracker database (nested calls join the outer one).
+    pub fn tx<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.db.tx(f)
+    }
+
     fn meta_value(&self, key: &str) -> Result<String> {
         Ok(self.conn().query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()?.unwrap_or_default())
     }

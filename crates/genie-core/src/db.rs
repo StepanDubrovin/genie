@@ -164,6 +164,8 @@ const COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
     ("teams", "stop_reason", "ALTER TABLE teams ADD COLUMN stop_reason TEXT"),
     ("mail", "level", "ALTER TABLE mail ADD COLUMN level TEXT NOT NULL DEFAULT 'normal'"),
     ("mail", "intent", "ALTER TABLE mail ADD COLUMN intent TEXT"),
+    // Rust runtime: mail leased to an agent turn; delivered only when the turn succeeds.
+    ("mail", "lease", "ALTER TABLE mail ADD COLUMN lease INTEGER"),
 ];
 
 /// Current time in the format the TypeScript tracker writes (`Date#toISOString`).

@@ -10,6 +10,7 @@ pub mod account;
 pub mod ctx;
 pub mod live;
 pub mod tasks;
+pub mod teams;
 
 use std::sync::Arc;
 
@@ -75,6 +76,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/health", get(|| async { Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })) }))
         .merge(account::routes())
         .merge(tasks::routes())
+        .merge(teams::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
     let index = app.web_root.join("index.html");

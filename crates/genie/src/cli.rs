@@ -50,6 +50,9 @@ enum Command {
         #[arg(long)]
         email: Option<String>,
     },
+    /// Act as an agent (or script genie) through the server API.
+    #[command(subcommand)]
+    Agent(crate::agent_cli::AgentCmd),
     /// Create a standalone tracker directory (legacy layout).
     Init {
         #[arg(long, default_value = ".genie")]
@@ -201,6 +204,7 @@ pub async fn run() -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             println!("{}/invite?token={token}", cfg.public_url());
         }
+        Command::Agent(cmd) => crate::agent_cli::run(cmd).await?,
         Command::Init { dir, prefix, project } => {
             let t = Tracker::init(&dir, prefix.as_deref(), project.as_deref()).map_err(|e| e.to_string())?;
             let m = t.meta().map_err(|e| e.to_string())?;

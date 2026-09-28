@@ -9,7 +9,9 @@ pub mod error;
 pub mod events;
 pub mod model;
 pub mod server_db;
+pub mod team;
 pub mod tracker;
+pub mod work;
 
 pub use error::{GenieError, Result};
 pub use events::Event;
