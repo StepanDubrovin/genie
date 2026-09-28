@@ -66,3 +66,10 @@ npm run typecheck         # сервер/расширение + веб
 npm run dev:web           # Vite с проксированием /api на `genie web` (порт 7420)
 node scripts/e2e.ts --template standard --model litellm/deepseek-v4-flash-vision-exp --analyst-model litellm/deepseek-v4-flash-vision-exp
 ```
+
+**Rust-сервер (перенос, идёт Ф0).** Ядро и `genie serve` переписываются на Rust — план и статус в [docs/platform/backend.md](docs/platform/backend.md). Сейчас Rust-сервер открывает существующий `.genie/genie.db` на месте и отдаёт веб-интерфейсу чтение задач, эпиков и живой поток; рабочим инструментом пока остаётся TypeScript-версия.
+
+```bash
+cargo test                                          # ядро трекера, журнал событий, сервер
+cargo run -p genie -- serve --dir <repo>/.genie     # веб на http://127.0.0.1:7420 (нужен npm run build:web)
+```
