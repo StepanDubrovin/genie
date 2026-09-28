@@ -56,6 +56,8 @@ pub struct App {
     pub wake_outbox: Notify,
     /// Path of the running `genie` binary, given to agents so they can call back.
     pub exe: PathBuf,
+    /// Live agent sessions (long-running harness processes).
+    pub sessions: crate::sessions::Registry,
 }
 
 impl App {
@@ -78,6 +80,7 @@ impl App {
             wake_engine: Notify::new(),
             wake_outbox: Notify::new(),
             exe,
+            sessions: Default::default(),
         }))
     }
 

@@ -45,7 +45,7 @@ impl AgentKey {
             AgentKey::Orchestrator { project } | AgentKey::Member { project, .. } | AgentKey::Job { project, .. } => project,
         }
     }
-    fn label(&self) -> String {
+    pub fn label(&self) -> String {
         match self {
             AgentKey::Orchestrator { .. } => ORCHESTRATOR.into(),
             AgentKey::Member { team, member, .. } => format!("{team}/{member}"),
@@ -75,6 +75,12 @@ pub fn start(app: &Arc<App>) {
     crate::channels::start(app);
     if let Err(e) = recover(app) {
         eprintln!("genie runtime: recovery failed: {e}");
+    }
+    crate::sessions::recover(app);
+    if app.cfg.runtime.live_sessions()
+        && let Err(e) = crate::sessions::write_extension(app)
+    {
+        eprintln!("genie runtime: cannot write the session extension: {e}");
     }
     if !app.cfg.runtime.enabled {
         println!("genie runtime: agents disabled");
@@ -129,7 +135,7 @@ pub fn recover(app: &App) -> AppResult<()> {
 }
 
 /// Does `/proc/<pid>/environ` belong to this project's agent `name`?
-fn is_our_agent(pid: i64, project: &str, name: &str) -> bool {
+pub(crate) fn is_our_agent(pid: i64, project: &str, name: &str) -> bool {
     let Ok(env) = std::fs::read(format!("/proc/{pid}/environ")) else { return false };
     let vars: Vec<&[u8]> = env.split(|b| *b == 0).collect();
     let has = |kv: String| vars.contains(&kv.as_bytes());
@@ -162,8 +168,16 @@ async fn schedule(app: &Arc<App>, slots: &Arc<Semaphore>) -> AppResult<()> {
             Ok(out)
         })
         .await?;
+    let live = app.cfg.runtime.live_sessions();
+    if live {
+        crate::sessions::sweep(app).await?;
+    }
     let now = Instant::now();
     for key in candidates {
+        if live && !matches!(key, AgentKey::Job { .. }) {
+            crate::sessions::deliver(app, &key).await;
+            continue;
+        }
         let ready = with_state(|s| !s.running.contains(&key) && s.backoff.get(&key).is_none_or(|(_, until)| *until <= now));
         if !ready {
             continue;
@@ -296,7 +310,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 session_id: format!("{slug}-orchestrator"),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &project, "orchestrator", None),
+                prompt: agent_prompt(app, &project, "orchestrator", None, false),
                 message: orchestrator_message(&project, &mail),
                 token: String::new(),
             }))
@@ -326,7 +340,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &project, &m.role, m.instructions.as_deref()),
+                prompt: agent_prompt(app, &project, &m.role, m.instructions.as_deref(), false),
                 message: member_message(&mail),
                 token: String::new(),
             }))
@@ -364,7 +378,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 session_id: format!("{slug}-job-{job}-{}", j.attempts + 1),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &project, &j.role, None),
+                prompt: agent_prompt(app, &project, &j.role, None, false),
                 message: job_message(&j),
                 token: String::new(),
             }))
@@ -394,30 +408,9 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
     ]);
     let argv = build_command(&app.cfg.runtime.command, &vars);
     let Some((program, args)) = argv.split_first() else { return Err("runtime.command is empty".into()) };
-    let path = std::env::var("PATH").unwrap_or_default();
-    let exe_dir = app.exe.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(args)
-        .current_dir(&p.cwd)
-        .env("PATH", format!("{exe_dir}:{path}"))
-        .env("GENIE_URL", format!("http://127.0.0.1:{}", app.cfg.port))
-        .env("GENIE_TOKEN", &token)
-        .env("GENIE_PROJECT", key.project())
-        .env("GENIE_AGENT_ROLE", p.role.as_str())
-        .env("GENIE_AGENT_NAME", &p.name)
-        .env("GENIE_TASK", p.task.clone().unwrap_or_default())
-        .env("GENIE_TEAM", p.team.clone().unwrap_or_default())
-        .env("GENIE_JOB", p.job.map(|j| j.to_string()).unwrap_or_default())
-        // Keep the TypeScript pi extension (if installed) out of server-run turns.
-        .env("GENIE_ROLE", "off")
-        .env_remove("GENIE_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for (k, v) in &app.cfg.runtime.env {
-        cmd.env(k, v);
-    }
+    let who = Identity { role: p.role, name: &p.name, team: p.team.as_deref(), task: p.task.as_deref(), job: p.job };
+    let mut cmd = agent_command(app, program, args, &p.cwd, key.project(), &who, &token);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
     if let Some(pid) = child.id() {
         let turn = p.turn;
@@ -455,6 +448,114 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
     let _ = tokio::fs::write(dir.join(format!("turn-{}.log", p.turn)), &log).await;
     let tail: String = log.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
     Ok((status.map_err(|e| e.to_string())?.code(), tail))
+}
+
+/// Who an agent process is: its environment for `genie agent` and the extension.
+pub(crate) struct Identity<'a> {
+    pub role: Role,
+    pub name: &'a str,
+    pub team: Option<&'a str>,
+    pub task: Option<&'a str>,
+    pub job: Option<i64>,
+}
+
+/// The harness command with the agent's environment (`GENIE_URL`, `GENIE_TOKEN`…).
+pub(crate) fn agent_command(
+    app: &App,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    project: &str,
+    who: &Identity<'_>,
+    token: &str,
+) -> tokio::process::Command {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let exe_dir = app.exe.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .current_dir(cwd)
+        .env("PATH", format!("{exe_dir}:{path}"))
+        .env("GENIE_URL", format!("http://127.0.0.1:{}", app.cfg.port))
+        .env("GENIE_TOKEN", token)
+        .env("GENIE_PROJECT", project)
+        .env("GENIE_AGENT_ROLE", who.role.as_str())
+        .env("GENIE_AGENT_NAME", who.name)
+        .env("GENIE_TASK", who.task.unwrap_or_default())
+        .env("GENIE_TEAM", who.team.unwrap_or_default())
+        .env("GENIE_JOB", who.job.map(|j| j.to_string()).unwrap_or_default())
+        // Keep the TypeScript pi extension (if installed) out of server-run agents.
+        .env("GENIE_ROLE", "off")
+        .env_remove("GENIE_DIR");
+    for (k, v) in &app.cfg.runtime.env {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
+/// What a live session runs as.
+pub(crate) struct Spec {
+    pub role: Role,
+    pub name: String,
+    pub team: Option<String>,
+    pub task: Option<String>,
+    pub cwd: PathBuf,
+    pub session_id: String,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub prompt: String,
+}
+
+impl Spec {
+    pub fn identity(&self) -> Identity<'_> {
+        Identity { role: self.role, name: &self.name, team: self.team.as_deref(), task: self.task.as_deref(), job: None }
+    }
+}
+
+/// The live session of an agent, or `None` when it should not run now (team
+/// stopped, member removed or in error, orchestrator in manual mode, a job).
+pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>> {
+    let project = project_of(app, key.project())?;
+    match key {
+        AgentKey::Orchestrator { project: slug } => {
+            if project.autonomy == "manual" {
+                return Ok(None);
+            }
+            let (model, thinking) = role_model(app, "orchestrator", None, None);
+            Ok(Some(Spec {
+                role: Role::Orchestrator,
+                name: ORCHESTRATOR.into(),
+                team: None,
+                task: None,
+                cwd: project_workspace(app, &project, "orchestrator"),
+                session_id: format!("{slug}-orchestrator"),
+                model,
+                thinking,
+                prompt: agent_prompt(app, &project, "orchestrator", None, true),
+            }))
+        }
+        AgentKey::Member { project: slug, team, member } => {
+            let Ok(t) = app.with_tracker(slug, |t| t.bus().get(team)) else { return Ok(None) };
+            let Some(m) = t.members.iter().find(|m| &m.name == member).cloned() else { return Ok(None) };
+            if t.state != "active" || m.state != "active" {
+                return Ok(None);
+            }
+            let role: Role = m.role.parse().map_err(AppError::Genie)?;
+            let (model, thinking) = role_model(app, &m.role, m.model.clone(), m.thinking.clone());
+            let cwd = PathBuf::from(&t.cwd);
+            Ok(Some(Spec {
+                role,
+                name: member.clone(),
+                team: Some(team.clone()),
+                task: Some(t.task.clone()),
+                cwd: if cwd.is_dir() { cwd } else { project_workspace(app, &project, team) },
+                session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
+                model,
+                thinking,
+                prompt: agent_prompt(app, &project, &m.role, m.instructions.as_deref(), true),
+            }))
+        }
+        AgentKey::Job { .. } => Ok(None),
+    }
 }
 
 /// Expand argument groups; a group with an empty placeholder is dropped.
@@ -558,11 +659,7 @@ fn finish(
 
 // --- prompts -----------------------------------------------------------------
 
-const TOOLS: &str = r#"
-## How you act in genie (server runtime)
-
-You run in turns: each turn delivers your new messages; do the work they call for, then end the turn by finishing your reply. Teammates' answers arrive as a new turn — never wait or poll with sleep.
-
+const TOOLS_TABLE: &str = r#"
 Everything goes through the `genie agent` command (already configured for you: project, team, task and your identity come from the environment). Wherever the role guide above mentions a tool, use the command in this table:
 
 | Role guide says | Command |
@@ -578,21 +675,58 @@ Everything goes through the `genie agent` command (already configured for you: p
 | `artifact_read` | `genie agent artifact-read <N> [--task ID]` |
 | `genie_task` split | `genie agent split "title 1" "title 2"... [--task ID]` |
 | `genie_task` block / unblock | `genie agent block "reason" [--task ID]` / `genie agent unblock [--task ID]` |
-| `team_send` | `genie agent send <name|orchestrator|all> "text" [--level low|normal|high] [--intent question|blocker|verdict|done|fyi] [--team T]` |
+| `team_send` | `genie agent send <name|orchestrator|all> "text" [--level low|normal|high] [--intent question|blocker|verdict|done|fyi] [--topic T] [--team T]` |
 | `team_status` | `genie agent team [TEAM]` |
 | `team_set_status` | `genie agent set-status "short status line"` |
 | `team_spawn` (orchestrator) | `genie agent spawn <TASK> [--template standard|pair|full|research|spike|abap] [--note text]` |
 | `team_stop` (orchestrator) | `genie agent stop-team <TEAM>` |
 | `docs_search` / `docs_read` / `docs_note` | `genie agent docs search "query"` / `genie agent docs read <path>` / `genie agent docs write <path> --file F` |
 | structured result of a job | `genie agent output '<json>'` |
-
-Run `genie agent --help` for details. Output is plain text meant for you.
 "#;
 
-fn agent_prompt(app: &App, project: &Project, role: &str, instructions: Option<&str>) -> String {
+/// How the agent acts in genie: the delivery model (live session or turns) and the command table.
+fn tools_section(live: bool, orchestrator: bool, ask_timeout: u64) -> String {
+    let mut out = String::from("\n## How you act in genie (server runtime)\n\n");
+    if live {
+        out.push_str(
+            "You run as a live session. Team mail arrives in your conversation between your steps, as `[genie mail]` blocks with the most urgent first — read them when they appear and adjust your work.              A message marked INTERRUPT means your previous step was stopped for it: follow it first.              When there is nothing left to do, simply stop: new mail wakes you. Never sleep or poll for mail.\n",
+        );
+    } else {
+        out.push_str(
+            "You run in turns: each turn delivers your new messages; do the work they call for, then end the turn by finishing your reply. Teammates' answers arrive as a new turn — never wait or poll with sleep.\n",
+        );
+    }
+    out.push_str(TOOLS_TABLE);
+    if live {
+        out.push_str(&format!(
+            "\nTalking to the team:\n\n\
+             | Need | Command |\n|---|---|\n\
+             | ask and wait for the answer (up to {ask_timeout}s; a late answer arrives as mail) | `genie agent ask <name|orchestrator> \"question\" [--timeout S]` |\n\
+             | answer a message, e.g. a question someone is waiting on | `genie agent reply <id> \"text\"` |\n\
+             | full text of a clipped message | `genie agent mail <id>` |\n\
+             | what a teammate is doing now (add `--deep` for its latest conversation) | `genie agent peek <name> [--deep]` |\n\
+             | replace your earlier update on the same subject instead of adding one | `genie agent send … --topic <subject>` |\n\n\
+             Keep messages short and point to the task, comments and artifacts for details; progress goes into the task, not into mail. Do not send acknowledgements.\n"
+        ));
+        if orchestrator {
+            out.push_str(
+                "\nDirecting the team (orchestrator):\n\n| Need | Command |\n|---|---|\n\
+                 | every agent's state, current step and waiting mail | `genie agent board` |\n\
+                 | correct an agent at its next step | `genie agent send <name> \"…\" --level high --team T` |\n\
+                 | stop what it is doing now (aborts the running step, even a long command) | `genie agent interrupt <team> <name> \"what to do instead\"` |\n\
+                 | hold an agent / let it go on | `genie agent pause <team> <name>` / `genie agent resume <team> <name>` |\n\n\
+                 Peek before you interrupt; interrupt only when the current step is wrong or wasteful.\n",
+            );
+        }
+    }
+    out.push_str("\nRun `genie agent --help` for details. Output is plain text meant for you.\n");
+    out
+}
+
+fn agent_prompt(app: &App, project: &Project, role: &str, instructions: Option<&str>, live: bool) -> String {
     let lang = &app.cfg.language;
     let mut out = config::role_prompt(&app.data, role);
-    out.push_str(TOOLS);
+    out.push_str(&tools_section(live, role == "orchestrator", app.cfg.runtime.ask_timeout_secs));
     out.push_str(&format!(
         "\n## Project\n\nProject `{}` ({}). {}\n\nLanguage: write tasks, comments, artifacts and team mail in {}; anything addressed to people (questions for the owner, needs_owner notes) in {}.\n",
         project.slug,
@@ -811,6 +945,7 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
                 level: Some("normal"),
                 intent: None,
                 kind: "kickoff",
+                ..Default::default()
             })?;
         }
         Ok(team)
@@ -899,6 +1034,11 @@ pub fn stop_team(app: &App, slug: &str, team: &str, reason: &str, by: &str) -> A
         Ok(())
     })?;
     app.with_server(|db| db.revoke_agent_tokens(slug, Some(team), None))?;
+    for s in app.sessions.all() {
+        if s.key.project() == slug && s.team.as_deref() == Some(team) {
+            crate::sessions::reset(app, &s.key);
+        }
+    }
     Ok(report)
 }
 
@@ -934,9 +1074,11 @@ pub fn restart_member(app: &App, slug: &str, team: &str, member: &str) -> AppRes
         t.bus().set_activity(team, member, "idle", None)?;
         t.bus().log(team, "member_restarted", json!({ "member": member }))
     })?;
+    let key = AgentKey::Member { project: slug.to_string(), team: team.to_string(), member: member.to_string() };
     with_state(|s| {
-        s.backoff.remove(&AgentKey::Member { project: slug.to_string(), team: team.to_string(), member: member.to_string() });
+        s.backoff.remove(&key);
     });
+    crate::sessions::reset(app, &key);
     app.wake_runtime.notify_one();
     Ok(())
 }

@@ -86,30 +86,61 @@ impl Default for Language {
     }
 }
 
-/// How an agent turn is launched. `command` is a list of argument groups; a
-/// group is used only when every placeholder in it resolved to a non-empty
-/// value, so optional flags (`--model {model}`) disappear when unset.
+/// How agents run.
 ///
-/// Placeholders: `{sessionDir}`, `{sessionId}`, `{model}`, `{thinking}`,
-/// `{promptFile}`, `{message}`, `{readonlyTools}` (set only for read-only roles),
-/// `{cwd}`.
+/// Team members and the orchestrator run as *live sessions* (`mode: "sessions"`):
+/// one long-running `sessionCommand` process per agent (pi in RPC mode with the
+/// genie-bus extension), mail delivered between its steps. Any other harness runs
+/// in *turns* (`mode: "turns"`): `command` is launched for each batch of mail and
+/// must finish. `"auto"` (default) uses sessions while `command` is pi's default.
+/// One-shot jobs always run as turns.
+///
+/// Commands are lists of argument groups; a group is used only when every
+/// placeholder in it resolved to a non-empty value, so optional flags
+/// (`--model {model}`) disappear when unset. Placeholders: `{sessionDir}`,
+/// `{sessionId}`, `{model}`, `{thinking}`, `{promptFile}`, `{message}` (turns),
+/// `{extension}` (sessions), `{readonlyTools}` (read-only roles), `{cwd}`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RuntimeConfig {
+    pub mode: String,
     pub command: Vec<Vec<String>>,
+    pub session_command: Vec<Vec<String>>,
+    /// Concurrent one-shot jobs and turns.
     pub max_concurrent: usize,
+    /// Live sessions at once; an idle one is stopped to make room.
+    pub max_sessions: usize,
+    /// A session idle this long is stopped (its conversation is kept and resumed).
+    pub idle_stop_secs: u64,
+    /// A turn, or a session step without any sign of life, is stopped after this long.
     pub turn_timeout_secs: u64,
     pub max_attempts: u32,
+    /// How long `genie agent ask` waits for the answer by default.
+    pub ask_timeout_secs: u64,
+    /// Characters of mail put into a session at one step boundary.
+    pub delivery_budget: usize,
     /// Extra environment for agent processes.
     pub env: BTreeMap<String, String>,
     /// Disable to run the server without starting any agent (UI-only mode).
     pub enabled: bool,
 }
 
+impl RuntimeConfig {
+    /// Whether members and the orchestrator run as live sessions.
+    pub fn live_sessions(&self) -> bool {
+        match self.mode.as_str() {
+            "sessions" => true,
+            "turns" => false,
+            _ => self.command == RuntimeConfig::default().command,
+        }
+    }
+}
+
 impl Default for RuntimeConfig {
     fn default() -> Self {
         let g = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         RuntimeConfig {
+            mode: "auto".into(),
             command: vec![
                 g(&["pi", "--print"]),
                 g(&["--session-dir", "{sessionDir}"]),
@@ -120,9 +151,23 @@ impl Default for RuntimeConfig {
                 g(&["--exclude-tools", "{readonlyTools}"]),
                 g(&["{message}"]),
             ],
+            session_command: vec![
+                g(&["pi", "--mode", "rpc"]),
+                g(&["--session-dir", "{sessionDir}"]),
+                g(&["--session-id", "{sessionId}"]),
+                g(&["--model", "{model}"]),
+                g(&["--thinking", "{thinking}"]),
+                g(&["--append-system-prompt", "{promptFile}"]),
+                g(&["--exclude-tools", "{readonlyTools}"]),
+                g(&["-e", "{extension}"]),
+            ],
             max_concurrent: 4,
+            max_sessions: 12,
+            idle_stop_secs: 900,
             turn_timeout_secs: 1800,
             max_attempts: 3,
+            ask_timeout_secs: 180,
+            delivery_budget: genie_core::team::DELIVERY_BUDGET,
             env: BTreeMap::new(),
             enabled: true,
         }

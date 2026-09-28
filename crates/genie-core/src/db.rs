@@ -13,7 +13,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -133,6 +133,15 @@ CREATE TABLE IF NOT EXISTS mail (
   delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS mail_pending ON mail(recipient, delivered_at);
+CREATE TABLE IF NOT EXISTS deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  team TEXT,
+  recipient TEXT NOT NULL,
+  created TEXT NOT NULL,
+  acked_at TEXT,
+  released_at TEXT,
+  mail TEXT NOT NULL DEFAULT '[]'
+);
 CREATE TABLE IF NOT EXISTS log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   team TEXT NOT NULL,
@@ -166,6 +175,13 @@ const COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
     ("mail", "intent", "ALTER TABLE mail ADD COLUMN intent TEXT"),
     // Rust runtime: mail leased to an agent turn; delivered only when the turn succeeds.
     ("mail", "lease", "ALTER TABLE mail ADD COLUMN lease INTEGER"),
+    // Live agent sessions: mail handed to a running session at a step boundary
+    // (`deliveries`), superseding by topic, and ask/reply threads.
+    ("mail", "delivery", "ALTER TABLE mail ADD COLUMN delivery INTEGER"),
+    ("mail", "topic", "ALTER TABLE mail ADD COLUMN topic TEXT"),
+    ("mail", "reply_to", "ALTER TABLE mail ADD COLUMN reply_to INTEGER"),
+    ("mail", "awaits", "ALTER TABLE mail ADD COLUMN awaits INTEGER NOT NULL DEFAULT 0"),
+    ("mail", "superseded_by", "ALTER TABLE mail ADD COLUMN superseded_by INTEGER"),
 ];
 
 /// Current time in the format the TypeScript tracker writes (`Date#toISOString`).
@@ -212,6 +228,11 @@ impl Db {
                 return Err(err.into());
             }
         }
+        // Indexes on migrated columns (an old database gets the columns just above).
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS mail_delivery ON mail(delivery);
+             CREATE INDEX IF NOT EXISTS mail_reply ON mail(reply_to);",
+        )?;
         // Legacy rows only knew `urgent`; normalise them to the level vocabulary.
         self.conn.execute("UPDATE mail SET level = 'high' WHERE urgent = 1 AND level <> 'high'", [])?;
         self.conn.execute("UPDATE meta SET value = ?1 WHERE key = 'schema' AND CAST(value AS INTEGER) < ?1", [SCHEMA_VERSION])?;

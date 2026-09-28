@@ -7,6 +7,7 @@
 //! (cross-site forms cannot send it), no CORS.
 
 pub mod account;
+pub mod agents;
 pub mod automations;
 pub mod ctx;
 pub mod docs;
@@ -79,6 +80,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(account::routes())
         .merge(tasks::routes())
         .merge(teams::routes())
+        .merge(agents::routes())
         .merge(docs::routes())
         .merge(automations::routes())
         .merge(live::routes())

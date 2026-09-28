@@ -13,6 +13,7 @@ pub mod knowledge;
 pub mod notify;
 pub mod questions;
 pub mod runtime;
+pub mod sessions;
 pub mod state;
 
 use std::net::SocketAddr;

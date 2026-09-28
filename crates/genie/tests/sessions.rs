@@ -1,0 +1,361 @@
+//! Live agent sessions end to end: the real pi harness (`node_modules/.bin/pi`,
+//! RPC mode, the genie-bus extension) against a scripted OpenAI-compatible model
+//! served by the test. The model follows instructions found in the mail it gets:
+//! `RUN: <command>` runs a shell command; a question carrying `ANSWER=<word>` is
+//! answered with `genie agent reply`.
+//!
+//! Skipped (with a note) when pi is not installed, except on CI.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::response::IntoResponse;
+use axum::routing::post;
+use genie::config::{Config, RoleModel};
+use genie::runtime::AgentKey;
+use genie::state::App;
+use genie_core::team::{NewMember, NewTeam, SendMail};
+use genie_core::{Actor, CreateInput, Role};
+use serde_json::{Value, json};
+
+#[derive(Clone, Debug)]
+struct Req {
+    at: Instant,
+    model: String,
+    /// `(role, text)` of every message in the request.
+    messages: Vec<(String, String)>,
+}
+
+impl Req {
+    fn last(&self) -> &(String, String) {
+        self.messages.last().expect("a request has messages")
+    }
+    fn count(&self, needle: &str) -> usize {
+        self.messages.iter().filter(|(_, t)| t.contains(needle)).count()
+    }
+}
+
+type Log = Arc<Mutex<Vec<Req>>>;
+
+fn text_of(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// The scripted model: react to the last message only.
+fn decide(messages: &[(String, String)]) -> Value {
+    let (role, text) = messages.last().cloned().unwrap_or_default();
+    if role == "tool" {
+        return json!({ "content": "done" });
+    }
+    if let Some(i) = text.rfind("RUN: ") {
+        let cmd = text[i + 5..].lines().next().unwrap_or_default().trim().to_string();
+        return json!({ "tool": "bash", "args": { "command": cmd } });
+    }
+    if let (Some(r), Some(a)) = (text.find("genie agent reply "), text.find("ANSWER=")) {
+        let id: String = text[r + 18..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        let answer: String = text[a + 7..].chars().take_while(|c| c.is_alphanumeric()).collect();
+        return json!({ "tool": "bash", "args": { "command": format!("genie agent reply {id} {answer}") } });
+    }
+    json!({ "content": "ok" })
+}
+
+async fn completions(State(log): State<Log>, body: Bytes) -> impl IntoResponse {
+    let r: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let messages: Vec<(String, String)> = r["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| m["role"] != "system")
+        .map(|m| (m["role"].as_str().unwrap_or_default().to_string(), text_of(&m["content"])))
+        .collect();
+    let model = r["model"].as_str().unwrap_or_default().to_string();
+    let n = {
+        let mut l = log.lock().unwrap();
+        l.push(Req { at: Instant::now(), model: model.clone(), messages: messages.clone() });
+        l.len()
+    };
+    let out = decide(&messages);
+    let chunk = |delta: Value, finish: Value| {
+        format!(
+            "data: {}\n\n",
+            json!({ "id": format!("c{n}"), "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }] })
+        )
+    };
+    let mut sse = chunk(json!({ "role": "assistant" }), Value::Null);
+    if let Some(tool) = out["tool"].as_str() {
+        sse.push_str(&chunk(
+            json!({ "tool_calls": [{ "index": 0, "id": format!("call_{n}"), "type": "function", "function": { "name": tool, "arguments": out["args"].to_string() } }] }),
+            Value::Null,
+        ));
+        sse.push_str(&chunk(json!({}), json!("tool_calls")));
+    } else {
+        sse.push_str(&chunk(json!({ "content": out["content"] }), Value::Null));
+        sse.push_str(&chunk(json!({}), json!("stop")));
+    }
+    sse.push_str(&format!(
+        "data: {}\n\n",
+        json!({ "id": format!("c{n}"), "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [], "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 } })
+    ));
+    sse.push_str("data: [DONE]\n\n");
+    ([("content-type", "text/event-stream")], sse)
+}
+
+fn pi_bin() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../node_modules/.bin/pi");
+    p.exists().then_some(p)
+}
+
+struct Live {
+    _dir: tempfile::TempDir,
+    app: Arc<App>,
+    log: Log,
+    _stop: tokio::sync::oneshot::Sender<()>,
+}
+
+async fn live(pi: PathBuf) -> Live {
+    let dir = tempfile::tempdir().unwrap();
+    // The fake model.
+    let log: Log = Arc::default();
+    let llm = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let llm_port = llm.local_addr().unwrap().port();
+    let router = Router::new().route("/v1/chat/completions", post(completions)).with_state(log.clone());
+    tokio::spawn(async move { axum::serve(llm, router).await.unwrap() });
+    let agent_dir = dir.path().join("pi-agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let models: Vec<Value> =
+        ["executor", "reviewer", "orchestrator"].iter().map(|m| json!({ "id": m, "contextWindow": 100000, "maxTokens": 4000 })).collect();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({ "providers": { "fake": { "baseUrl": format!("http://127.0.0.1:{llm_port}/v1"), "api": "openai-completions", "apiKey": "x", "models": models } } })
+            .to_string(),
+    )
+    .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = Config::load(dir.path()).unwrap();
+    cfg.port = listener.local_addr().unwrap().port();
+    let g = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    cfg.runtime.mode = "sessions".into();
+    cfg.runtime.session_command = vec![
+        vec![pi.to_string_lossy().into_owned(), "--mode".into(), "rpc".into()],
+        g(&["--session-dir", "{sessionDir}"]),
+        g(&["--session-id", "{sessionId}"]),
+        g(&["--model", "{model}"]),
+        g(&["--append-system-prompt", "{promptFile}"]),
+        g(&["--exclude-tools", "{readonlyTools}"]),
+        g(&["-e", "{extension}"]),
+        g(&["--no-skills"]),
+    ];
+    let genie_dir = PathBuf::from(env!("CARGO_BIN_EXE_genie")).parent().unwrap().to_string_lossy().into_owned();
+    for (k, v) in [
+        ("PI_CODING_AGENT_DIR", agent_dir.to_string_lossy().into_owned()),
+        ("PI_OFFLINE", "1".into()),
+        ("PI_SKIP_VERSION_CHECK", "1".into()),
+        ("PI_TELEMETRY", "0".into()),
+        ("GENIE_BUS_DEBUG", "1".into()),
+        ("PATH", format!("{genie_dir}:{}", std::env::var("PATH").unwrap_or_default())),
+    ] {
+        cfg.runtime.env.insert(k.into(), v);
+    }
+    for role in ["executor", "reviewer", "orchestrator"] {
+        cfg.role_models.insert(role.into(), RoleModel { model: Some(format!("fake/{role}")), thinking: None });
+    }
+    let app = App::open(dir.path(), cfg, PathBuf::from("/nonexistent")).unwrap();
+    app.create_project("shop", "Shop", None, None, Some("SHOP")).unwrap();
+    app.with_server(|db| db.set_autonomy("shop", "manual")).unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    app.with_tracker("shop", |t| {
+        t.create(&Actor::new("anna", Role::Human), CreateInput { title: "Export".into(), ..Default::default() })?;
+        let m = |n: &str, r: &str| NewMember { name: n.into(), role: r.into(), ..Default::default() };
+        t.bus().create(
+            "anna",
+            "human",
+            NewTeam {
+                id: "SHOP-1".into(),
+                task: "SHOP-1".into(),
+                cwd: work.to_string_lossy().into_owned(),
+                members: vec![m("bender", "executor"), m("yoda", "reviewer")],
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let a = app.clone();
+    tokio::spawn(async move {
+        genie::serve_on(a, listener, async {
+            let _ = rx.await;
+        })
+        .await
+        .unwrap();
+    });
+    genie::runtime::start(&app);
+    Live { _dir: dir, app, log, _stop: tx }
+}
+
+fn mail(app: &App, from: &str, from_role: &str, to: &str, text: &str, level: Option<&str>) {
+    let kind = if from_role == "human" { "owner" } else { "message" };
+    app.with_tracker("shop", |t| t.bus().send(SendMail { team: "SHOP-1", from, from_role, to, text, level, kind, ..Default::default() }))
+        .unwrap();
+    app.wake_runtime.notify_one();
+}
+
+fn member(name: &str) -> AgentKey {
+    AgentKey::Member { project: "shop".into(), team: "SHOP-1".into(), member: name.into() }
+}
+
+async fn until<T>(what: &str, secs: u64, mut f: impl FnMut() -> Option<T>) -> T {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(secs) {
+        if let Some(v) = f() {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out after {secs}s waiting for {what}\n{}", DUMP.lock().unwrap().as_ref().map(|d| d()).unwrap_or_default());
+}
+
+/// What the test prints when a wait times out: sessions, their activity and the model's requests.
+static DUMP: Mutex<Option<Box<dyn Fn() -> String + Send>>> = Mutex::new(None);
+
+fn install_dump(app: &Arc<App>, log: &Log) {
+    let (app, log) = (app.clone(), log.clone());
+    *DUMP.lock().unwrap() = Some(Box::new(move || {
+        let mut out = Vec::new();
+        for s in app.sessions.all() {
+            let l = s.live();
+            out.push(format!(
+                "session {} {} tool={:?}\n  {}",
+                s.key.label(),
+                l.state,
+                l.tool,
+                l.recent.iter().cloned().collect::<Vec<_>>().join("\n  ")
+            ));
+            let dir = app.data.join("runtime").join("shop").join(s.key.label().replace('/', "_"));
+            out.push(format!("stderr: {}", std::fs::read_to_string(dir.join("stderr.log")).unwrap_or_default()));
+        }
+        for r in log.lock().unwrap().iter().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
+            out.push(format!("request {} last={:?}", r.model, r.last()));
+        }
+        let pending = app.with_tracker("shop", |t| t.bus().pending(Some("SHOP-1"), "bender")).unwrap_or_default();
+        out.push(format!("bender pending: {:?}", pending.iter().map(|m| (&m.text, &m.level)).collect::<Vec<_>>()));
+        let rows: Vec<String> = app
+            .with_tracker("shop", |t| {
+                let mut stmt =
+                    t.conn().prepare("SELECT id, text, delivery, delivered_at FROM mail WHERE recipient = 'bender' ORDER BY id")?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok(format!(
+                            "#{} {:?} delivery={:?} delivered={:?}",
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<i64>>(2)?,
+                            r.get::<_, Option<String>>(3)?
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap_or_default();
+        out.push(rows.join("\n"));
+        out.join("\n")
+    }));
+}
+
+fn request_with(log: &Log, model: &str, needle: &str) -> Option<Req> {
+    log.lock().unwrap().iter().find(|r| r.model == model && r.last().1.contains(needle)).cloned()
+}
+
+fn session_state(app: &App, name: &str) -> Option<(String, Option<String>, u32)> {
+    app.sessions.get(&member(name)).map(|s| {
+        let l = s.live();
+        (l.state, l.tool.and_then(|t| t["name"].as_str().map(str::to_string)), l.pid)
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mail_reaches_live_agents_between_steps_and_on_interrupt() {
+    let Some(pi) = pi_bin() else {
+        assert!(std::env::var("CI").is_err(), "pi is not installed: run `npm ci` before `cargo test`");
+        eprintln!("skipped: pi is not installed (npm ci)");
+        return;
+    };
+    let l = live(pi).await;
+    let (app, log) = (&l.app, &l.log);
+    install_dump(app, log);
+
+    // A busy agent gets mail at its next step boundary, not after its run.
+    mail(app, "anna", "human", "bender", "RUN: sleep 3; echo slept", None);
+    until("bender to run the command", 30, || session_state(app, "bender").filter(|s| s.1.as_deref() == Some("bash"))).await;
+    let sent = Instant::now();
+    mail(app, "yoda", "reviewer", "bender", "PING-mid: use CSV", None);
+    let req = until("the mid-run mail in a model request", 15, || request_with(log, "executor", "PING-mid")).await;
+    let waited = req.at - sent;
+    eprintln!("latency: mail to a busy agent reached the model {waited:?} after sending (a 3s command was running)");
+    assert!(waited < Duration::from_secs(5), "delivered {waited:?} after sending, while a 3s command ran");
+    assert!(req.messages.iter().any(|(r, t)| r == "tool" && t.contains("slept")), "delivered right after the step's tool call");
+    let runs = app.with_server(|db| db.turns("shop", Some("SHOP-1/bender"), 10)).unwrap();
+    assert_eq!(runs.len(), 1, "the mail joined the running run instead of waiting for a new one: {runs:?}");
+    until("the mail acknowledged", 10, || {
+        app.with_tracker("shop", |t| t.bus().pending(Some("SHOP-1"), "bender")).unwrap().is_empty().then_some(())
+    })
+    .await;
+
+    // An idle agent is woken at once.
+    until("bender idle", 20, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
+    let sent = Instant::now();
+    mail(app, "yoda", "reviewer", "bender", "PING-idle", None);
+    let req = until("the wake-up request", 10, || request_with(log, "executor", "PING-idle")).await;
+    eprintln!("latency: an idle agent saw its mail after {:?}", req.at - sent);
+    assert!(req.at - sent < Duration::from_secs(3), "an idle session is woken within seconds: {:?}", req.at - sent);
+
+    // An interrupt stops a long command.
+    until("bender idle again", 20, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
+    mail(app, "anna", "human", "bender", "RUN: sleep 60", None);
+    until("the long command", 20, || session_state(app, "bender").filter(|s| s.1.as_deref() == Some("bash"))).await;
+    let sent = Instant::now();
+    mail(app, "orchestrator", "orchestrator", "bender", "STOP-NOW: switch to the report", Some("interrupt"));
+    let req = until("the interrupt request", 20, || request_with(log, "executor", "STOP-NOW")).await;
+    eprintln!("latency: an interrupt stopped a 60s command and reached the model after {:?}", req.at - sent);
+    assert!(req.at - sent < Duration::from_secs(8), "the interrupt stopped a 60s command: {:?}", req.at - sent);
+    assert!(req.last().1.contains("INTERRUPT"), "{}", req.last().1);
+
+    // A crashed session restarts with the same conversation; nothing is injected twice.
+    until("bender idle before the crash", 20, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
+    let pid = session_state(app, "bender").unwrap().2;
+    std::process::Command::new("kill").arg("-KILL").arg(pid.to_string()).status().unwrap();
+    until("the crash noticed", 20, || session_state(app, "bender").is_none_or(|s| s.2 != pid).then_some(())).await;
+    mail(app, "yoda", "reviewer", "bender", "PING-after-crash", None);
+    let sent = Instant::now();
+    let req = until("mail after the crash", 60, || request_with(log, "executor", "PING-after-crash")).await;
+    eprintln!("latency: after a crash, a restarted session saw new mail after {:?}", req.at - sent);
+    assert_eq!(req.count("PING-mid"), 1, "the resumed conversation holds earlier mail exactly once");
+    assert_eq!(req.count("PING-idle"), 1);
+
+    // Ask and wait: bender asks yoda; yoda answers; bender's command returns the answer.
+    until("bender idle before asking", 30, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
+    let sent = Instant::now();
+    mail(app, "anna", "human", "bender", "RUN: genie agent ask yoda 'Which export format? ANSWER=CSV'", None);
+    let req = until("the answer in bender's context", 60, || {
+        log.lock().unwrap().iter().find(|r| r.model == "executor" && r.last().0 == "tool" && r.last().1.contains("yoda answered")).cloned()
+    })
+    .await;
+    eprintln!("latency: an ask was answered by a teammate (whose session had to start) after {:?}", req.at - sent);
+    assert!(req.last().1.contains("CSV"), "{}", req.last().1);
+    let pending = app.with_tracker("shop", |t| t.bus().pending(Some("SHOP-1"), "bender")).unwrap();
+    assert!(!pending.iter().any(|m| m.text == "CSV"), "the answer went to the waiting asker, not into its mailbox");
+
+    // The board shows both agents with their sessions.
+    let board = app.sessions.all().len();
+    assert!(board >= 2, "bender and yoda run as sessions");
+}

@@ -198,6 +198,7 @@ struct MailBody {
     intent: Option<String>,
     #[serde(default)]
     urgent: bool,
+    topic: Option<String>,
 }
 
 async fn send(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<MailBody>) -> ApiResult<impl IntoResponse> {
@@ -206,6 +207,9 @@ async fn send(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Jso
     own_team(&access, &id)?;
     let (slug, from, role) = (access.project.clone(), access.actor.name.clone(), access.actor.role);
     let level = b.level.or_else(|| b.urgent.then(|| "high".to_string()));
+    if level.as_deref() == Some("interrupt") && !matches!(role, Role::Orchestrator | Role::Human) {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator and people interrupt an agent; use --level high"));
+    }
     let mail = app
         .blocking(move |app| {
             app.with_tracker(&slug, |t| {
@@ -218,6 +222,8 @@ async fn send(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Jso
                     level: level.as_deref(),
                     intent: b.intent.as_deref(),
                     kind: if role == Role::Human { "owner" } else { "message" },
+                    topic: b.topic.as_deref(),
+                    ..Default::default()
                 })
             })
         })
@@ -283,6 +289,7 @@ async fn add_member(
                     level: None,
                     intent: None,
                     kind: "kickoff",
+                    ..Default::default()
                 })?;
                 let note = format!("{} — {} joined the team (added by {by}).", team::display_name(&m.name), m.role);
                 for other in updated.members.iter().filter(|x| x.name != m.name) {
@@ -295,6 +302,7 @@ async fn add_member(
                         level: Some("low"),
                         intent: Some("fyi"),
                         kind: "system",
+                        ..Default::default()
                     })?;
                 }
                 Ok(json!([{ "name": m.name, "role": m.role, "model": m.model }]))
@@ -328,6 +336,7 @@ async fn remove_member(State(app): State<Arc<App>>, ctx: Ctx, Path((id, member))
                     level: Some("low"),
                     intent: Some("fyi"),
                     kind: "system",
+                    ..Default::default()
                 })?;
             }
             Ok(())
