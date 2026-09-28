@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router";
 import { Avatar, displayName, memberLabel } from "@/entities/member";
 import { RemoveMemberButton, TeamActions } from "@/features/manage-team";
 import { StageBars, STAGES, stageOf, STATUS_NAME } from "@/entities/task";
-import { type Mail, MessageText, type TeamDetail, useSendMail, useTeam } from "@/entities/team";
+import { type LiveSession, type Mail, type MailLevel, MessageText, type TeamDetail, useSendMail, useTeam } from "@/entities/team";
 import { clock, dayLabel, timeAgo, useTick } from "@/shared/lib";
 import { Icon, useToast } from "@/shared/ui";
 
@@ -17,20 +17,22 @@ interface Entry {
   to: string[];
   text: string;
   urgent: boolean;
-  level: Mail["level"];
+  level: MailLevel;
   intent?: Mail["intent"];
   delivered: boolean;
   title?: string;
 }
 
-const LEVEL_LABEL: Record<Mail["level"], string> = { low: "низкий", normal: "обычный", high: "высокий" };
+const LEVEL_LABEL: Record<MailLevel, string> = { low: "низкий", normal: "обычный", high: "высокий", interrupt: "прервать" };
 const INTENT_LABEL: Record<NonNullable<Mail["intent"]>, string> = { question: "вопрос", blocker: "блокер", verdict: "вердикт", done: "готово", fyi: "фай" };
 
 /** Priority badge + intent chip shown in the message meta. */
-function MailBadges({ level, intent }: { level: Mail["level"]; intent?: Mail["intent"] }) {
+function MailBadges({ level, intent }: { level: MailLevel; intent?: Mail["intent"] }) {
   return (
     <>
-      {level === "high" ? (
+      {level === "interrupt" ? (
+        <span className="urgent-tag">прерывание</span>
+      ) : level === "high" ? (
         <span className="urgent-tag">высокий</span>
       ) : (
         <span className="pill" style={{ fontSize: 10.5, lineHeight: "16px", padding: "0 6px" }}>
@@ -65,8 +67,8 @@ function toEntries(mail: Mail[]): Entry[] {
       fromRole: m.fromRole,
       to: [m.to],
       text: m.text,
-      urgent: !!m.urgent,
-      level: m.level,
+      urgent: !!m.urgent || (m.level as MailLevel) === "interrupt",
+      level: m.level as MailLevel,
       intent: m.intent,
       delivered: !!m.deliveredAt,
       title: m.kind === "kickoff" ? "Команда запущена" : undefined,
@@ -105,7 +107,7 @@ export function TeamView() {
   const send = useSendMail();
   const toast = useToast();
   const [to, setTo] = useState("all");
-  const [level, setLevel] = useState<Mail["level"]>("normal");
+  const [level, setLevel] = useState<MailLevel>("normal");
   const [draft, setDraft] = useState("");
   const chatRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -113,6 +115,10 @@ export function TeamView() {
   const entries = useMemo(() => (team ? toEntries(team.mail) : []), [team]);
 
   useEffect(() => setTo("all"), [teamId]);
+  // An interrupt stops one agent's step: not for a broadcast or the orchestrator.
+  useEffect(() => {
+    if (level === "interrupt" && (to === "all" || to === "orchestrator")) setLevel("high");
+  }, [to, level]);
   useLayoutEffect(() => {
     const el = chatRef.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
@@ -269,11 +275,20 @@ export function TeamView() {
             </div>
             <div className="to" role="group" aria-label="Уровень">
               Уровень
-              {(["low", "normal", "high"] as Mail["level"][]).map((l) => (
-                <button key={l} type="button" className={`chip${level === l ? " on" : ""}`} aria-pressed={level === l} onClick={() => setLevel(l)}>
-                  {LEVEL_LABEL[l]}
-                </button>
-              ))}
+              {(["low", "normal", "high", "interrupt"] as MailLevel[])
+                .filter((l) => l !== "interrupt" || (to !== "all" && to !== "orchestrator"))
+                .map((l) => (
+                  <button
+                    key={l}
+                    type="button"
+                    className={`chip${level === l ? " on" : ""}`}
+                    aria-pressed={level === l}
+                    title={l === "interrupt" ? "Остановить текущий шаг агента (даже долгую команду) и передать сообщение первым" : undefined}
+                    onClick={() => setLevel(l)}
+                  >
+                    {LEVEL_LABEL[l]}
+                  </button>
+                ))}
             </div>
             <div className="chat-input">
               <textarea
@@ -317,6 +332,7 @@ export function TeamView() {
                   {m.thinking ? ` · ${m.thinking}` : ""}
                 </span>
                 <span className="st">{m.status}</span>
+                {active && team.sessions?.[m.name] && <SessionLine s={team.sessions[m.name]} />}
               </span>
             </div>
           ))}
@@ -339,4 +355,28 @@ export function TeamView() {
       </aside>
     </>
   );
+}
+
+/** What a member's live session is doing now: the running tool, or its last words. */
+function SessionLine({ s }: { s: LiveSession }) {
+  useTick();
+  if (s.tool) {
+    return (
+      <span className="live-now" title={s.tool.args}>
+        <span className="spin" /> {s.tool.name}: {s.tool.args} · {timeAgo(s.tool.since).replace(/ назад$/, "")}
+      </span>
+    );
+  }
+  if (s.state === "working") {
+    return (
+      <span className="live-now">
+        <span className="spin" /> думает…
+      </span>
+    );
+  }
+  return s.lastText ? (
+    <span className="live-said" title={s.lastText}>
+      «{s.lastText}»
+    </span>
+  ) : null;
 }

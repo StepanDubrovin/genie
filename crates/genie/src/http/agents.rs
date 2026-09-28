@@ -249,7 +249,29 @@ async fn board(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> 
             }));
         }
     }
-    Ok(Json(json!({ "mode": if app.cfg.runtime.live_sessions() { "sessions" } else { "turns" }, "agents": agents })))
+    let slug = access.project.clone();
+    let since = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let latencies = app.blocking(move |app| app.with_tracker(&slug, |t| t.bus().delivery_latencies(&since))).await?;
+    Ok(Json(json!({
+        "mode": if app.cfg.runtime.live_sessions() { "sessions" } else { "turns" },
+        "agents": agents,
+        "latency": latency_stats(latencies),
+    })))
+}
+
+/// Delivery latency over the last day by level: count, median and 95th percentile (seconds).
+fn latency_stats(samples: Vec<(String, f64)>) -> Value {
+    let mut by: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+    for (level, secs) in samples {
+        by.entry(level).or_default().push(secs.max(0.0));
+    }
+    let pct = |v: &[f64], p: f64| v[((v.len() as f64 - 1.0) * p).round() as usize];
+    let mut out = serde_json::Map::new();
+    for (level, mut v) in by {
+        v.sort_by(|a, b| a.total_cmp(b));
+        out.insert(level, json!({ "count": v.len(), "p50": pct(&v, 0.5), "p95": pct(&v, 0.95) }));
+    }
+    Value::Object(out)
 }
 
 #[derive(Deserialize, Default)]

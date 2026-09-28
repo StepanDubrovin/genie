@@ -14,6 +14,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
+      # The live-session tests drive the real pi harness from node_modules.
+      - run: npm ci
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

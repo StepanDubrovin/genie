@@ -570,10 +570,12 @@ async fn on_event(app: &Arc<App>, s: &Arc<Session>, e: &Value) {
 /// A run ended: record it, retry a failed one, then deliver whatever is waiting.
 async fn settled(app: &Arc<App>, s: &Arc<Session>) {
     let max = app.cfg.runtime.max_attempts.max(1);
-    let (turn, failed, error, failures, log, we_aborted) = s.with_live(|l| {
+    let (turn, failed, error, failures, log, interrupted, stalled) = s.with_live(|l| {
         l.set_state("idle");
         l.tool = None;
-        let we_aborted = std::mem::take(&mut l.interrupting) || l.stall_abort.take().is_some();
+        let interrupted = std::mem::take(&mut l.interrupting);
+        let stalled = l.stall_abort.take().is_some();
+        let we_aborted = interrupted || stalled;
         // A run we aborted (interrupt, stuck step) ends with an error or an abort: not a failure.
         let failed = l.last_stop.as_deref() == Some("error") && !we_aborted;
         if failed {
@@ -581,7 +583,15 @@ async fn settled(app: &Arc<App>, s: &Arc<Session>) {
         } else {
             l.failures = 0;
         }
-        (l.turn.take(), failed, l.last_error.clone(), l.failures, l.recent.iter().cloned().collect::<Vec<_>>().join("\n"), we_aborted)
+        (
+            l.turn.take(),
+            failed,
+            l.last_error.clone(),
+            l.failures,
+            l.recent.iter().cloned().collect::<Vec<_>>().join("\n"),
+            interrupted,
+            stalled,
+        )
     });
     let (k, task) = (s.key.clone(), s.task.clone());
     let give_up = failed && failures >= max;
@@ -610,7 +620,14 @@ async fn settled(app: &Arc<App>, s: &Arc<Session>) {
             Ok(())
         })
         .await;
-    if we_aborted {
+    if stalled && !interrupted {
+        let secs = app.cfg.runtime.turn_timeout_secs;
+        s.send(json!({
+            "type": "prompt",
+            "message": format!("[genie] Your last step showed no sign of life for {secs}s and was stopped. Continue your work; run long commands with a timeout or in the background with their output in a file.")
+        }));
+    }
+    if interrupted {
         // The interrupt usually waits in the mailbox and wakes the session next. If it
         // reached the conversation just before the abort, the model has not answered it yet.
         let k = s.key.clone();

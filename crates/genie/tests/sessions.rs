@@ -121,7 +121,7 @@ struct Live {
     _stop: tokio::sync::oneshot::Sender<()>,
 }
 
-async fn live(pi: PathBuf) -> Live {
+async fn live(pi: PathBuf, tweak: impl FnOnce(&mut Config)) -> Live {
     let dir = tempfile::tempdir().unwrap();
     // The fake model.
     let log: Log = Arc::default();
@@ -169,6 +169,7 @@ async fn live(pi: PathBuf) -> Live {
     for role in ["executor", "reviewer", "orchestrator"] {
         cfg.role_models.insert(role.into(), RoleModel { model: Some(format!("fake/{role}")), thinking: None });
     }
+    tweak(&mut cfg);
     let app = App::open(dir.path(), cfg, PathBuf::from("/nonexistent")).unwrap();
     app.create_project("shop", "Shop", None, None, Some("SHOP")).unwrap();
     app.with_server(|db| db.set_autonomy("shop", "manual")).unwrap();
@@ -290,7 +291,7 @@ async fn mail_reaches_live_agents_between_steps_and_on_interrupt() {
         eprintln!("skipped: pi is not installed (npm ci)");
         return;
     };
-    let l = live(pi).await;
+    let l = live(pi, |_| {}).await;
     let (app, log) = (&l.app, &l.log);
     install_dump(app, log);
 
@@ -355,7 +356,84 @@ async fn mail_reaches_live_agents_between_steps_and_on_interrupt() {
     let pending = app.with_tracker("shop", |t| t.bus().pending(Some("SHOP-1"), "bender")).unwrap();
     assert!(!pending.iter().any(|m| m.text == "CSV"), "the answer went to the waiting asker, not into its mailbox");
 
-    // The board shows both agents with their sessions.
-    let board = app.sessions.all().len();
-    assert!(board >= 2, "bender and yoda run as sessions");
+    // The board and peek over HTTP (local mode: the loopback is trusted).
+    let base = format!("http://127.0.0.1:{}/api", app.cfg.port);
+    let http = reqwest::Client::new();
+    let get = |path: String| {
+        let (http, base) = (http.clone(), base.clone());
+        async move { http.get(format!("{base}{path}")).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let board = get("/agents".into()).await;
+    let bender = board["agents"].as_array().unwrap().iter().find(|a| a["agent"] == "SHOP-1/bender").cloned().unwrap();
+    assert!(bender["session"]["state"].is_string(), "{bender}");
+    assert!(!bender["session"]["recent"].as_array().unwrap().is_empty());
+    until("bender idle before peeking", 20, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
+    let peek = get("/agents/SHOP-1/bender/peek?deep=1".into()).await;
+    let conversation = peek["conversation"].as_array().cloned().unwrap_or_default();
+    assert!(conversation.iter().any(|m| m["text"].as_str().unwrap_or_default().contains("yoda answered")), "{peek}");
+
+    // Only the orchestrator and people interrupt.
+    let token = app
+        .with_server(|db| db.create_agent_token("shop", Role::Reviewer, "yoda", Some("SHOP-1"), None, chrono::Duration::hours(1)))
+        .unwrap();
+    let res = http
+        .post(format!("{base}/teams/SHOP-1/mail"))
+        .bearer_auth(&token)
+        .json(&json!({ "to": "bender", "text": "stop", "level": "interrupt" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403);
+
+    // A paused agent's session stops and its mail waits; resumed, it gets the mail.
+    let post = |path: &str| http.post(format!("{base}{path}")).header("x-genie", "1").json(&json!({})).send();
+    assert!(post("/agents/SHOP-1/bender/pause").await.unwrap().status().is_success());
+    until("the paused session to stop", 20, || session_state(app, "bender").is_none().then_some(())).await;
+    mail(app, "yoda", "reviewer", "bender", "PING-paused", None);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(session_state(app, "bender").is_none(), "a paused agent is not started");
+    assert!(request_with(log, "executor", "PING-paused").is_none());
+    assert!(post("/agents/SHOP-1/bender/resume").await.unwrap().status().is_success());
+    until("mail after resuming", 30, || request_with(log, "executor", "PING-paused")).await;
+}
+
+fn orchestrator_mail(app: &App, needle: &str) -> Option<()> {
+    let mail = app.with_tracker("shop", |t| t.bus().pending(None, "orchestrator")).unwrap();
+    mail.iter().any(|m| m.text.contains(needle)).then_some(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watchdogs_stop_silent_steps_and_report_loops() {
+    let Some(pi) = pi_bin() else {
+        assert!(std::env::var("CI").is_err(), "pi is not installed: run `npm ci` before `cargo test`");
+        return;
+    };
+    let l = live(pi, |cfg| cfg.runtime.turn_timeout_secs = 3).await;
+    let (app, log) = (&l.app, &l.log);
+
+    // A step with no sign of life for turnTimeoutSecs is aborted and the orchestrator is told.
+    mail(app, "anna", "human", "bender", "RUN: sleep 120", None);
+    until("the silent command", 30, || session_state(app, "bender").filter(|s| s.1.as_deref() == Some("bash"))).await;
+    until("the watchdog report", 20, || orchestrator_mail(app, "no sign of life")).await;
+    until("the stuck step to be aborted", 20, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
+    until("the agent told why its step stopped", 20, || request_with(log, "executor", "showed no sign of life")).await;
+    let runs = app.with_server(|db| db.turns("shop", Some("SHOP-1/bender"), 10)).unwrap();
+    assert!(runs.iter().all(|r| r.status == "succeeded"), "an abort we asked for is not a failed run: {runs:?}");
+
+    // The same call five times in a row: the orchestrator hears the agent may loop.
+    for i in 0..5 {
+        mail(app, "anna", "human", "bender", "RUN: echo again", None);
+        until("the repeated call", 30, || {
+            let n = log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.model == "executor" && r.last().0 == "tool" && r.last().1.contains("again"))
+                .count();
+            (n > i).then_some(())
+        })
+        .await;
+        until("bender idle", 20, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
+    }
+    until("the loop report", 10, || orchestrator_mail(app, "stuck in a loop")).await;
 }

@@ -50,6 +50,20 @@ fn view(t: &genie_core::Tracker, id: &str) -> genie_core::Result<Value> {
     Ok(v)
 }
 
+/// Live sessions of a team's members (`sessions: {name: live}`), for the team screen.
+fn attach_sessions(app: &App, project: &str, v: &mut Value) {
+    let Some(team) = v["id"].as_str().map(str::to_string) else { return };
+    let mut sessions = serde_json::Map::new();
+    for m in v["members"].as_array().cloned().unwrap_or_default() {
+        let Some(name) = m["name"].as_str() else { continue };
+        let key = runtime::AgentKey::Member { project: project.to_string(), team: team.clone(), member: name.to_string() };
+        if let Some(s) = app.sessions.get(&key) {
+            sessions.insert(name.to_string(), json!(s.live()));
+        }
+    }
+    v["sessions"] = Value::Object(sessions);
+}
+
 /// Agents may touch only their own team; the orchestrator and people any team.
 fn own_team(access: &Access, team: &str) -> ApiResult<()> {
     match (&access.agent_team, access.agent) {
@@ -77,6 +91,10 @@ async fn list(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<ListQuery>)
             })
         })
         .await?;
+    let mut out = out;
+    for v in &mut out {
+        attach_sessions(&app, &access.project, v);
+    }
     Ok(Json(json!(out)))
 }
 
@@ -99,6 +117,7 @@ async fn show(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> 
         })
         .await?;
     v["turns"] = json!(turns);
+    attach_sessions(&app, &access.project, &mut v);
     Ok(Json(v))
 }
 
