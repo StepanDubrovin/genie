@@ -1004,7 +1004,10 @@ impl Vault {
         };
         match rule {
             Publish::Locked => {
-                return Err(GenieError::Denied(format!("{rel} is locked for {}", if kind == AuthorKind::Agent { "agents" } else { "you" })));
+                return Err(GenieError::Denied(format!(
+                    "{rel} is locked for {}",
+                    if kind == AuthorKind::Agent { "agents" } else { "you" }
+                )));
             }
             Publish::Review => return Ok(WriteOutcome::NeedsReview),
             Publish::Direct => {}

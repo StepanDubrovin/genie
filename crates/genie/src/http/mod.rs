@@ -7,6 +7,7 @@
 //! (cross-site forms cannot send it), no CORS.
 
 pub mod account;
+pub mod automations;
 pub mod ctx;
 pub mod docs;
 pub mod live;
@@ -79,6 +80,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(tasks::routes())
         .merge(teams::routes())
         .merge(docs::routes())
+        .merge(automations::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
     let index = app.web_root.join("index.html");
@@ -107,8 +109,9 @@ async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Respons
     }
     let write = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     let bearer = req.headers().contains_key(header::AUTHORIZATION);
-    // Public form posts (login, invitation, answering questions) are not cookie-authenticated.
-    if write && !bearer && req.headers().get("x-genie").and_then(|v| v.to_str().ok()) != Some("1") {
+    // Webhooks come from other services and carry their own secret instead.
+    let hook = req.uri().path().starts_with("/api/hooks/");
+    if write && !bearer && !hook && req.headers().get("x-genie").and_then(|v| v.to_str().ok()) != Some("1") {
         return ApiError::new(StatusCode::FORBIDDEN, "missing X-Genie header").into_response();
     }
     next.run(req).await

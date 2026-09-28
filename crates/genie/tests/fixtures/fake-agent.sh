@@ -5,6 +5,19 @@ set -euo pipefail
 msg="${!#}"
 g() { "$GENIE_BIN" agent "$@"; }
 echo "turn of $GENIE_AGENT_NAME ($GENIE_AGENT_ROLE)"
+if [ -n "${GENIE_JOB:-}" ]; then
+  case "$GENIE_AGENT_ROLE" in
+    analyst)
+      g artifact --kind analysis --name analysis.md --text "Scope: CSV export of orders."
+      g output '{"questions":[{"text":"Какой формат файла?","why":"от этого зависит библиотека","options":["CSV","XLSX"]},{"text":"Кто получает выгрузку?","why":"права доступа","options":[]}],"draft_acceptance":["файл скачивается","в файле все заказы за период"]}'
+      ;;
+    documenter)
+      g docs write "$GENIE_PROJECT/features/export.md" --text $'---\ntitle: Экспорт заказов\ntype: guide\nstatus: current\n---\n# Экспорт заказов\n\nЗаказы выгружаются в CSV.' --note "export docs"
+      g output '{"pages_changed":["'"$GENIE_PROJECT"'/features/export.md"],"summary":"Описан экспорт заказов.","changelog":{"group":"added","text":"Экспорт заказов в CSV"}}'
+      ;;
+  esac
+  exit 0
+fi
 case "$GENIE_AGENT_ROLE" in
   orchestrator)
     if grep -q "in the inbox from the owner" <<<"$msg"; then

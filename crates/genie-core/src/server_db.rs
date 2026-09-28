@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   title TEXT NOT NULL,
   body TEXT NOT NULL DEFAULT '',
   link TEXT,
+  dedupe_key TEXT UNIQUE,
   created TEXT NOT NULL,
   read_at TEXT
 );

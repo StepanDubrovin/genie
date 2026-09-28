@@ -24,7 +24,7 @@ pub enum AgentCmd {
     /// Create a task (agents create drafts).
     Create {
         title: String,
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, allow_hyphen_values = true)]
         description: Option<String>,
         #[arg(short = 'a', long = "ac")]
         acceptance: Vec<String>,
@@ -43,11 +43,11 @@ pub enum AgentCmd {
         task: Option<String>,
         #[arg(long)]
         title: Option<String>,
-        #[arg(short = 'd', long)]
+        #[arg(short = 'd', long, allow_hyphen_values = true)]
         description: Option<String>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         plan: Option<String>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         append_notes: Option<String>,
         #[arg(short = 'a', long = "ac")]
         acceptance: Vec<String>,
@@ -68,13 +68,14 @@ pub enum AgentCmd {
         status: String,
         #[arg(long)]
         task: Option<String>,
-        #[arg(long, short = 'm')]
+        #[arg(long, short = 'm', allow_hyphen_values = true)]
         note: Option<String>,
         #[arg(long)]
         force: bool,
     },
     /// Comment on a task.
     Comment {
+        #[arg(allow_hyphen_values = true)]
         text: String,
         #[arg(long)]
         task: Option<String>,
@@ -97,11 +98,11 @@ pub enum AgentCmd {
         name: Option<String>,
         #[arg(long)]
         file: Option<std::path::PathBuf>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         text: Option<String>,
         #[arg(long)]
         task: Option<String>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         note: Option<String>,
     },
     /// Print artifact N of a task.
@@ -118,6 +119,7 @@ pub enum AgentCmd {
     },
     /// Mark a task blocked.
     Block {
+        #[arg(allow_hyphen_values = true)]
         reason: String,
         #[arg(long)]
         task: Option<String>,
@@ -129,6 +131,7 @@ pub enum AgentCmd {
     /// Message a teammate, the orchestrator or `all`.
     Send {
         to: String,
+        #[arg(allow_hyphen_values = true)]
         text: String,
         #[arg(long)]
         level: Option<String>,
@@ -146,7 +149,7 @@ pub enum AgentCmd {
         task: String,
         #[arg(long)]
         template: Option<String>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         note: Option<String>,
     },
     /// Stop a team (orchestrator).
@@ -154,7 +157,10 @@ pub enum AgentCmd {
     /// Let a member in error work again (orchestrator).
     Restart { team: String, member: String },
     /// Report the structured result of a one-shot job (JSON object).
-    Output { json: String },
+    Output {
+        #[arg(allow_hyphen_values = true)]
+        json: String,
+    },
     /// Project knowledge (vault).
     #[command(subcommand)]
     Docs(DocsCmd),
@@ -173,9 +179,9 @@ pub enum DocsCmd {
         path: String,
         #[arg(long)]
         file: Option<std::path::PathBuf>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         text: Option<String>,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         note: Option<String>,
     },
     Tree,
@@ -345,6 +351,18 @@ fn summary(v: &Value) -> String {
     )
 }
 
+/// `-` means "read the value from stdin" (handy for long, multi-line text).
+fn stdin_if_dash(v: Option<String>) -> Result<Option<String>, String> {
+    match v.as_deref() {
+        Some("-") => {
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map_err(|e| e.to_string())?;
+            Ok(Some(s))
+        }
+        _ => Ok(v),
+    }
+}
+
 pub async fn run(cmd: AgentCmd) -> Result<(), String> {
     let c = Client::from_env()?;
     let out: String = match cmd {
@@ -431,7 +449,7 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
         }
         AgentCmd::Artifact { kind, name, file, text, task, note } => {
             let mut body = json!({ "kind": kind, "name": name, "note": note });
-            match (file, text) {
+            match (file, stdin_if_dash(text)?) {
                 (Some(f), _) => {
                     let bytes = std::fs::read(&f).map_err(|e| format!("{}: {e}", f.display()))?;
                     if body["name"].is_null() {
@@ -570,7 +588,7 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
                 .join("\n")
         }
         AgentCmd::Docs(DocsCmd::Write { path, file, text, note }) => {
-            let content = match (file, text) {
+            let content = match (file, stdin_if_dash(text)?) {
                 (Some(f), _) => std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?,
                 (None, Some(t)) => t,
                 (None, None) => return Err("pass --file or --text".into()),

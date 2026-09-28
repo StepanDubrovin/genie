@@ -4,9 +4,11 @@
 //! journal the platform is built on. See `docs/platform/backend.md` for the
 //! migration plan.
 
+pub mod automation;
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod inbox;
 pub mod model;
 pub mod server_db;
 pub mod team;

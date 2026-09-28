@@ -71,6 +71,8 @@ fn with_state<T>(f: impl FnOnce(&mut SchedState) -> T) -> T {
 /// Start background workers: crash recovery, then the scheduler.
 pub fn start(app: &Arc<App>) {
     crate::knowledge::start_watcher(app);
+    crate::engine::start(app);
+    crate::channels::start(app);
     if let Err(e) = recover(app) {
         eprintln!("genie runtime: recovery failed: {e}");
     }
@@ -434,21 +436,34 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
 }
 
 /// Expand argument groups; a group with an empty placeholder is dropped.
+/// Single pass over the template, so text inside a substituted value (a
+/// message mentioning `{model}`) is never expanded again.
 pub fn build_command(groups: &[Vec<String>], vars: &HashMap<&str, String>) -> Vec<String> {
     let mut out = Vec::new();
     'group: for g in groups {
         let mut expanded = Vec::new();
         for arg in g {
-            let mut s = arg.clone();
-            for (k, v) in vars {
-                let ph = format!("{{{k}}}");
-                if s.contains(&ph) {
-                    if v.is_empty() {
-                        continue 'group;
+            let mut s = String::new();
+            let mut rest = arg.as_str();
+            while let Some(start) = rest.find('{') {
+                s.push_str(&rest[..start]);
+                let after = &rest[start + 1..];
+                match after.find('}').map(|end| (&after[..end], end)) {
+                    Some((name, end)) if vars.contains_key(name) => {
+                        let v = &vars[name];
+                        if v.is_empty() {
+                            continue 'group;
+                        }
+                        s.push_str(v);
+                        rest = &after[end + 1..];
                     }
-                    s = s.replace(&ph, v);
+                    _ => {
+                        s.push('{');
+                        rest = after;
+                    }
                 }
             }
+            s.push_str(rest);
             expanded.push(s);
         }
         out.extend(expanded);
@@ -564,6 +579,9 @@ fn agent_prompt(app: &App, project: &Project, role: &str, instructions: Option<&
         lang.internal,
         lang.user,
     ));
+    if role == "orchestrator" {
+        out.push_str("\n## Automations\n\nSome work is done by the project's automations (their comments and actions are signed `automation:<id>:<run>`). A task in `refining` with the comment \"Взята в разбор автоматически\" is being triaged by an automation: do not start another analysis for it — you will get a message when the author's answers are in. Automations also update the knowledge base and the changelog when a task is done.\n");
+    }
     if let Some(i) = instructions.filter(|i| !i.trim().is_empty()) {
         out.push_str(&format!("\n## Instructions for you\n\n{i}\n"));
     }
@@ -862,26 +880,27 @@ pub fn stop_team(app: &App, slug: &str, team: &str, reason: &str, by: &str) -> A
     Ok(report)
 }
 
+/// Stop teams whose task is closed (from blocking code).
+pub fn reap_closed_blocking(app: &App, slug: &str) -> AppResult<Vec<String>> {
+    let closed: Vec<String> = app.with_tracker(slug, |t| {
+        let mut out = Vec::new();
+        for team in t.bus().list(false)? {
+            if t.get(&team.task).map(|task| CLOSED.contains(&task.status)).unwrap_or(true) {
+                out.push(team.id);
+            }
+        }
+        Ok(out)
+    })?;
+    for team in &closed {
+        stop_team(app, slug, team, "task_closed", "genie")?;
+    }
+    Ok(closed)
+}
+
 /// Stop teams whose task is closed.
 pub async fn reap_closed(app: &Arc<App>, project: &str) {
     let slug = project.to_string();
-    let res = app
-        .blocking(move |app| {
-            let closed: Vec<String> = app.with_tracker(&slug, |t| {
-                let mut out = Vec::new();
-                for team in t.bus().list(false)? {
-                    if t.get(&team.task).map(|task| CLOSED.contains(&task.status)).unwrap_or(true) {
-                        out.push(team.id);
-                    }
-                }
-                Ok(out)
-            })?;
-            for team in &closed {
-                stop_team(app, &slug, team, "task_closed", "genie")?;
-            }
-            Ok(closed)
-        })
-        .await;
+    let res = app.blocking(move |app| reap_closed_blocking(app, &slug)).await;
     if let Err(e) = res {
         eprintln!("genie runtime: reap {project}: {e}");
     }

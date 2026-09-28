@@ -4,10 +4,14 @@
 //! engine and the delivery channels in one process. See docs/platform/backend.md.
 
 pub mod agent_cli;
+pub mod channels;
 pub mod cli;
 pub mod config;
+pub mod engine;
 pub mod http;
 pub mod knowledge;
+pub mod notify;
+pub mod questions;
 pub mod runtime;
 pub mod state;
 
