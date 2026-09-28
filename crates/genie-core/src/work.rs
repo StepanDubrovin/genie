@@ -286,3 +286,91 @@ mod tests {
         assert_eq!(db.turn(t).unwrap().status, "interrupted");
     }
 }
+
+// --- knowledge proposals ----------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Proposal {
+    pub id: i64,
+    pub path: String,
+    pub base_hash: Option<String>,
+    pub content: String,
+    pub author: String,
+    pub author_kind: String,
+    pub project: Option<String>,
+    pub task: Option<String>,
+    pub note: String,
+    pub status: String,
+    pub created: String,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<String>,
+    pub decision_note: Option<String>,
+}
+
+impl Proposal {
+    fn from_row(r: &Row<'_>) -> rusqlite::Result<Proposal> {
+        Ok(Proposal {
+            id: r.get("id")?,
+            path: r.get("path")?,
+            base_hash: r.get("base_hash")?,
+            content: r.get("content")?,
+            author: r.get("author")?,
+            author_kind: r.get("author_kind")?,
+            project: r.get("project")?,
+            task: r.get("task")?,
+            note: r.get("note")?,
+            status: r.get("status")?,
+            created: r.get("created")?,
+            decided_by: r.get("decided_by")?,
+            decided_at: r.get("decided_at")?,
+            decision_note: r.get("decision_note")?,
+        })
+    }
+}
+
+impl ServerDb {
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_proposal(
+        &self,
+        path: &str,
+        base_hash: Option<&str>,
+        content: &str,
+        author: &str,
+        author_kind: &str,
+        project: Option<&str>,
+        task: Option<&str>,
+        note: &str,
+    ) -> Result<Proposal> {
+        self.conn().execute(
+            "INSERT INTO proposals(path, base_hash, content, author, author_kind, project, task, note, status, created)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9)",
+            params![path, base_hash, content, author, author_kind, project, task, note, now()],
+        )?;
+        self.proposal(self.conn().last_insert_rowid())
+    }
+
+    pub fn proposal(&self, id: i64) -> Result<Proposal> {
+        self.conn()
+            .query_row("SELECT * FROM proposals WHERE id = ?1", [id], Proposal::from_row)
+            .optional()?
+            .ok_or_else(|| GenieError::not_found(format!("proposal {id} not found")))
+    }
+
+    pub fn proposals(&self, status: Option<&str>, limit: i64) -> Result<Vec<Proposal>> {
+        let mut stmt = self.conn().prepare("SELECT * FROM proposals WHERE (?1 IS NULL OR status = ?1) ORDER BY id DESC LIMIT ?2")?;
+        Ok(stmt.query_map(params![status, limit], Proposal::from_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Close an open proposal: `approved`, `rejected` or `superseded`.
+    pub fn decide_proposal(&self, id: i64, status: &str, by: &str, note: Option<&str>) -> Result<Proposal> {
+        let n = self.conn().execute(
+            "UPDATE proposals SET status = ?1, decided_by = ?2, decided_at = ?3, decision_note = ?4 WHERE id = ?5 AND status = 'open'",
+            params![status, by, now(), note, id],
+        )?;
+        if n == 0 {
+            return Err(GenieError::invalid(format!("proposal {id} is not open")));
+        }
+        self.proposal(id)
+    }
+}

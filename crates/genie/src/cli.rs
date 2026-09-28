@@ -50,6 +50,9 @@ enum Command {
         #[arg(long)]
         email: Option<String>,
     },
+    /// Knowledge vault maintenance.
+    #[command(subcommand)]
+    Vault(VaultCmd),
     /// Act as an agent (or script genie) through the server API.
     #[command(subcommand)]
     Agent(crate::agent_cli::AgentCmd),
@@ -82,6 +85,18 @@ enum ProjectCmd {
         prefix: Option<String>,
     },
     List,
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    /// Copy Markdown pages (e.g. a repository's docs/) into a vault space, keeping folders.
+    Import {
+        dir: PathBuf,
+        #[arg(long)]
+        space: String,
+    },
+    /// Rebuild the search index from the files.
+    Reindex,
 }
 
 #[derive(Subcommand)]
@@ -205,6 +220,64 @@ pub async fn run() -> Result<(), String> {
             println!("{}/invite?token={token}", cfg.public_url());
         }
         Command::Agent(cmd) => crate::agent_cli::run(cmd).await?,
+        Command::Vault(cmd) => {
+            let cfg = Config::load(&data)?;
+            let vault_dir = cfg.vault_path(&data);
+            let index = data.join("vault-index.db");
+            match cmd {
+                VaultCmd::Import { dir, space } => {
+                    let mut copied = 0;
+                    let mut stack = vec![dir.clone()];
+                    while let Some(d) = stack.pop() {
+                        for e in std::fs::read_dir(&d).map_err(|e| format!("{}: {e}", d.display()))?.flatten() {
+                            let path = e.path();
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            if name.starts_with('.') {
+                                continue;
+                            }
+                            if path.is_dir() {
+                                stack.push(path);
+                            } else if name.ends_with(".md") {
+                                let rel = path.strip_prefix(&dir).map_err(|e| e.to_string())?;
+                                let target = vault_dir.join(&space).join(rel);
+                                if target.exists() {
+                                    println!("skip {} (exists)", target.display());
+                                    continue;
+                                }
+                                std::fs::create_dir_all(target.parent().unwrap_or(&vault_dir)).map_err(|e| e.to_string())?;
+                                std::fs::copy(&path, &target).map_err(|e| e.to_string())?;
+                                copied += 1;
+                            }
+                        }
+                    }
+                    let mut v =
+                        genie_core::vault::Vault::open(&vault_dir, &index, cfg.vault.commit.unwrap_or(true)).map_err(|e| e.to_string())?;
+                    let _ = std::process::Command::new("git").arg("-C").arg(&vault_dir).args(["add", "-A", &space]).output();
+                    let _ = std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&vault_dir)
+                        .args([
+                            "-c",
+                            "user.name=genie",
+                            "-c",
+                            "user.email=genie@genie.local",
+                            "commit",
+                            "-q",
+                            "-m",
+                            &format!("import {} into {space}", dir.display()),
+                        ])
+                        .output();
+                    v.refresh().map_err(|e| e.to_string())?;
+                    println!("{copied} page(s) imported into {}/{space}", vault_dir.display());
+                }
+                VaultCmd::Reindex => {
+                    let _ = std::fs::remove_file(&index);
+                    let v =
+                        genie_core::vault::Vault::open(&vault_dir, &index, cfg.vault.commit.unwrap_or(true)).map_err(|e| e.to_string())?;
+                    println!("index rebuilt for {}", v.root().display());
+                }
+            }
+        }
         Command::Init { dir, prefix, project } => {
             let t = Tracker::init(&dir, prefix.as_deref(), project.as_deref()).map_err(|e| e.to_string())?;
             let m = t.meta().map_err(|e| e.to_string())?;

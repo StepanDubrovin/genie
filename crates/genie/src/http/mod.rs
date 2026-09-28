@@ -8,6 +8,7 @@
 
 pub mod account;
 pub mod ctx;
+pub mod docs;
 pub mod live;
 pub mod tasks;
 pub mod teams;
@@ -77,6 +78,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(account::routes())
         .merge(tasks::routes())
         .merge(teams::routes())
+        .merge(docs::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
     let index = app.web_root.join("index.html");

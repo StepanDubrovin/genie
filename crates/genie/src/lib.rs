@@ -7,6 +7,7 @@ pub mod agent_cli;
 pub mod cli;
 pub mod config;
 pub mod http;
+pub mod knowledge;
 pub mod runtime;
 pub mod state;
 

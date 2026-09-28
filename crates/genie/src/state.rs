@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use genie_core::server_db::{Project, ServerDb};
+use genie_core::vault::Vault;
 use genie_core::{GenieError, Tracker};
 use tokio::sync::Notify;
 
@@ -44,6 +45,8 @@ pub struct App {
     pub cfg: Config,
     pub web_root: PathBuf,
     server: Mutex<ServerDb>,
+    /// The knowledge vault shared by all projects of this installation.
+    pub vault: Mutex<Vault>,
     projects: RwLock<HashMap<String, Arc<ProjectRt>>>,
     /// Wakes the agent scheduler (new mail, finished turn, new job).
     pub wake_runtime: Notify,
@@ -60,11 +63,16 @@ impl App {
         std::fs::create_dir_all(data).map_err(|e| AppError::Internal(format!("{}: {e}", data.display())))?;
         let server = ServerDb::open(&data.join("server.db"))?;
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("genie"));
+        let mut vault = Vault::open(&cfg.vault_path(data), &data.join("vault-index.db"), cfg.vault.commit.unwrap_or(true))?;
+        for p in server.projects()? {
+            vault.ensure_space(&p.slug, p.repo.as_deref().map(Path::new))?;
+        }
         Ok(Arc::new(App {
             data: data.to_path_buf(),
             cfg,
             web_root,
             server: Mutex::new(server),
+            vault: Mutex::new(vault),
             projects: RwLock::new(HashMap::new()),
             wake_runtime: Notify::new(),
             wake_engine: Notify::new(),
@@ -131,6 +139,14 @@ impl App {
             .map(|r| Path::new(r).canonicalize().map(|p| p.to_string_lossy().into_owned()))
             .transpose()
             .map_err(|e| AppError::Internal(format!("repo: {e}")))?;
-        self.with_server(|db| db.create_project(slug, name, &dir.to_string_lossy(), repo.as_deref(), None))
+        let project = self.with_server(|db| db.create_project(slug, name, &dir.to_string_lossy(), repo.as_deref(), None))?;
+        self.with_vault(|v| v.ensure_space(&project.slug, project.repo.as_deref().map(Path::new)))?;
+        Ok(project)
+    }
+
+    /// Synchronous access to the vault (call from blocking contexts only).
+    pub fn with_vault<T>(&self, f: impl FnOnce(&mut Vault) -> Result<T, GenieError>) -> AppResult<T> {
+        let mut v = self.vault.lock().map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+        Ok(f(&mut v)?)
     }
 }

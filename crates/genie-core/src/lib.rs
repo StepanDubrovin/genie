@@ -11,6 +11,7 @@ pub mod model;
 pub mod server_db;
 pub mod team;
 pub mod tracker;
+pub mod vault;
 pub mod work;
 
 pub use error::{GenieError, Result};
