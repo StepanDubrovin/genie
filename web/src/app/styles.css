@@ -903,3 +903,11 @@ body:has(.auth-page) { overflow: auto; }
   .notifs { padding: 16px; }
   .settings { padding: 8px 16px 40px; }
 }
+
+/* Team screen: the live scheme of the team */
+.team-scheme { flex: none; max-height: 46vh; overflow-y: auto; padding: 12px 28px 10px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; background: var(--bg-group); }
+.team-scheme-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-2); }
+.team-scheme-wait { color: var(--amber); }
+.team-scheme-note { margin: 0; padding: 8px 12px; border-radius: var(--radius); background: var(--amber-bg); border: 1px solid var(--amber-line); color: var(--amber); font-size: 12.5px; line-height: 1.5; }
+.team-head .btn.ghost.on { background: var(--bg-active); color: var(--text); }
+@media (max-width: 900px) { .team-scheme { padding: 10px 16px; } }

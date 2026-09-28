@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import { Avatar, displayName, memberLabel } from "@/entities/member";
-import { RemoveMemberButton, TeamActions } from "@/features/manage-team";
+import { RemoveMemberButton, RestartMemberButton, TeamActions } from "@/features/manage-team";
 import { StageBars, STAGES, stageOf, STATUS_NAME } from "@/entities/task";
 import { type LiveSession, type Mail, type MailLevel, MessageText, type TeamDetail, useSendMail, useTeam } from "@/entities/team";
-import { clock, dayLabel, timeAgo, useTick } from "@/shared/lib";
+import { clock, dayLabel, readPref, timeAgo, useTick, writePref } from "@/shared/lib";
 import { Icon, useToast } from "@/shared/ui";
+import { TeamScheme } from "./TeamScheme.tsx";
 
 /** One chat entry: broadcast rows (one per recipient) and kickoffs are merged. */
 interface Entry {
@@ -97,6 +98,7 @@ const EVENT_TEXT: Record<string, (e: Record<string, unknown>) => string> = {
   member_recovered: (e) => `${displayName(String(e.member))}: снова на связи`,
   team_recovered: () => "связь с командой восстановлена",
   team_restarted: (e) => `перезапущены: ${(e.members as string[]).map(displayName).join(", ")}`,
+  member_restarted: (e) => `${displayName(String(e.member))} перезапущен`,
   launch_failed: () => "не удалось запустить участников",
 };
 
@@ -109,6 +111,7 @@ export function TeamView() {
   const [to, setTo] = useState("all");
   const [level, setLevel] = useState<MailLevel>("normal");
   const [draft, setDraft] = useState("");
+  const [scheme, setScheme] = useState(() => readPref("genie.teamScheme", "open") === "open");
   const chatRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const team = q.data;
@@ -162,6 +165,19 @@ export function TeamView() {
             <span className="muted" style={{ fontSize: 12 }}>
               {timeAgo(team.created)}
             </span>
+            {team.spec && (
+              <button
+                type="button"
+                className={`btn ghost${scheme ? " on" : ""}`}
+                aria-pressed={scheme}
+                onClick={() => {
+                  writePref("genie.teamScheme", scheme ? "closed" : "open");
+                  setScheme(!scheme);
+                }}
+              >
+                Схема
+              </button>
+            )}
             <TeamActions team={team} />
           </div>
           <StageBars stage={stage} big amber={status === "needs_owner"} />
@@ -173,6 +189,8 @@ export function TeamView() {
             ))}
           </div>
         </header>
+
+        {scheme && <TeamScheme team={team} />}
 
         <div className="chat" ref={chatRef} role="log" aria-label="Чат команды" onScroll={(e) => (stick.current = e.currentTarget.scrollHeight - e.currentTarget.scrollTop - e.currentTarget.clientHeight < 60)}>
           <div className="inner">
@@ -323,6 +341,7 @@ export function TeamView() {
               <span className="info">
                 <span className="nm">
                   <b>{memberLabel(m.name, m.role)}</b>
+                  {active && <RestartMemberButton team={team.id} name={m.name} />}
                   {active && <RemoveMemberButton team={team.id} name={m.name} role={m.role} />}
                   {m.activity === "error" ? <span className="e">ошибка</span> : m.activity === "working" && active ? <span className="w">работает</span> : m.state === "lost" ? <span className="e">нет связи</span> : <span>{m.state === "stopped" ? "остановлен" : "ждёт"}</span>}
                   {team.pending[m.name] ? <span style={{ color: "var(--amber)" }}>✉ {team.pending[m.name]}</span> : null}

@@ -12,3 +12,21 @@
 .team-graph-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .team-graph-legend i { width: 14px; height: 2px; border-radius: 1px; }
 
+
+/* a running team */
+.team-graph .node.live-working rect { stroke: var(--accent-2); stroke-width: 2; }
+.team-graph .node.live-waiting rect { stroke: var(--amber); stroke-dasharray: 5 3; }
+.team-graph .node.live-waiting .ns { fill: var(--amber); }
+.team-graph .node.live-error rect { stroke: var(--red); stroke-width: 2; }
+.team-graph .node.live-error .ns { fill: var(--red); }
+.team-graph .node.live-stopped { opacity: 0.5; }
+.team-graph .node.live-working .ns { fill: var(--accent-text); }
+.team-graph .edge.pending path { stroke-dasharray: 6 5; animation: team-graph-flow 1.2s linear infinite; }
+@keyframes team-graph-flow { to { stroke-dashoffset: -22; } }
+@media (prefers-reduced-motion: reduce) { .team-graph .edge.pending path { animation: none; } }
+
+/* drawing a relation */
+.team-graph svg.connectable .node:not(.orch) { cursor: crosshair; }
+.team-graph svg.connectable { touch-action: none; user-select: none; }
+.team-graph .drag-line { stroke: var(--accent-2); stroke-width: 1.6; stroke-dasharray: 4 4; pointer-events: none; }
+.team-graph-hint { font-size: 12px; color: var(--muted); text-align: center; }

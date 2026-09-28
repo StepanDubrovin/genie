@@ -2,6 +2,7 @@
 // contract is checked by the compiler on both sides.
 
 import type { Mail, Team } from "../../../../src/team/bus.ts";
+import type { TeamSpecView } from "@/entities/agent-config";
 import type { Status } from "@/entities/task";
 
 export type { Mail, Team };
@@ -31,6 +32,10 @@ export interface TeamView extends Team {
   pending: Record<string, number>;
   /** Live sessions by member name (Rust server with live sessions). */
   sessions?: Record<string, LiveSession>;
+  /** How the team works: members, relations, mail mode (Rust server). */
+  spec?: TeamSpecView;
+  /** The template changed since the team took its snapshot (team detail). */
+  templateChanged?: boolean;
 }
 
 export interface TeamDetail extends TeamView {

@@ -4,6 +4,12 @@ export type IconProps = SVGProps<SVGSVGElement> & { size?: number };
 export const stroke = (size = 14, p: IconProps) => ({ width: size, height: size, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true, ...p });
 
 export const Icon = {
+  restart: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)}>
+      <path d="M13 8a5 5 0 1 1-1.6-3.7" />
+      <path d="M13 3v3h-3" />
+    </svg>
+  ),
   plus: ({ size, ...p }: IconProps) => (
     <svg {...stroke(size, p)}>
       <path d="M8 3v10M3 8h10" />

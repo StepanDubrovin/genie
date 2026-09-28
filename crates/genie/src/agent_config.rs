@@ -254,6 +254,16 @@ pub struct TeamSpec {
     pub relations: Vec<Relation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charter: Option<String>,
+    /// The template as the team took it (`template_hash`): a later edit of the
+    /// template shows on the team, which keeps working by its snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_hash: Option<String>,
+}
+
+/// What a team takes from a template, as a hash (`TeamSpec::template_hash`).
+pub fn template_hash(t: &TeamDef) -> String {
+    let v = json!({ "stage": t.stage, "workspace": t.workspace, "mail": t.mail, "members": t.members, "relations": t.relations, "charter": t.charter });
+    genie_core::server_db::hash_secret(&v.to_string())
 }
 
 /// A member of a running team: its key in the relations, its name, its role id.
@@ -295,6 +305,78 @@ impl TeamSpec {
         free_key(&self.members, role)
     }
 
+    /// Teammates the member `key` may write to in a `flow` team: along its
+    /// handoff, returns and consults relations.
+    pub fn flow_targets(&self, key: &str) -> Vec<&SpecMember> {
+        let mut out: Vec<&SpecMember> = Vec::new();
+        for r in self.relations.iter().filter(|r| r.from == key && r.kind != RelKind::Reports) {
+            for t in &r.to {
+                if let Some(m) = self.by_key(t)
+                    && !out.iter().any(|x| x.key == m.key)
+                {
+                    out.push(m);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the member `key` is a voice of the team to the orchestrator
+    /// (`reports`); in a team where nobody reports, everyone is.
+    pub fn is_voice(&self, key: &str) -> bool {
+        let mut reporters = self.relations.iter().filter(|r| r.kind == RelKind::Reports).peekable();
+        reporters.peek().is_none() || reporters.any(|r| r.from == key)
+    }
+
+    /// Why mail from the member named `from` to `to` (a member name,
+    /// `orchestrator` or `all`) leaves the template's route in a `flow` team.
+    /// `None`: it follows the route, the team's mail is open, or the sender is
+    /// not a member (the orchestrator, a person). Answers (`genie agent reply`)
+    /// are not checked: they always go back to whoever asked.
+    pub fn flow_refusal(&self, from: &str, to: &str, intent: Option<&str>) -> Option<String> {
+        if self.mail != MailMode::Flow {
+            return None;
+        }
+        let me = self.by_name(from)?;
+        let targets = self.flow_targets(&me.key);
+        let voice = self.is_voice(&me.key);
+        let route = format!(
+            "You may write to {}{}; answer questions with `genie agent reply <id>`",
+            if targets.is_empty() {
+                "no teammate".to_string()
+            } else {
+                targets.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+            },
+            if voice {
+                " and the orchestrator"
+            } else {
+                ", and send the orchestrator only questions and blockers (--intent question or blocker)"
+            }
+        );
+        if to == ORCHESTRATOR {
+            if voice || matches!(intent, Some("question" | "blocker")) {
+                return None;
+            }
+            let voices: Vec<&str> = self
+                .relations
+                .iter()
+                .filter(|r| r.kind == RelKind::Reports)
+                .filter_map(|r| self.by_key(&r.from).map(|m| m.name.as_str()))
+                .collect();
+            return Some(format!(
+                "this team's mail follows its template (mail: flow): {} report to the orchestrator. {route}.",
+                voices.join(", ")
+            ));
+        }
+        if to == genie_core::team::BROADCAST {
+            return Some(format!("this team's mail follows its template (mail: flow): no mail to everyone. {route}."));
+        }
+        if targets.iter().any(|m| m.name == to) {
+            return None;
+        }
+        Some(format!("{to} is not on your route in this team (mail: flow). {route}."))
+    }
+
     /// Relations derived from the members' classes (teams without a template's relations).
     pub fn derived(members: Vec<SpecMember>, classes: &[Role], refinement: bool) -> TeamSpec {
         let keyed: Vec<(String, Role)> = members.iter().zip(classes).map(|(m, c)| (m.key.clone(), *c)).collect();
@@ -307,6 +389,7 @@ impl TeamSpec {
             relations: default_relations(&keyed, refinement),
             members,
             charter: None,
+            template_hash: None,
         }
     }
 }

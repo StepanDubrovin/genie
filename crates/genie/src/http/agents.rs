@@ -152,9 +152,13 @@ async fn ask(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<AskBody>) -> A
     let (slug, role) = (access.project.clone(), access.actor.role);
     let me = if role == Role::Orchestrator { ORCHESTRATOR.to_string() } else { access.actor.name.clone() };
     let (to, text, t2, me2) = (b.to.clone(), b.text.clone(), team.clone(), me.clone());
+    let member = role != Role::Orchestrator;
     let asked = app
         .blocking(move |app| {
             app.with_tracker(&slug, |t| {
+                if member {
+                    super::teams::flow_route(&t.bus().get(&t2)?, &me2, &to, Some("question"))?;
+                }
                 t.bus().send(SendMail {
                     team: &t2,
                     from: &me2,

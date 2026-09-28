@@ -1481,6 +1481,7 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
             members: spec_members,
             relations: t.relations.clone(),
             charter: t.charter.clone(),
+            template_hash: Some(crate::agent_config::template_hash(t)),
         },
         _ => TeamSpec {
             template: template.as_ref().map(|t| t.id.clone()),
@@ -1810,7 +1811,16 @@ impl Kickoff<'_> {
             ));
         }
         if self.spec.mail == MailMode::Flow {
-            how.push("Mail follows this flow: write only to the teammates named above.".into());
+            let targets: Vec<String> = self.spec.flow_targets(&me.key).iter().map(|m| m.name.clone()).collect();
+            how.push(format!(
+                "Mail follows the template's route: you may write to {}{}; answer questions with `genie agent reply <id>`. genie refuses other mail.",
+                if targets.is_empty() { "no teammate".to_string() } else { and_list(&targets) },
+                if self.spec.is_voice(&me.key) {
+                    " and the orchestrator"
+                } else {
+                    ", and to the orchestrator only questions and blockers (`--intent question` or `blocker`)"
+                }
+            ));
         }
         out.push(format!(
             "How the team works{}:\n{}",

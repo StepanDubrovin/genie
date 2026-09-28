@@ -306,3 +306,105 @@ async fn a_member_added_later_gets_its_own_relations_without_duplicates() {
         assert_eq!(n, 1, "{name} is told once");
     }
 }
+
+const RELAY: &str = r#"{
+  "title": "Relay",
+  "description": "Members write only along the route.",
+  "stage": "delivery",
+  "mail": "flow",
+  "members": [{ "role": "executor" }, { "role": "reviewer" }, { "role": "tester" }],
+  "relations": [
+    { "from": "executor", "to": ["reviewer"], "type": "handoff", "on": "review" },
+    { "from": "reviewer", "to": ["executor"], "type": "returns", "on": "changes_requested" },
+    { "from": "tester", "to": ["executor"], "type": "consults" },
+    { "from": "reviewer", "to": ["orchestrator"], "type": "reports", "note": "the verdict" }
+  ]
+}"#;
+
+async fn mail(h: &Harness, team: &str, token: &str, to: &str, intent: Option<&str>) -> (StatusCode, Value) {
+    let (s, v, _) = call(&h.remote, "POST", &format!("/api/teams/{team}/mail"))
+        .bearer(token)
+        .json(json!({ "to": to, "text": "hello", "intent": intent }))
+        .send()
+        .await;
+    (s, v)
+}
+
+#[tokio::test]
+async fn in_a_flow_team_members_write_only_along_the_route() {
+    let h = Harness::new();
+    h.project("shop");
+    std::fs::create_dir_all(h.dir.path().join("teams")).unwrap();
+    std::fs::write(h.dir.path().join("teams/relay.json"), RELAY).unwrap();
+    h.app.reload_agents();
+    let id = ready_task(&h, "Strict route");
+    let (s, team, _) = call(&h.router, "POST", "/api/teams").json(json!({ "task": id, "template": "relay" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let (exec, rev, tester) = (member_named(&team, "executor"), member_named(&team, "reviewer"), member_named(&team, "tester"));
+    let k = kickoff_of(&h, &id, &exec);
+    assert!(k.contains(&format!("you may write to {rev}, and to the orchestrator only questions and blockers")), "{k}");
+    assert!(kickoff_of(&h, &id, &rev).contains(&format!("you may write to {exec} and the orchestrator")), "the voice may report");
+    let e = token(&h, Role::Executor, "executor", &exec, &id);
+    let r = token(&h, Role::Reviewer, "reviewer", &rev, &id);
+    let t = token(&h, Role::Tester, "tester", &tester, &id);
+
+    // Along the route.
+    assert_eq!(mail(&h, &id, &e, &rev, None).await.0, StatusCode::CREATED, "handoff: executor → reviewer");
+    assert_eq!(mail(&h, &id, &r, &exec, None).await.0, StatusCode::CREATED, "returns: reviewer → executor");
+    let (s, asked) = mail(&h, &id, &t, &exec, Some("question")).await;
+    assert_eq!(s, StatusCode::CREATED, "consults: tester → executor");
+    assert_eq!(mail(&h, &id, &r, "orchestrator", Some("verdict")).await.0, StatusCode::CREATED, "the voice reports");
+    assert_eq!(mail(&h, &id, &e, "orchestrator", Some("blocker")).await.0, StatusCode::CREATED, "a blocker goes to the orchestrator");
+
+    // Off the route: refused, with the route in the answer.
+    let (s, err) = mail(&h, &id, &e, &tester, None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let msg = err["error"].as_str().unwrap();
+    assert!(msg.contains(&format!("{tester} is not on your route")) && msg.contains(&format!("You may write to {rev}")), "{msg}");
+    let (s, err) = mail(&h, &id, &e, "orchestrator", Some("done")).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains(&format!("{rev} report to the orchestrator")), "{err}");
+    let (s, err) = mail(&h, &id, &t, "all", None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(err["error"].as_str().unwrap().contains("no mail to everyone"), "{err}");
+    let (s, err, _) = call(&h.remote, "POST", "/api/agent/ask")
+        .bearer(&e)
+        .json(json!({ "to": tester, "text": "which data?", "timeout": 1 }))
+        .send()
+        .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+
+    // Answers always go back; the orchestrator and people write to anyone.
+    let (s, v, _) =
+        call(&h.remote, "POST", "/api/agent/reply").bearer(&e).json(json!({ "id": asked[0]["id"], "text": "CSV" })).send().await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v, _) =
+        call(&h.router, "POST", &format!("/api/teams/{id}/mail")).json(json!({ "to": tester, "text": "look at the export" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+}
+
+#[tokio::test]
+async fn a_team_notices_its_template_changed_after_it_started() {
+    let h = Harness::new();
+    h.project("shop");
+    let id = ready_task(&h, "Snapshot");
+    let r = &h.router;
+    let (s, team, _) = call(r, "POST", "/api/teams").json(json!({ "task": id, "template": "pair" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let (_, v, _) = call(r, "GET", &format!("/api/teams/{id}")).send().await;
+    assert_eq!(v["templateChanged"], false, "{v}");
+    // A member added later changes the team, not its template.
+    let (s, _, _) = call(r, "POST", &format!("/api/teams/{id}/members")).json(json!({ "role": "tester" })).send().await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (_, v, _) = call(r, "GET", &format!("/api/teams/{id}")).send().await;
+    assert_eq!(v["templateChanged"], false);
+    // The template changes: the team keeps its snapshot and shows the change.
+    let (_, tpl, _) = call(r, "GET", "/api/templates/pair").send().await;
+    let mut edited: Value = serde_json::from_str(tpl["builtin"].as_str().unwrap()).unwrap();
+    edited["charter"] = json!("Small commits.");
+    let (s, v, _) = call(r, "PUT", "/api/templates/pair").json(json!({ "template": edited, "baseHash": "" })).send().await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, v, _) = call(r, "GET", &format!("/api/teams/{id}")).send().await;
+    assert_eq!(v["templateChanged"], true);
+    assert!(v["spec"]["charter"].is_null(), "the running team keeps its snapshot");
+}

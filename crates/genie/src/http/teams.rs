@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use super::ctx::{Access, Ctx};
 use super::tasks::changed;
 use super::{ApiError, ApiResult};
+use crate::agent_config::TeamSpec;
 use crate::config::MemberSpec;
 use crate::runtime::{self, SpawnRequest};
 use crate::state::App;
@@ -62,6 +63,14 @@ fn attach_sessions(app: &App, project: &str, v: &mut Value) {
         }
     }
     v["sessions"] = Value::Object(sessions);
+}
+
+/// Whether the team's template changed since the team took its snapshot (`templateChanged`).
+fn attach_template_state(app: &App, v: &mut Value) {
+    let Some(spec) = TeamSpec::from_value(&v["spec"]) else { return };
+    let (Some(id), Some(hash)) = (&spec.template, &spec.template_hash) else { return };
+    let changed = app.agents().teams.get(id).is_none_or(|t| &crate::agent_config::template_hash(t) != hash);
+    v["templateChanged"] = json!(changed);
 }
 
 /// Agents may touch only their own team; the orchestrator and people any team.
@@ -118,6 +127,7 @@ async fn show(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> 
         .await?;
     v["turns"] = json!(turns);
     attach_sessions(&app, &access.project, &mut v);
+    attach_template_state(&app, &mut v);
     Ok(Json(v))
 }
 
@@ -234,9 +244,13 @@ async fn send(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Jso
     if level.as_deref() == Some("interrupt") && !matches!(role, Role::Orchestrator | Role::Human) {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator and people interrupt an agent; use --level high"));
     }
+    let member = access.agent && role != Role::Orchestrator;
     let mail = app
         .blocking(move |app| {
             app.with_tracker(&slug, |t| {
+                if member {
+                    flow_route(&t.bus().get(&id)?, &from, &b.to, b.intent.as_deref())?;
+                }
                 t.bus().send(SendMail {
                     team: &id,
                     from: if role == Role::Orchestrator { ORCHESTRATOR } else { &from },
@@ -254,6 +268,15 @@ async fn send(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Jso
         .await?;
     app.wake_runtime.notify_one();
     Ok((StatusCode::CREATED, Json(json!(mail))))
+}
+
+/// A member of a `mail: flow` team writes only along the template's route.
+pub(super) fn flow_route(team: &team::Team, from: &str, to: &str, intent: Option<&str>) -> Result<(), genie_core::GenieError> {
+    let why = team.spec.as_ref().and_then(TeamSpec::from_value).and_then(|s| s.flow_refusal(from, to, intent));
+    match why {
+        Some(why) => Err(genie_core::GenieError::Denied(format!("genie: {why}"))),
+        None => Ok(()),
+    }
 }
 
 async fn add_member(

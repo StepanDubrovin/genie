@@ -453,7 +453,18 @@ function TemplateForm({ detail, cfg, onClose }: { detail: TemplateDetail; cfg: C
             </button>
           </>
         )}
-        <TemplateGraph members={members.map((m) => ({ ...m, key: keyOf(m) }))} relations={draft.relations ?? detail.template.relations} roles={cfg.roles} />
+        <TemplateGraph
+          members={members.map((m) => ({ ...m, key: keyOf(m) }))}
+          relations={draft.relations ?? detail.template.relations}
+          roles={cfg.roles}
+          onConnect={(from, to) =>
+            set("relations", [
+              ...(draft.relations ?? detail.template.relations),
+              to === "orchestrator" ? { from, to: ["orchestrator"], type: "reports" } : { from, to: [to], type: "handoff" },
+            ])
+          }
+        />
+        <p className="team-graph-hint">Протяните от участника к участнику, чтобы добавить передачу работы; к оркестратору — доклад. Тип и статус — в списке связей.</p>
         <label className="field">
           Общие правила команды
           <textarea rows={2} value={String(draft.charter ?? "")} onChange={(e) => set("charter", e.target.value)} />

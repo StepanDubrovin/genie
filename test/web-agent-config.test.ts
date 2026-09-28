@@ -8,11 +8,14 @@ import {
   allowDeny,
   basePermissions,
   layoutTeam,
+  liveTeam,
   newRoleFile,
+  reached,
   type RoleDef,
   setFrontmatterKey,
   splitFrontmatter,
   type TeamDef,
+  type TeamSpecView,
   templatesFor,
 } from "../web/src/entities/agent-config/model.ts";
 
@@ -111,4 +114,36 @@ test("a task before ready gets refinement templates, a ready one delivery templa
   assert.deepEqual(templatesFor(teams, "refining").map((x) => x.id), ["research"]);
   assert.deepEqual(templatesFor(teams, "ready").map((x) => x.id), ["standard", "pair"]);
   assert.deepEqual(templatesFor(teams, "changes_requested").map((x) => x.id), ["standard", "pair"]);
+});
+
+test("a running team shows who works and who waits for whose handoff", () => {
+  const spec: TeamSpecView = {
+    stage: "delivery",
+    workspace: "worktree",
+    mail: "open",
+    members: [
+      { key: "executor", name: "bender", role: "executor" },
+      { key: "reviewer", name: "yoda", role: "reviewer" },
+      { key: "tester", name: "chaos", role: "tester" },
+    ],
+    relations: [
+      { from: "executor", to: ["reviewer", "tester"], type: "handoff", on: "review" },
+      { from: "reviewer", to: ["executor"], type: "returns", on: "changes_requested" },
+    ],
+  };
+  const members = [
+    { name: "bender", activity: "working", state: "active" },
+    { name: "yoda", activity: "idle", state: "active" },
+    { name: "chaos", activity: "error", state: "active" },
+  ];
+  const now = liveTeam(spec, members, "in_progress", true);
+  assert.equal(now.live.executor.state, "working");
+  assert.deepEqual(now.live.reviewer, { state: "waiting", note: "ждёт Bender" });
+  assert.equal(now.live.tester.state, "error", "an error shows whatever the flow");
+  assert.deepEqual(now.pending, ["executor->reviewer"]);
+  const inReview = liveTeam(spec, members, "review", true);
+  assert.equal(inReview.live.reviewer.state, "idle", "the handoff has happened");
+  assert.deepEqual(inReview.pending, []);
+  assert.equal(liveTeam(spec, members, "review", false).live.executor.state, "stopped");
+  assert.ok(reached("approved", "review") && !reached("changes_requested", "review") && reached("changes_requested", "in_progress"));
 });

@@ -339,7 +339,7 @@ export interface GraphEdge {
   ly: number;
 }
 
-export const NODE_W = 132;
+export const NODE_W = 150;
 export const NODE_H = 46;
 
 /**
@@ -416,4 +416,64 @@ export function newTemplate(title: string, description: string): Record<string, 
       { from: "reviewer", to: ["orchestrator"], type: "reports", note: "the verdict" },
     ],
   };
+}
+
+// ------------------------------------------------------------------ a running team
+
+/** A member's name as people read it (`bender` → `Bender`). */
+export const capitalized = (name: string) => (name ? name[0].toUpperCase() + name.slice(1) : name);
+
+/** How a running team works: the snapshot it took from its template (or derived). */
+export interface TeamSpecView {
+  template?: string;
+  title?: string;
+  stage: Stage;
+  workspace: Workspace;
+  mail: MailMode;
+  members: { key: string; name: string; role: string }[];
+  relations: Relation[];
+  charter?: string;
+}
+
+export type LiveState = "working" | "waiting" | "idle" | "error" | "stopped";
+
+const FLOW = ["inbox", "draft", "refining", "ready", "in_progress", "review", "approved", "done"];
+
+/** Whether the task has got to `status` on its way forward (changes_requested is work again). */
+export function reached(current: string, status: string): boolean {
+  if (status === "changes_requested") return current === "changes_requested";
+  const pos = (s: string) => FLOW.indexOf(s === "changes_requested" ? "in_progress" : s);
+  return pos(current) >= pos(status);
+}
+
+/**
+ * Who in a running team works, who waits and for whom: a member not working
+ * waits for a handoff whose status the task has not reached yet. `pending`
+ * holds those handoffs as `from->to` member keys.
+ */
+export function liveTeam(
+  spec: TeamSpecView,
+  members: { name: string; activity?: string; state?: string; status?: string }[],
+  taskStatus: string,
+  teamActive: boolean,
+): { live: Record<string, { state: LiveState; note?: string }>; pending: string[] } {
+  const nameOf = (key: string) => capitalized(spec.members.find((m) => m.key === key)?.name ?? key);
+  const live: Record<string, { state: LiveState; note?: string }> = {};
+  const pending: string[] = [];
+  for (const sm of spec.members) {
+    const m = members.find((x) => x.name === sm.name);
+    let state: LiveState =
+      !teamActive || !m || m.state === "stopped" ? "stopped" : m.activity === "error" || m.state === "lost" ? "error" : m.activity === "working" ? "working" : "idle";
+    let note = m?.status?.trim() || undefined;
+    if (state === "idle") {
+      const waits = spec.relations.filter((r) => r.type === "handoff" && r.on && r.to.includes(sm.key) && !reached(taskStatus, r.on));
+      if (waits.length) {
+        state = "waiting";
+        note = `ждёт ${[...new Set(waits.map((r) => nameOf(r.from)))].join(", ")}`;
+        pending.push(...waits.map((r) => `${r.from}->${sm.key}`));
+      }
+    }
+    live[sm.key] = { state, note };
+  }
+  return { live, pending };
 }
