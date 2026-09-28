@@ -50,17 +50,23 @@ pub struct Call<'a> {
     method: Method,
     uri: String,
     body: Option<Value>,
+    raw: Option<Vec<u8>>,
     headers: Vec<(String, String)>,
     csrf: bool,
 }
 
 pub fn call<'a>(router: &'a Router, method: &str, uri: &str) -> Call<'a> {
-    Call { router, method: method.parse().unwrap(), uri: uri.to_string(), body: None, headers: Vec::new(), csrf: true }
+    Call { router, method: method.parse().unwrap(), uri: uri.to_string(), body: None, raw: None, headers: Vec::new(), csrf: true }
 }
 
 impl<'a> Call<'a> {
     pub fn json(mut self, v: Value) -> Self {
         self.body = Some(v);
+        self
+    }
+    /// A body sent as it is (`application/octet-stream`).
+    pub fn bytes(mut self, b: &[u8]) -> Self {
+        self.raw = Some(b.to_vec());
         self
     }
     pub fn header(mut self, k: &str, v: &str) -> Self {
@@ -88,9 +94,10 @@ impl<'a> Call<'a> {
         for (k, v) in &self.headers {
             req = req.header(k.as_str(), v.as_str());
         }
-        let req = match self.body {
-            Some(b) => req.header(header::CONTENT_TYPE, "application/json").body(Body::from(b.to_string())).unwrap(),
-            None => req.body(Body::empty()).unwrap(),
+        let req = match (self.body, self.raw) {
+            (Some(b), _) => req.header(header::CONTENT_TYPE, "application/json").body(Body::from(b.to_string())).unwrap(),
+            (None, Some(raw)) => req.header(header::CONTENT_TYPE, "application/octet-stream").body(Body::from(raw)).unwrap(),
+            (None, None) => req.body(Body::empty()).unwrap(),
         };
         let res = self.router.clone().oneshot(req).await.unwrap();
         let status = res.status();

@@ -408,3 +408,77 @@ async fn a_team_notices_its_template_changed_after_it_started() {
     assert_eq!(v["templateChanged"], true);
     assert!(v["spec"]["charter"].is_null(), "the running team keeps its snapshot");
 }
+
+#[tokio::test]
+async fn admins_upload_the_files_of_a_skill_everyone_reads_them() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(outside.path().join("shared-skill")).unwrap();
+    std::fs::write(outside.path().join("shared-skill/SKILL.md"), "---\nname: shared-skill\ndescription: From a clone.\n---\nx\n").unwrap();
+    let path = outside.path().to_path_buf();
+    let h = Harness::with_config(move |c| c.skills.paths = vec![path]);
+    h.project("shop");
+    let (admin, member) = h
+        .app
+        .with_server(|db| {
+            let a = db.create_user("root", "Root", None, Some("password1"), true)?;
+            let m = db.create_user("pm", "PM", None, Some("password1"), false)?;
+            db.set_membership("shop", m.id, ProjectRole::Member)?;
+            Ok((db.create_user_token(a.id, "t")?, db.create_user_token(m.id, "t")?))
+        })
+        .unwrap();
+    let r = &h.router;
+    let skill = "---\nname: owasp\ndescription: OWASP checks.\n---\nRun `scripts/scan.sh`.\n";
+    let (s, v, _) = call(r, "PUT", "/api/skills/owasp").bearer(&admin).json(json!({ "content": skill, "baseHash": "" })).send().await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // A script in a folder, and a binary file.
+    let (s, v, _) = call(r, "PUT", "/api/skills/owasp/files/scripts/scan.sh").bearer(&admin).bytes(b"#!/bin/sh\necho scan\n").send().await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["path"], "skills/owasp/scripts/scan.sh");
+    assert_eq!(std::fs::read_to_string(h.dir.path().join("skills/owasp/scripts/scan.sh")).unwrap(), "#!/bin/sh\necho scan\n");
+    let (s, _, _) =
+        call(r, "PUT", "/api/skills/owasp/files/logo.png").bearer(&admin).bytes(&[0x89, b'P', b'N', b'G', 0, 0xff]).send().await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Everyone with access sees the files; text as text, binary by its size.
+    let (_, v, _) = call(r, "GET", "/api/skills/owasp").bearer(&member).send().await;
+    assert_eq!(v["files"], json!(["SKILL.md", "logo.png", "scripts/scan.sh"]));
+    let (s, v, _) = call(r, "GET", "/api/skills/owasp/files/scripts/scan.sh").bearer(&member).send().await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["text"], "#!/bin/sh\necho scan\n");
+    let (_, v, _) = call(r, "GET", "/api/skills/owasp/files/logo.png").bearer(&member).send().await;
+    assert_eq!((v["size"].clone(), v["text"].clone()), (json!(6), Value::Null));
+
+    // Only administrators write; paths stay inside the skill; SKILL.md is the skill itself.
+    let (s, _, _) = call(r, "PUT", "/api/skills/owasp/files/x.txt").bearer(&member).bytes(b"x").send().await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    for bad in ["../evil.txt", "scripts/../../evil.txt", "a//b.txt", "./x.txt"] {
+        let (s, _, _) = call(r, "PUT", &format!("/api/skills/owasp/files/{bad}")).bearer(&admin).bytes(b"x").send().await;
+        assert!(s == StatusCode::BAD_REQUEST || s == StatusCode::NOT_FOUND, "{bad}: {s}");
+    }
+    assert!(!h.dir.path().join("skills/evil.txt").exists() && !h.dir.path().join("evil.txt").exists());
+    let (s, e, _) = call(r, "PUT", "/api/skills/owasp/files/SKILL.md").bearer(&admin).bytes(b"x").send().await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    let (s, e, _) = call(r, "PUT", "/api/skills/shared-skill/files/x.txt").bearer(&admin).bytes(b"x").send().await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "a skill from skills.paths is changed where it lives: {e}");
+    let big = vec![b'x'; 5 * 1024 * 1024 + 1];
+    let (s, _, _) = call(r, "PUT", "/api/skills/owasp/files/big.txt").bearer(&admin).bytes(&big).send().await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+
+    // A removed file takes its emptied folder along; the history keeps who did what.
+    let (s, _, _) = call(r, "DELETE", "/api/skills/owasp/files/scripts/scan.sh").bearer(&admin).send().await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!h.dir.path().join("skills/owasp/scripts").exists());
+    let (s, _, _) = call(r, "DELETE", "/api/skills/owasp/files/scripts/scan.sh").bearer(&admin).send().await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (_, hist, _) = call(r, "GET", "/api/agent-config/history?item=skill:owasp").bearer(&admin).send().await;
+    let rows: Vec<(String, Value, Value)> = hist
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["path"].as_str().unwrap().to_string(), c["before"].clone(), c["after"].clone()))
+        .collect();
+    assert_eq!(rows[0], ("skills/owasp/scripts/scan.sh".into(), json!("#!/bin/sh\necho scan\n"), Value::Null));
+    assert_eq!(rows[1], ("skills/owasp/logo.png".into(), Value::Null, json!("[6 bytes]")));
+    assert_eq!(rows.len(), 4, "SKILL.md, two uploads, one removal: {hist}");
+}

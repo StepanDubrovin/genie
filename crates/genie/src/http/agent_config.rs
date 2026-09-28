@@ -11,7 +11,8 @@ use std::collections::HashSet;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -33,6 +34,10 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/templates/{id}", get(template).put(put_template).delete(delete_template))
         .route("/templates/{id}/preview", post(preview))
         .route("/skills/{name}", get(skill).put(put_skill).delete(delete_skill))
+        .route(
+            "/skills/{name}/files/{*path}",
+            get(skill_file).put(put_skill_file).delete(delete_skill_file).layer(DefaultBodyLimit::max(SKILL_FILE_MAX + 1024)),
+        )
         .route("/mcp", get(mcp).put(put_mcp))
 }
 
@@ -494,6 +499,131 @@ async fn delete_skill(State(app): State<Arc<App>>, ctx: Ctx, Path(name): Path<St
         app.with_server(|db| db.record_config_change(&user, &t.item, &t.rel, before.as_deref(), None))?;
         let fresh = app.reload_agents();
         Ok(Ok(json!({ "ok": true, "problems": fresh.problems.iter().filter(|p| p.level == Level::Error).collect::<Vec<_>>() })))
+    })
+    .await?
+    .map(Json)
+}
+
+// --- supporting files of skills ---------------------------------------------------------
+
+/// The largest supporting file of a skill (scripts, references, templates).
+const SKILL_FILE_MAX: usize = 5 * 1024 * 1024;
+/// Text of a supporting file shown in the web and kept in the history; larger
+/// or binary files are shown and kept by their size.
+const SKILL_TEXT_MAX: usize = 256 * 1024;
+
+/// A supporting file of a skill: its directory, the file and the path people
+/// see. The path is relative, without `.` or `..`, and not `SKILL.md` (the
+/// skill itself); writing needs a skill in the data directory.
+fn skill_file_place(app: &App, name: &str, rel: &str, write: bool) -> ApiResult<(PathBuf, PathBuf, String)> {
+    let agents = app.agents();
+    let def = agents.skills.get(name).ok_or_else(|| not_found(format!("skill {name} not found")))?;
+    let parts: Vec<&str> = rel.split('/').collect();
+    let ok =
+        rel.len() <= 200 && parts.len() <= 6 && parts.iter().all(|p| !p.is_empty() && *p != "." && *p != ".." && !p.contains(['\\', '\0']));
+    if !ok {
+        return Err(ApiError::bad("a file of a skill has a relative path without `.` and `..`, at most 6 levels deep"));
+    }
+    if rel == "SKILL.md" {
+        return Err(ApiError::bad("SKILL.md is the skill itself: save it as the skill"));
+    }
+    if write && !def.dir.starts_with(app.data.join("skills")) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("skill {name} is in {}: change its files there", def.dir.display()),
+        ));
+    }
+    let shown = match def.dir.strip_prefix(&app.data) {
+        Ok(d) => format!("{}/{rel}", d.display()),
+        Err(_) => format!("{}/{rel}", def.dir.display()),
+    };
+    Ok((def.dir.clone(), def.dir.join(rel), shown))
+}
+
+/// Whether `path` (existing) stays inside `dir` once links are followed.
+fn inside(dir: &FsPath, path: &FsPath) -> bool {
+    matches!((dir.canonicalize(), path.canonicalize()), (Ok(d), Ok(p)) if p.starts_with(&d))
+}
+
+/// A file as the history keeps it: its text, or its size when it is binary or large.
+fn as_history(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(t) if bytes.len() <= SKILL_TEXT_MAX => t.to_string(),
+        _ => format!("[{} bytes]", bytes.len()),
+    }
+}
+
+async fn skill_file(State(app): State<Arc<App>>, ctx: Ctx, Path((name, rel)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    ctx.access(&app, None).await?;
+    app.blocking(move |app| {
+        let (dir, path, shown) = match skill_file_place(app, &name, &rel, false) {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(e)),
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) if inside(&dir, &path) => b,
+            _ => return Ok(Err(not_found(format!("{shown} not found")))),
+        };
+        let text = if bytes.len() <= SKILL_TEXT_MAX { String::from_utf8(bytes.clone()).ok() } else { None };
+        Ok(Ok(json!({ "path": shown, "size": bytes.len(), "text": text })))
+    })
+    .await?
+    .map(Json)
+}
+
+async fn put_skill_file(
+    State(app): State<Arc<App>>,
+    ctx: Ctx,
+    Path((name, rel)): Path<(String, String)>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let user = ctx.server_admin()?.login.clone();
+    if body.len() > SKILL_FILE_MAX {
+        return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, format!("a file of a skill is at most {} MB", SKILL_FILE_MAX >> 20)));
+    }
+    app.blocking(move |app| {
+        let (dir, path, shown) = match skill_file_place(app, &name, &rel, true) {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(e)),
+        };
+        let parent = path.parent().unwrap_or(&dir).to_path_buf();
+        std::fs::create_dir_all(&parent).map_err(|e| AppError::Internal(format!("{}: {e}", parent.display())))?;
+        if !inside(&dir, &parent) {
+            return Ok(Err(ApiError::bad(format!("{shown} leads out of the skill's directory"))));
+        }
+        let before = std::fs::read(&path).ok();
+        genie_core::vault::atomic_write(&path, &body)?;
+        let item = format!("skill:{name}");
+        app.with_server(|db| {
+            db.record_config_change(&user, &item, &shown, before.as_deref().map(as_history).as_deref(), Some(&as_history(&body)))
+        })?;
+        Ok(Ok(json!({ "ok": true, "path": shown, "size": body.len() })))
+    })
+    .await?
+    .map(Json)
+}
+
+async fn delete_skill_file(State(app): State<Arc<App>>, ctx: Ctx, Path((name, rel)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    let user = ctx.server_admin()?.login.clone();
+    app.blocking(move |app| {
+        let (dir, path, shown) = match skill_file_place(app, &name, &rel, true) {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(e)),
+        };
+        let before = match std::fs::read(&path) {
+            Ok(b) if inside(&dir, &path) => b,
+            _ => return Ok(Err(not_found(format!("{shown} not found")))),
+        };
+        std::fs::remove_file(&path).map_err(|e| AppError::Internal(format!("{shown}: {e}")))?;
+        // Folders the file leaves empty go too.
+        for d in path.ancestors().skip(1).take_while(|d| *d != dir) {
+            if std::fs::remove_dir(d).is_err() {
+                break;
+            }
+        }
+        let item = format!("skill:{name}");
+        app.with_server(|db| db.record_config_change(&user, &item, &shown, Some(&as_history(&before)), None))?;
+        Ok(Ok(json!({ "ok": true })))
     })
     .await?
     .map(Json)

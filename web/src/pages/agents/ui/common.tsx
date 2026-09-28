@@ -2,8 +2,18 @@
 // the raw file editor and the history of an item with rollback.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
-import { agentKeys, type ConfigChange, type ConfigKind, type Problem, useConfigHistory, useDeleteConfig, useSaveConfig } from "@/entities/agent-config";
+import { type ReactNode, useMemo, useRef, useState } from "react";
+import {
+  agentKeys,
+  type ConfigChange,
+  type ConfigKind,
+  type Problem,
+  problemLines,
+  refusalMessages,
+  useConfigHistory,
+  useDeleteConfig,
+  useSaveConfig,
+} from "@/entities/agent-config";
 import { ApiError } from "@/shared/api";
 import { timeAgo } from "@/shared/lib";
 import { Icon, Modal, useToast } from "@/shared/ui";
@@ -56,10 +66,65 @@ export function Badge({ children, tone }: { children: ReactNode; tone?: "accent"
   return <span className={`ag-badge${tone ? ` ${tone}` : ""}`}>{children}</span>;
 }
 
+/** A text editor with line numbers; the lines problems name are marked and listed. */
+function CodeArea({ value, onChange, marks, label }: { value: string; onChange: (v: string) => void; marks: Map<number, string[]>; label: string }) {
+  const area = useRef<HTMLTextAreaElement>(null);
+  const gutter = useRef<HTMLDivElement>(null);
+  const lines = value.split("\n");
+  const go = (line: number) => {
+    const el = area.current;
+    if (!el) return;
+    const start = lines.slice(0, line - 1).reduce((n, l) => n + l.length + 1, 0);
+    el.focus();
+    el.setSelectionRange(start, start + (lines[line - 1]?.length ?? 0));
+    el.scrollTop = Math.max(0, (line - 4) * (parseFloat(getComputedStyle(el).lineHeight) || 18));
+  };
+  return (
+    <>
+      <div className="code-area">
+        <div className="gutter" ref={gutter} aria-hidden="true">
+          {lines.map((_, i) => (
+            <div key={i} className={marks.has(i + 1) ? "bad" : undefined}>
+              {i + 1}
+            </div>
+          ))}
+        </div>
+        <textarea
+          ref={area}
+          className="mono code-edit"
+          rows={24}
+          wrap="off"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onScroll={(e) => {
+            if (gutter.current) gutter.current.scrollTop = e.currentTarget.scrollTop;
+          }}
+          spellCheck={false}
+          aria-label={label}
+        />
+      </div>
+      {marks.size > 0 && (
+        <ul className="code-marks" aria-label="Строки с проблемами">
+          {[...marks.entries()]
+            .sort((a, b) => a[0] - b[0])
+            .map(([line, messages]) => (
+              <li key={line}>
+                <button type="button" onClick={() => go(line)}>
+                  строка {line}
+                </button>
+                <span>{messages.join("; ")}</span>
+              </li>
+            ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
 /**
  * Edit a configuration file as text. The save is refused when the file changed
  * since it was opened (409) or when the change is invalid (422): the message
- * says what to do.
+ * says what to do, and the lines it (or a known problem) names are marked.
  */
 export function FileEditor({
   kind,
@@ -68,6 +133,7 @@ export function FileEditor({
   hint,
   initial,
   baseHash,
+  problems,
   onClose,
   onSaved,
 }: {
@@ -77,11 +143,14 @@ export function FileEditor({
   hint?: ReactNode;
   initial: string;
   baseHash: string | undefined;
+  /** Problems of the item as it is now. */
+  problems?: Problem[];
   onClose: () => void;
   onSaved?: () => void;
 }) {
   const [text, setText] = useState(initial);
   const [error, setError] = useState<{ text: string; stale: boolean }>();
+  const marks = useMemo(() => problemLines(text, [...(problems ?? []).map((p) => p.message), ...(error ? refusalMessages(error.text) : [])]), [text, problems, error]);
   const [busy, setBusy] = useState(false);
   const save = useSaveConfig();
   const qc = useQueryClient();
@@ -112,7 +181,7 @@ export function FileEditor({
       </div>
       <div className="mb">
         {hint && <div className="muted ag-hint">{hint}</div>}
-        <textarea className="mono code-edit" rows={24} value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} aria-label="Содержимое файла" />
+        <CodeArea value={text} onChange={setText} marks={marks} label="Содержимое файла" />
         {error && (
           <div className="auth-error" role="alert">
             {error.text}
@@ -157,6 +226,13 @@ export function itemTarget(item: string): { kind: ConfigKind; id: string; label:
   return { kind: "mcp", id: "", label: "MCP-подключения" };
 }
 
+/** Whether a change can be undone from the history: not the first mcp.json, nor a skill's supporting file (upload it again). */
+function restorable(c: ConfigChange): boolean {
+  const t = itemTarget(c.item);
+  if (t.kind === "skill" && !c.path.endsWith("/SKILL.md")) return false;
+  return !(c.before === undefined && t.kind === "mcp");
+}
+
 /** Changes of one item (or all of them) with a way back to any earlier version. */
 export function History({ item, admin }: { item?: string; admin: boolean }) {
   const history = useConfigHistory(item, admin);
@@ -199,7 +275,7 @@ export function History({ item, admin }: { item?: string; admin: boolean }) {
                   <pre className="bd view">{c.after ?? "— файл удалён —"}</pre>
                 </div>
               </div>
-              {!(c.before === undefined && itemTarget(c.item).kind === "mcp") && (
+              {restorable(c) && (
                 <button type="button" className="btn" onClick={() => restore(c)}>
                   Вернуть версию до этой правки
                 </button>

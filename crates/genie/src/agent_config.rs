@@ -628,6 +628,8 @@ fn parse_frontmatter(text: &str) -> Result<(Vec<(String, Fm)>, String), String> 
             return Err(format!("line {}: bad key {key:?}", i + 2));
         }
         let value = value.trim();
+        // The file's line of the key (the opening `---` is line 1).
+        let at = i + 2;
         i += 1;
         // Continuation lines: indented (or blank inside a block).
         let mut block: Vec<&str> = Vec::new();
@@ -652,19 +654,19 @@ fn parse_frontmatter(text: &str) -> Result<(Vec<(String, Fm)>, String), String> 
             Fm::Str(joined.trim().to_string())
         } else if value.is_empty() && !block.is_empty() {
             let mut items = Vec::new();
-            for b in &block {
+            for (n, b) in block.iter().enumerate() {
                 let b = b.trim();
                 if b.is_empty() || b.starts_with('#') {
                     continue;
                 }
-                let Some(item) = b.strip_prefix('-') else { return Err(format!("{key}: expected `- item` lines")) };
+                let Some(item) = b.strip_prefix('-') else { return Err(format!("line {}: {key}: expected `- item` lines", at + 1 + n)) };
                 items.push(unquote(item));
             }
             Fm::List(items.into_iter().filter(|s| !s.is_empty()).collect())
         } else if !block.is_empty() {
-            return Err(format!("{key}: unexpected indented lines after a value"));
+            return Err(format!("line {}: {key}: unexpected indented lines after a value", at + 1));
         } else if let Some(inner) = value.strip_prefix('[') {
-            let Some(inner) = inner.strip_suffix(']') else { return Err(format!("{key}: the list is not closed with ]")) };
+            let Some(inner) = inner.strip_suffix(']') else { return Err(format!("line {at}: {key}: the list is not closed with ]")) };
             Fm::List(flow_list(inner))
         } else {
             Fm::Str(unquote(value))
@@ -1961,6 +1963,13 @@ mod tests {
         assert_eq!(get("description"), Fm::Str("folded text".into()));
         assert_eq!(body, "Body\n");
         assert!(parse_frontmatter("---\ntitle: x\n").unwrap_err().contains("not closed"));
+        // Errors name the file's line (the opening `---` is line 1), for the web's editor.
+        assert_eq!(
+            parse_frontmatter("---\ntitle: x\n  more\n---\n").unwrap_err(),
+            "line 3: title: unexpected indented lines after a value"
+        );
+        assert_eq!(parse_frontmatter("---\na: b\nmcp:\n  - x\n  y\n---\n").unwrap_err(), "line 5: mcp: expected `- item` lines");
+        assert_eq!(parse_frontmatter("---\nallow: [a, b\n---\n").unwrap_err(), "line 2: allow: the list is not closed with ]");
         assert_eq!(Fm::Str("edit, write".into()).list(), vec!["edit", "write"]);
     }
 

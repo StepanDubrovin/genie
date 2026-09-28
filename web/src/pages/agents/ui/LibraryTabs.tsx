@@ -14,9 +14,11 @@ import {
   useMcpCalls,
   useMcpConfig,
   useSkill,
+  useSkillFile,
+  useSkillFiles,
 } from "@/entities/agent-config";
-import { plural, timeAgo } from "@/shared/lib";
-import { ConfirmDialog, Icon, Markdown } from "@/shared/ui";
+import { bytes, plural, timeAgo } from "@/shared/lib";
+import { ConfirmDialog, Icon, Markdown, Modal } from "@/shared/ui";
 import { Badge, FileEditor, History, Problems, Section, useAction } from "./common.tsx";
 
 export function SkillsTab({ cfg, selected, onSelect }: { cfg: Catalogue; selected?: string; onSelect: (name: string) => void }) {
@@ -98,15 +100,7 @@ function SkillPane({ name, cfg }: { name: string; cfg: Catalogue }) {
             <Markdown text={body} />
           </div>
         </Section>
-        {d.files.length > 1 && (
-          <Section title="Файлы">
-            <ul className="ag-files mono">
-              {d.files.map((f) => (
-                <li key={f}>{f}</li>
-              ))}
-            </ul>
-          </Section>
-        )}
+        <SkillFiles name={d.skill.name} files={d.files} canEdit={d.admin && d.editable} />
         {d.admin && (
           <Section title="История">
             <History item={`skill:${d.skill.name}`} admin={d.admin} />
@@ -131,6 +125,114 @@ function SkillPane({ name, cfg }: { name: string; cfg: Catalogue }) {
         </ConfirmDialog>
       )}
     </>
+  );
+}
+
+/** The skill's supporting files (scripts, references, templates its instructions name). */
+function SkillFiles({ name, files, canEdit }: { name: string; files: string[]; canEdit: boolean }) {
+  const others = files.filter((f) => f !== "SKILL.md");
+  const [open, setOpen] = useState<string>();
+  const [removing, setRemoving] = useState<string>();
+  const [folder, setFolder] = useState("");
+  const [busy, setBusy] = useState(false);
+  const { upload, remove } = useSkillFiles();
+  const act = useAction();
+  if (!others.length && !canEdit) return null;
+  const put = async (list: File[]) => {
+    if (!list.length) return;
+    const dir = folder.trim().replace(/^\/+|\/+$/g, "");
+    setBusy(true);
+    await act(
+      async () => {
+        for (const f of list) await upload(name, dir ? `${dir}/${f.name}` : f.name, f);
+      },
+      list.length === 1 ? `Загружен ${list[0].name}` : `Загружено файлов: ${list.length}`,
+    );
+    setBusy(false);
+  };
+  const aside = canEdit ? (
+    <div className="ag-upload">
+      <input className="ag-select" value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="в папку, например scripts" aria-label="Папка для файлов" />
+      <label className={`btn${busy ? " disabled" : ""}`}>
+        <Icon.plus size={13} />
+        {busy ? "Загружаю…" : "Загрузить"}
+        <input
+          type="file"
+          multiple
+          hidden
+          disabled={busy}
+          aria-label="Файлы навыка"
+          onChange={(e) => {
+            const list = Array.from(e.target.files ?? []);
+            e.target.value = "";
+            void put(list);
+          }}
+        />
+      </label>
+    </div>
+  ) : undefined;
+  return (
+    <Section title="Файлы" aside={aside}>
+      {others.length ? (
+        <ul className="ag-file-list" aria-label="Файлы навыка">
+          {others.map((f) => (
+            <li key={f}>
+              <button type="button" className="ag-file" onClick={() => setOpen(f)}>
+                {f}
+              </button>
+              {canEdit && (
+                <button type="button" className="icon-btn" aria-label={`Удалить ${f}`} onClick={() => setRemoving(f)}>
+                  <Icon.trash size={13} />
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted ag-empty">Кроме SKILL.md файлов нет. Сюда кладут скрипты, справочники и шаблоны, на которые ссылаются инструкции навыка (до 5 МБ каждый).</p>
+      )}
+      {open && <SkillFileView name={name} path={open} onClose={() => setOpen(undefined)} />}
+      {removing && (
+        <ConfirmDialog
+          title={`Удалить ${removing}?`}
+          confirmLabel="Удалить"
+          danger
+          onClose={() => setRemoving(undefined)}
+          onConfirm={() => {
+            const f = removing;
+            setRemoving(undefined);
+            void act(() => remove(name, f), "Файл удалён");
+          }}
+        >
+          Файл удаляется из каталога навыка, опустевшая папка — вместе с ним.
+        </ConfirmDialog>
+      )}
+    </Section>
+  );
+}
+
+function SkillFileView({ name, path, onClose }: { name: string; path: string; onClose: () => void }) {
+  const f = useSkillFile(name, path);
+  return (
+    <Modal label={path} onClose={onClose} wide>
+      <div className="mh">
+        <Icon.file size={13} />
+        <span className="mono">{path}</span>
+        <span className="grow" />
+        <button type="button" className="icon-btn" onClick={onClose} aria-label="Закрыть">
+          <Icon.close />
+        </button>
+      </div>
+      <div className="mb">
+        {!f.data ? (
+          <p className="muted">{f.error ? f.error.message : "Загрузка…"}</p>
+        ) : f.data.text !== null ? (
+          <pre className="ag-file-text">{f.data.text}</pre>
+        ) : (
+          <p className="muted">Двоичный или большой файл ({bytes(f.data.size)}): здесь его не показать.</p>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -275,6 +377,7 @@ export function McpTab({ cfg }: { cfg: Catalogue }) {
           }
           initial={d.file.content ?? MCP_EXAMPLE}
           baseHash={d.file.hash}
+          problems={d.problems}
           onClose={() => setEditing(false)}
         />
       )}

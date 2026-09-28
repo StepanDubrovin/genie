@@ -202,6 +202,7 @@ function TemplatePane({ id, cfg }: { id: string; cfg: Catalogue }) {
           hint={hasFile ? undefined : "Файла ещё нет: сохранение создаст шаблон в каталоге данных вместо встроенного."}
           initial={hasFile ? (d.file.content ?? "") : (d.builtin ?? JSON.stringify(templateJson(t), null, 2))}
           baseHash={hasFile ? d.file.hash : ""}
+          problems={d.problems}
           onClose={() => setMode(undefined)}
         />
       )}

@@ -11,8 +11,11 @@ import {
   layoutTeam,
   liveTeam,
   newRoleFile,
+  problemLines,
   reached,
+  refusalMessages,
   type RoleDef,
+  setBody,
   setFrontmatterKey,
   splitFrontmatter,
   type TeamDef,
@@ -69,6 +72,29 @@ test("a role file field is replaced, added or removed; the rest stays", () => {
   assert.ok(fm);
   assert.equal(fm.body, "You review security.\n", "the prompt is untouched");
   assert.equal(fm.lines.filter((l) => l.startsWith("title:")).length, 1);
+});
+
+test("problems point at the lines of the file they are about", () => {
+  const role = "---\ntitle: QA\n  bad: indent\nfiles: sometimes\nallow: [fly]\n---\nBody\n";
+  const marks = problemLines(role, ["line 3: unexpected indentation", "`files: sometimes`: expected write, read or none", "allow: unknown permission `fly`", "role ghost not found"]);
+  assert.deepEqual([...marks.keys()], [3, 4, 5], "by line number, then by the field a message starts with; the rest has no line");
+  assert.deepEqual(marks.get(4), ["`files: sometimes`: expected write, read or none"]);
+  const template = '{\n  "title": "Pair",\n  "stage": "later",\n  "members": []\n}\n';
+  assert.deepEqual([...problemLines(template, ["`stage: later`: expected refinement or delivery"]).keys()], [3], "a JSON key");
+  assert.deepEqual([...problemLines(template, ["expected `,` or `}` at line 4 column 3"]).keys()], [4]);
+  assert.equal(problemLines(template, ["line 99: x"]).size, 0, "a line the text does not have");
+  const refused = refusalMessages("not saved: role:reviewer: line 3: title: unexpected indented lines after a value; team:pair: `stage: later`: expected refinement or delivery");
+  assert.deepEqual(refused, ["line 3: title: unexpected indented lines after a value", "`stage: later`: expected refinement or delivery"]);
+  assert.deepEqual([...problemLines(role, refused).keys()], [3], "a refused save's messages name lines too");
+});
+
+test("the prompt of a role file is replaced without touching its settings", () => {
+  const t = setBody(FILE, "You review *security*.\n\nOnly security.\n\n\n");
+  assert.equal(t.split("---\n")[1], FILE.split("---\n")[1], "the frontmatter stays as it was");
+  assert.ok(t.endsWith("---\nYou review *security*.\n\nOnly security.\n"), t);
+  assert.equal(setBody("---\nbase: tester\n---\nOld.\n", ""), "---\nbase: tester\n---\n", "an empty prompt: the built-in (or the parent's) applies");
+  assert.equal(setBody("Just a prompt.\n", "New."), "New.\n", "a file without frontmatter stays without");
+  assert.equal(setBody("---\n---\n", "Body"), "---\n---\nBody\n");
 });
 
 test("a file without frontmatter gets one; an override may be frontmatter only", () => {

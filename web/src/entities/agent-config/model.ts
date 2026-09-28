@@ -342,6 +342,49 @@ export function setFrontmatterKey(text: string, key: string, value: string | str
   return head + fm.body;
 }
 
+/**
+ * The lines of a file that problems point at (1-based line → messages): the
+ * line a message names (`line 3: …`, `… at line 5 column 2`), or else the line
+ * of the field it starts with (`files: x`, "`stage: y`: …") — a frontmatter
+ * field or a JSON key.
+ */
+export function problemLines(text: string, messages: string[]): Map<number, string[]> {
+  const lines = text.split("\n");
+  const out = new Map<number, string[]>();
+  const add = (n: number, m: string) => {
+    if (n >= 1 && n <= lines.length) out.set(n, [...(out.get(n) ?? []), m]);
+  };
+  for (const m of messages) {
+    const at = /\bline (\d+)/.exec(m);
+    if (at) {
+      add(Number(at[1]), m);
+      continue;
+    }
+    const key = /^`?([A-Za-z][\w-]*)(?::|`)/.exec(m)?.[1];
+    if (!key) continue;
+    const i = lines.findIndex((l) => l.startsWith(`${key}:`) || l.trimStart().startsWith(`"${key}":`) || l.trimStart().startsWith(`"${key}" :`));
+    if (i >= 0) add(i + 1, m);
+  }
+  return out;
+}
+
+/** The messages of a refused save (`not saved: role:x: line 3: …; team:y: …`) without the items they are about. */
+export function refusalMessages(text: string): string[] {
+  return text
+    .replace(/^not saved:\s*/, "")
+    .split("; ")
+    .map((m) => m.replace(/^(?:role|team|skill|mcp)(?::[\w.-]+)?:\s*/, ""));
+}
+
+/** Replace the body (the prompt) of a role file, keeping its frontmatter as it is. */
+export function setBody(text: string, body: string): string {
+  const fm = splitFrontmatter(text);
+  const b = body.replace(/\s+$/, "");
+  if (!fm) return b ? `${b}\n` : "";
+  const head = fm.lines.length ? `---\n${fm.lines.join("\n")}\n---\n` : "---\n---\n";
+  return b ? `${head}${b}\n` : head;
+}
+
 /** A new role file: a class (or a role to extend), a title and a prompt. */
 export function newRoleFile(o: { title: string; description: string; base?: string; extends?: string; prompt: string }): string {
   let text = `---\n---\n${o.prompt.trim()}\n`;

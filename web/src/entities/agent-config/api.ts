@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { request } from "@/shared/api";
+import { ApiError, request } from "@/shared/api";
 import type { Catalogue, ConfigChange, McpCall, McpCheck, McpDetail, Preview, RoleDetail, SkillDetail, TemplateDetail } from "./model.ts";
 
 export const agentKeys = {
@@ -31,6 +31,35 @@ export function useSkill(name: string | undefined) {
 
 export function useMcpConfig() {
   return useQuery({ queryKey: agentKeys.mcp, queryFn: () => request<McpDetail>("GET", "/api/mcp") });
+}
+
+const skillFileUrl = (name: string, path: string) => `/api/skills/${encodeURIComponent(name)}/files/${path.split("/").map(encodeURIComponent).join("/")}`;
+
+/** A supporting file of a skill: its text, or only its size when it is binary or large. */
+export function useSkillFile(name: string, path: string | undefined) {
+  return useQuery({
+    queryKey: ["agent-config", "skill-file", name, path ?? ""],
+    queryFn: () => request<{ path: string; size: number; text: string | null }>("GET", skillFileUrl(name, path ?? "")),
+    enabled: !!path,
+  });
+}
+
+/** Put a file into a skill's directory (administrators; up to 5 MB). */
+export function useSkillFiles() {
+  const qc = useQueryClient();
+  const done = () => qc.invalidateQueries({ queryKey: agentKeys.all });
+  return {
+    upload: async (name: string, path: string, file: Blob) => {
+      const res = await fetch(skillFileUrl(name, path), { method: "PUT", headers: { "x-genie": "1", "content-type": "application/octet-stream" }, body: file });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new ApiError(data.error ?? `${res.status} ${res.statusText}`, res.status);
+      await done();
+    },
+    remove: async (name: string, path: string) => {
+      await request("DELETE", skillFileUrl(name, path));
+      await done();
+    },
+  };
 }
 
 /** The project's latest tool calls through the MCP gateway, newest first. */
