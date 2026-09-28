@@ -59,16 +59,18 @@ impl Live {
         panic!("job {id} did not finish: {:?}", turns.iter().map(|t| (&t.agent, &t.status, &t.error, &t.log)).collect::<Vec<_>>());
     }
 
-    /// What the stand-in harness recorded for a job: its directory, rules, MCP mode and arguments.
+    /// What the stand-in harness recorded for a job: its directory, rules, MCP mode,
+    /// the MCP secrets in its environment and its arguments.
     fn recorded(&self, id: i64) -> Recorded {
         let text = std::fs::read_to_string(self.dir.path().join("rec").join(format!("job-{id}"))).unwrap();
         let mut lines = text.lines();
         let cwd = PathBuf::from(lines.next().unwrap());
         let policy = lines.next().unwrap().strip_prefix("policy=").unwrap().to_string();
         let mcp_mode = lines.next().unwrap().strip_prefix("mcpmode=").unwrap().to_string();
+        let secrets = lines.next().unwrap().strip_prefix("secrets=").unwrap().to_string();
         let rest: Vec<&str> = lines.collect();
         let args: Vec<String> = rest.join("\n").split("\narg=").map(|a| a.trim_start_matches("arg=").to_string()).collect();
-        Recorded { cwd, policy: PathBuf::from(policy), mcp_mode, args }
+        Recorded { cwd, policy: PathBuf::from(policy), mcp_mode, secrets, args }
     }
 }
 
@@ -76,6 +78,8 @@ struct Recorded {
     cwd: PathBuf,
     policy: PathBuf,
     mcp_mode: String,
+    /// `<docs token>,<wiki token>` as the agent's environment has them.
+    secrets: String,
     args: Vec<String>,
 }
 
@@ -108,10 +112,17 @@ async fn live(max_attempts: u32, adapter: bool) -> Live {
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
 
-    // The server's library: a role, a skill, MCP connections.
+    // The server's library: a role, a skill, MCP connections — one behind the gateway,
+    // one handed to the harness (`gateway: false`) — whose secrets the server has.
+    static SECRETS: std::sync::Once = std::sync::Once::new();
+    // SAFETY: set before the servers of this binary start, always to the same values.
+    SECRETS.call_once(|| unsafe {
+        std::env::set_var("GENIE_TEST_DOCS_TOKEN", "d0cs");
+        std::env::set_var("GENIE_TEST_WIKI_TOKEN", "w1ki");
+    });
     write(
         &data.join("agents/auditor.md"),
-        "---\ntitle: Аудитор\ndescription: Audits changes.\nbase: reviewer\nfiles: write\ndenyCommands: [\"git push*\"]\nskills: [owasp, not-installed]\nmcp: [\"docs:search_*\"]\n---\nYou audit.\n",
+        "---\ntitle: Аудитор\ndescription: Audits changes.\nbase: reviewer\nfiles: write\ndenyCommands: [\"git push*\"]\nskills: [owasp, not-installed]\nmcp: [\"docs:search_*\", wiki]\n---\nYou audit.\n",
     );
     write(
         &data.join("agents/advisor.md"),
@@ -122,7 +133,8 @@ async fn live(max_attempts: u32, adapter: bool) -> Live {
     write(
         &data.join("mcp.json"),
         &json!({ "mcpServers": {
-            "docs": { "description": "Search the docs", "command": "docs-mcp", "args": ["--home", "${env:HOME}"], "env": { "DOCS_HOME": "${env:HOME}" } },
+            "docs": { "description": "Search the docs", "command": "docs-mcp", "args": ["--home", "${env:HOME}"], "env": { "DOCS_TOKEN": "${env:GENIE_TEST_DOCS_TOKEN}" } },
+            "wiki": { "command": "wiki-mcp", "args": ["--home", "${env:HOME}"], "env": { "WIKI_TOKEN": "${env:GENIE_TEST_WIKI_TOKEN}" }, "gateway": false },
             "secret": { "url": "https://secret.example/mcp", "headers": { "Authorization": "Bearer ${env:HOME}" } }
         }})
         .to_string(),
@@ -132,7 +144,7 @@ async fn live(max_attempts: u32, adapter: bool) -> Live {
     let mut cfg = Config::load(data).unwrap();
     cfg.port = listener.local_addr().unwrap().port();
     std::fs::create_dir_all(data.join("rec")).unwrap();
-    let script = r#"out="$GENIE_REC/$GENIE_AGENT_NAME"; { pwd -P; echo "policy=${GENIE_POLICY:-}"; echo "mcpmode=${PI_MCP_CONFIG_MODE:-}"; printf 'arg=%s\n' "$@"; } > "$out"; "$GENIE_BIN" agent output '{"summary":"ok"}'"#;
+    let script = r#"out="$GENIE_REC/$GENIE_AGENT_NAME"; { pwd -P; echo "policy=${GENIE_POLICY:-}"; echo "mcpmode=${PI_MCP_CONFIG_MODE:-}"; echo "secrets=${GENIE_TEST_DOCS_TOKEN-unset},${GENIE_TEST_WIKI_TOKEN-unset}"; printf 'arg=%s\n' "$@"; } > "$out"; "$GENIE_BIN" agent output '{"summary":"ok"}'"#;
     let mut command = RuntimeConfig::default().command;
     command[0] = vec!["bash".into(), "-c".into(), script.into(), "harness".into()];
     cfg.runtime.command = command;
@@ -184,21 +196,22 @@ async fn the_harness_gets_the_roles_skills_mcp_and_rules_and_jobs_work_where_the
     let policy: Value = serde_json::from_str(&std::fs::read_to_string(&r.policy).unwrap()).unwrap();
     assert_eq!(
         policy,
-        json!({ "role": "auditor", "files": "read", "denyCommands": ["git push*"], "mcp": { "docs": ["search_*"] } }),
+        json!({ "role": "auditor", "files": "read", "denyCommands": ["git push*"], "mcp": { "docs": ["search_*"], "wiki": null } }),
         "a read-only workspace narrows the role's `files`"
     );
     let mcp_file = PathBuf::from(r.values("--mcp-config")[0]);
     let mcp: Value = serde_json::from_str(&std::fs::read_to_string(&mcp_file).unwrap()).unwrap();
+    let gateway = format!("http://127.0.0.1:{}/api/mcp-gateway/docs", l.app.cfg.port);
     assert_eq!(
         mcp,
-        json!({ "mcpServers": { "docs": {
-            "command": "docs-mcp",
-            "args": ["--home", home],
-            "env": { "DOCS_HOME": home },
-            "includeTools": ["search_*"]
-        }}}),
-        "only granted connections, secrets resolved, genie's own fields dropped, tool patterns as includeTools"
+        json!({ "mcpServers": {
+            "docs": { "url": gateway, "headers": { "Authorization": "Bearer ${GENIE_TOKEN}" } },
+            "wiki": { "command": "wiki-mcp", "args": ["--home", home], "env": { "WIKI_TOKEN": "w1ki" } }
+        }}),
+        "only granted connections: through the gateway its address and the agent's token, no secrets; \
+         handed over directly, the entry with its secrets resolved and genie's own fields dropped"
     );
+    assert_eq!(r.secrets, "unset,w1ki", "the gateway's secrets stay with the server; a direct connection's the agent needs");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

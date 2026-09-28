@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { request } from "@/shared/api";
-import type { Catalogue, ConfigChange, McpDetail, Preview, RoleDetail, SkillDetail, TemplateDetail } from "./model.ts";
+import type { Catalogue, ConfigChange, McpCall, McpCheck, McpDetail, Preview, RoleDetail, SkillDetail, TemplateDetail } from "./model.ts";
 
 export const agentKeys = {
   all: ["agent-config"] as const,
@@ -31,6 +31,20 @@ export function useSkill(name: string | undefined) {
 
 export function useMcpConfig() {
   return useQuery({ queryKey: agentKeys.mcp, queryFn: () => request<McpDetail>("GET", "/api/mcp") });
+}
+
+/** The project's latest tool calls through the MCP gateway, newest first. */
+export function useMcpCalls(project: string) {
+  return useQuery({
+    queryKey: ["mcp-calls", project],
+    queryFn: () => request<McpCall[]>("GET", "/api/mcp/calls?limit=100"),
+    refetchInterval: 15_000,
+  });
+}
+
+/** Start a connection as agents would get it and list its tools (administrators). */
+export function checkMcp(id: string) {
+  return request<McpCheck>("POST", `/api/mcp/${encodeURIComponent(id)}/check`);
 }
 
 /** Changes made through the server (administrators only). */

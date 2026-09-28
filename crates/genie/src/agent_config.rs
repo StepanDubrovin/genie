@@ -412,6 +412,10 @@ pub struct McpServer {
     pub transport: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub projects: Option<Vec<String>>,
+    /// Agents reach it through the genie gateway (default), which keeps its
+    /// secrets and records the calls; `"gateway": false` hands the harness the
+    /// entry itself.
+    pub gateway: bool,
     /// The entry as the harness gets it (without genie's own fields); may hold
     /// `${env:NAME}` references, so it is never serialised for the web.
     #[serde(skip)]
@@ -421,6 +425,31 @@ pub struct McpServer {
 impl McpServer {
     pub fn available_in(&self, project: &str) -> bool {
         self.projects.as_ref().is_none_or(|p| p.iter().any(|x| x == project))
+    }
+
+    /// The environment variables the entry refers to (`${env:NAME}`).
+    pub fn env_refs(&self) -> Vec<String> {
+        fn walk(v: &Value, out: &mut Vec<String>) {
+            match v {
+                Value::String(s) => {
+                    let mut rest = s.as_str();
+                    while let Some(start) = rest.find("${env:") {
+                        let after = &rest[start + 6..];
+                        let Some(end) = after.find('}') else { break };
+                        out.push(after[..end].to_string());
+                        rest = &after[end + 1..];
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+                Value::Object(o) => o.values().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.config, &mut out);
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// The entry with `${env:NAME}` replaced from the server's environment.
@@ -1481,9 +1510,18 @@ impl AgentConfig {
                                 problem(Level::Error, item, Some("mcp.json".into()), e);
                                 continue;
                             }
+                            let gateway = match o.get("gateway") {
+                                None => true,
+                                Some(Value::Bool(b)) => *b,
+                                Some(_) => {
+                                    problem(Level::Error, item, Some("mcp.json".into()), "`gateway` is true or false".into());
+                                    continue;
+                                }
+                            };
                             let mut config = o.clone();
                             config.remove("description");
                             config.remove("projects");
+                            config.remove("gateway");
                             mcp.insert(
                                 id.clone(),
                                 McpServer {
@@ -1491,6 +1529,7 @@ impl AgentConfig {
                                     description: opt_str(o, "description").unwrap_or_default(),
                                     transport: transport.into(),
                                     projects,
+                                    gateway,
                                     config: Value::Object(config),
                                 },
                             );
@@ -1740,6 +1779,24 @@ impl AgentConfig {
     /// The orchestrator's role (always present: it is built in).
     pub fn orchestrator(&self) -> Option<&RoleDef> {
         self.roles.get(ORCHESTRATOR)
+    }
+
+    /// Environment variables that hold the secrets of connections agents reach
+    /// through the gateway: agent processes do not get them. Common variables a
+    /// connection may use for paths (HOME, PATH…) stay.
+    pub fn mcp_secret_vars(&self) -> Vec<String> {
+        const KEEP: &[&str] = &["HOME", "PATH", "USER", "LOGNAME", "SHELL", "PWD", "LANG", "LANGUAGE", "TMPDIR", "TERM", "TZ"];
+        let direct: Vec<String> = self.mcp.values().filter(|s| !s.gateway).flat_map(McpServer::env_refs).collect();
+        let mut out: Vec<String> = self
+            .mcp
+            .values()
+            .filter(|s| s.gateway)
+            .flat_map(McpServer::env_refs)
+            .filter(|v| !KEEP.contains(&v.as_str()) && !v.starts_with("LC_") && !direct.contains(v))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// MCP connections a role may use in a project.

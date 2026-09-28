@@ -4,6 +4,8 @@
 .agents .seg { margin-left: 4px; overflow-x: auto; }
 
 .ag-page { padding: 24px 40px 48px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; min-height: 0; }
+/* The page scrolls; its parts keep their height (a table that scrolls sideways would shrink). */
+.ag-page > * { flex-shrink: 0; }
 .ag-page-head { display: flex; align-items: flex-start; gap: 16px; }
 .ag-page-head p { margin: 0; flex: 1; line-height: 1.55; }
 .ag-banner { padding: 12px 28px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
@@ -99,6 +101,25 @@ fieldset:disabled .ag-perm { cursor: default; }
 .ag-table th { text-align: left; font-weight: 500; color: var(--muted); padding: 8px 12px; background: var(--bg-sunken); border-bottom: 1px solid var(--line); white-space: nowrap; }
 .ag-table td { padding: 8px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--text-body); }
 .ag-table tr:last-child td { border-bottom: 0; }
+.ag-cell-action { width: 1%; white-space: nowrap; text-align: right; }
+.ag-how { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ag-select { height: 28px; max-width: 100%; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bg-panel); color: var(--text-2); font-size: 12px; }
+
+/* MCP: a connection check and the calls through the gateway */
+.ag-check-row td { background: var(--bg-sunken); }
+.ag-check { display: flex; flex-direction: column; gap: 10px; }
+.ag-check > .ag-badge { align-self: flex-start; }
+.ag-check-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ag-check.bad pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 11.5px/1.5 var(--mono); color: var(--text-2); max-height: 240px; overflow: auto; }
+.ag-tools { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.ag-tools li { display: grid; grid-template-columns: minmax(120px, max-content) minmax(0, 1fr) auto; gap: 12px; align-items: baseline; }
+.ag-tools .d { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-tools .who { color: var(--accent-text); font-size: 12px; text-align: right; }
+.ag-tools .who.none { color: var(--muted); }
+.ag-calls td:first-child { white-space: nowrap; color: var(--muted); }
+.ag-args { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.ag-call-error { margin-top: 4px; max-width: 360px; overflow-wrap: anywhere; }
+
 .ag-rel { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .ag-rel::before { content: ""; width: 14px; height: 2px; border-radius: 1px; background: var(--muted); }
 .ag-rel.handoff::before { background: var(--accent-2); } .ag-rel.returns::before { background: var(--amber); } .ag-rel.consults::before { background: var(--violet); }

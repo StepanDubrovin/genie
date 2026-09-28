@@ -11,6 +11,7 @@ pub mod config;
 pub mod engine;
 pub mod http;
 pub mod knowledge;
+pub mod mcp_gateway;
 pub mod notify;
 pub mod questions;
 pub mod runtime;

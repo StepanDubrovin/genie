@@ -84,6 +84,43 @@ export interface McpServer {
   description: string;
   transport: "stdio" | "http";
   projects?: string[];
+  /** Agents reach it through the genie gateway; `false`: the harness gets the entry itself. */
+  gateway: boolean;
+}
+
+/** A connection started as agents would get it: its tools, or why it does not start. */
+export interface McpCheck {
+  ok: boolean;
+  ms: number;
+  error?: string;
+  serverInfo?: { name?: string; version?: string } | null;
+  protocolVersion?: string | null;
+  instructions?: string | null;
+  tools?: { name: string; description?: string | null }[];
+}
+
+/** A tool call through the gateway: an `mcp.called` event of the project's journal. */
+export interface McpCall {
+  id: number;
+  at: string;
+  actor: string;
+  actorRole: string;
+  /** The team (task) of a team member. */
+  subject?: string;
+  payload: { server: string; tool: string; ok: boolean; ms: number; role: string; args?: string; error?: string; refused?: boolean; job?: number };
+}
+
+/** `*` matches any text, `?` one character (as the gateway matches tool grants). */
+export function globMatch(pattern: string, text: string): boolean {
+  const re = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${re}$`, "s").test(text);
+}
+
+/** Roles that may use a tool of a connection: granted all of it (`server`, `*`) or a matching `server:pattern`. */
+export function toolUsers(roles: RoleDef[], server: string, tool: string): string[] {
+  return roles
+    .filter((r) => r.mcp.some((g) => g === "*" || g === server || (g.startsWith(`${server}:`) && globMatch(g.slice(server.length + 1), tool))))
+    .map((r) => r.id);
 }
 
 export interface Problem {
@@ -98,6 +135,8 @@ export interface Catalogue {
   admin: boolean;
   /** pi loads pi-mcp-adapter, so MCP connections reach the agents. */
   mcpAdapter: boolean;
+  /** Agents reach MCP connections through the genie gateway (`runtime.mcpGateway`). */
+  mcpGateway: boolean;
   roles: RoleDef[];
   teams: TeamDef[];
   skills: SkillDef[];

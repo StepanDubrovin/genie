@@ -79,6 +79,13 @@ pub fn start(app: &Arc<App>) {
         eprintln!("genie runtime: recovery failed: {e}");
     }
     crate::sessions::recover(app);
+    let gateway = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            gateway.mcp.close_idle(crate::mcp_gateway::IDLE);
+        }
+    });
     if app.cfg.runtime.live_sessions()
         && let Err(e) = crate::sessions::write_extension(app)
     {
@@ -306,7 +313,7 @@ fn member_workspace(app: &App, project: &Project, role: &RoleDef, team_cwd: &str
 }
 
 /// `<data>/workspaces/<project>/<name>`, created on first use.
-fn project_workspace_dir(app: &App, slug: &str, name: &str) -> PathBuf {
+pub(crate) fn project_workspace_dir(app: &App, slug: &str, name: &str) -> PathBuf {
     let d = app.data.join("workspaces").join(slug).join(name);
     let _ = std::fs::create_dir_all(&d);
     d
@@ -365,7 +372,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 team: None,
                 task: None,
                 job: None,
-                kit: kit(&agents, slug, &def, def.files, &cwd),
+                kit: kit(app, &agents, slug, &def, def.files, &cwd),
                 cwd,
                 session_id: format!("{slug}-orchestrator"),
                 model,
@@ -399,7 +406,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 team: Some(team.clone()),
                 task: Some(t.task.clone()),
                 job: None,
-                kit: kit(&agents, slug, &def, def.files, &cwd),
+                kit: kit(app, &agents, slug, &def, def.files, &cwd),
                 cwd,
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,
@@ -448,7 +455,7 @@ fn prepare_job(app: &App, project: &Project, j: &Job, turn: i64) -> AppResult<Pr
         team: None,
         task: j.task.clone(),
         job: Some(j.id),
-        kit: kit(&agents, &project.slug, &def, place.files, &place.cwd),
+        kit: kit(app, &agents, &project.slug, &def, place.files, &place.cwd),
         cwd: place.cwd,
         // A job starts fresh on each attempt: no hidden state between retries.
         session_id: format!("{}-job-{}-{}", project.slug, j.id, j.attempts + 1),
@@ -616,9 +623,16 @@ pub(crate) fn agent_command(
         // Keep the TypeScript pi extension (if installed) out of server-run agents.
         .env("GENIE_ROLE", "off")
         .env_remove("GENIE_DIR");
+    // The secrets of connections behind the gateway stay with the server.
+    if app.cfg.runtime.mcp_gateway {
+        for var in app.agents().mcp_secret_vars() {
+            cmd.env_remove(var);
+        }
+    }
     for (k, v) in &app.cfg.runtime.env {
         cmd.env(k, v);
     }
+    app.mcp.place(&crate::mcp_gateway::agent_key(project, who.team, who.name), cwd);
     cmd
 }
 
@@ -657,7 +671,7 @@ pub(crate) fn policy(agents: &AgentConfig, project: &str, role: &RoleDef, files:
 }
 
 /// The kit of an agent working in `cwd`.
-pub(crate) fn kit(agents: &AgentConfig, project: &str, role: &RoleDef, files: FileAccess, cwd: &Path) -> Kit {
+pub(crate) fn kit(app: &App, agents: &AgentConfig, project: &str, role: &RoleDef, files: FileAccess, cwd: &Path) -> Kit {
     let mut skills: Vec<String> =
         role.skills.iter().flatten().filter_map(|name| agents.skills.get(name)).map(|s| s.dir.to_string_lossy().into_owned()).collect();
     skills.extend(repo_skill_dirs(cwd).into_iter().map(|d| d.to_string_lossy().into_owned()));
@@ -665,6 +679,12 @@ pub(crate) fn kit(agents: &AgentConfig, project: &str, role: &RoleDef, files: Fi
         .mcp_for(project, role)
         .into_iter()
         .map(|(s, tools)| {
+            // Through the gateway the harness holds only its address and the agent's own token
+            // (the harness fills `${GENIE_TOKEN}` from its environment); the gateway keeps the tools.
+            if app.cfg.runtime.mcp_gateway && s.gateway {
+                let url = format!("http://127.0.0.1:{}/api/mcp-gateway/{}", app.cfg.port, s.id);
+                return (s.id.clone(), json!({ "url": url, "headers": { "Authorization": "Bearer ${GENIE_TOKEN}" } }));
+            }
             let mut entry = s.resolved();
             if let (Some(tools), Some(o)) = (tools, entry.as_object_mut()) {
                 o.insert("includeTools".into(), json!(tools));
@@ -806,7 +826,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 name: ORCHESTRATOR.into(),
                 team: None,
                 task: None,
-                kit: kit(&agents, slug, &def, def.files, &cwd),
+                kit: kit(app, &agents, slug, &def, def.files, &cwd),
                 cwd,
                 session_id: format!("{slug}-orchestrator"),
                 model,
@@ -831,7 +851,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 name: member.clone(),
                 team: Some(team.clone()),
                 task: Some(t.task.clone()),
-                kit: kit(&agents, slug, &def, def.files, &cwd),
+                kit: kit(app, &agents, slug, &def, def.files, &cwd),
                 cwd,
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,

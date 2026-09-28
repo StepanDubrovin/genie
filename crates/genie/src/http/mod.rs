@@ -13,6 +13,7 @@ pub mod automations;
 pub mod ctx;
 pub mod docs;
 pub mod live;
+pub mod mcp_gateway;
 pub mod tasks;
 pub mod teams;
 
@@ -85,6 +86,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(docs::routes())
         .merge(automations::routes())
         .merge(agent_config::routes())
+        .merge(mcp_gateway::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
     let index = app.web_root.join("index.html");

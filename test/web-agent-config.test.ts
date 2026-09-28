@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   allowDeny,
   basePermissions,
+  globMatch,
   layoutTeam,
   liveTeam,
   newRoleFile,
@@ -17,6 +18,7 @@ import {
   type TeamDef,
   type TeamSpecView,
   templatesFor,
+  toolUsers,
 } from "../web/src/entities/agent-config/model.ts";
 
 const ORDER = ["status.refine", "status.start", "status.submit", "status.approve", "task.check", "docs.read"];
@@ -114,6 +116,17 @@ test("a task before ready gets refinement templates, a ready one delivery templa
   assert.deepEqual(templatesFor(teams, "refining").map((x) => x.id), ["research"]);
   assert.deepEqual(templatesFor(teams, "ready").map((x) => x.id), ["standard", "pair"]);
   assert.deepEqual(templatesFor(teams, "changes_requested").map((x) => x.id), ["standard", "pair"]);
+});
+
+test("a connection's tool goes to the roles granted all of it or a matching pattern", () => {
+  const role = (id: string, mcp: string[]) => ({ id, mcp }) as RoleDef;
+  const roles = [role("lead", ["github"]), role("reader", ["github:get_*", "github:list_?"]), role("admin", ["*"]), role("other", ["jira"])];
+  assert.deepEqual(toolUsers(roles, "github", "get_issue"), ["lead", "reader", "admin"]);
+  assert.deepEqual(toolUsers(roles, "github", "list_x"), ["lead", "reader", "admin"]);
+  assert.deepEqual(toolUsers(roles, "github", "list_xy"), ["lead", "admin"], "`?` is one character");
+  assert.deepEqual(toolUsers(roles, "github", "delete_repo"), ["lead", "admin"]);
+  assert.deepEqual(toolUsers(roles, "githubx", "get_issue"), ["admin"], "another connection whose name starts the same");
+  assert.ok(globMatch("a.b*", "a.bc") && !globMatch("a.b*", "aXbc"), "regex characters are literal");
 });
 
 test("a running team shows who works and who waits for whose handoff", () => {

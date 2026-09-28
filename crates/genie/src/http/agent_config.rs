@@ -202,6 +202,7 @@ async fn catalogue(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Valu
     v["project"] = json!(access.project);
     v["admin"] = json!(ctx.server_admin().is_ok());
     v["mcpAdapter"] = json!(app.cfg.runtime.mcp_adapter());
+    v["mcpGateway"] = json!(app.cfg.runtime.mcp_gateway);
     Ok(Json(v))
 }
 

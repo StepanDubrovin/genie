@@ -61,6 +61,8 @@ pub struct App {
     pub sessions: crate::sessions::Registry,
     /// Roles, team templates, skills and MCP connections (reloaded when their files change).
     agents: RwLock<Arc<AgentConfig>>,
+    /// The agents' connections through the MCP gateway.
+    pub mcp: crate::mcp_gateway::Gateway,
 }
 
 impl App {
@@ -94,6 +96,7 @@ impl App {
             exe,
             sessions: Default::default(),
             agents: RwLock::new(Arc::new(agents)),
+            mcp: Default::default(),
         }))
     }
 

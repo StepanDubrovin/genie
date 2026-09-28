@@ -119,6 +119,10 @@ pub struct RuntimeConfig {
     /// Whether pi loads pi-mcp-adapter, so agents get their MCP config (`{mcpConfig}`):
     /// unset — found in pi's settings (`pi install npm:pi-mcp-adapter`); `true`/`false` — say so.
     pub mcp_adapter: Option<bool>,
+    /// Agents reach MCP connections through the genie gateway (default): secrets
+    /// stay on the server and every call is in the project's journal. `false`:
+    /// the harness gets the connections themselves.
+    pub mcp_gateway: bool,
     /// Disable to run the server without starting any agent (UI-only mode).
     pub enabled: bool,
 }
@@ -207,6 +211,7 @@ impl Default for RuntimeConfig {
             delivery_budget: genie_core::team::DELIVERY_BUDGET,
             env: BTreeMap::new(),
             mcp_adapter: None,
+            mcp_gateway: true,
             enabled: true,
         }
     }
