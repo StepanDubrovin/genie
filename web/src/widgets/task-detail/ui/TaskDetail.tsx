@@ -25,7 +25,9 @@ import {
   useTask,
   useTasks,
 } from "@/entities/task";
+import { useAgentConfig } from "@/entities/agent-config";
 import type { Team } from "@/entities/team";
+import { SpawnTeamDialog } from "@/features/spawn-team";
 import { timeAgo, useTick } from "@/shared/lib";
 import { Icon, Markdown, useToast } from "@/shared/ui";
 
@@ -42,6 +44,8 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const [answer, setAnswer] = useState("");
   const [draft, setDraft] = useState("");
   const [editDesc, setEditDesc] = useState<string | undefined>();
+  const [spawning, setSpawning] = useState(false);
+  const agents = useAgentConfig();
   const epics = useEpicMap();
   const impactEnabled = q.data?.status === "review" || q.data?.status === "done";
   const impact = useDocsImpact(id, impactEnabled);
@@ -59,6 +63,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   if (q.isError) return <aside className="detail"><div className="empty">{q.error.message}</div></aside>;
   const t: Task = q.data;
   const isEpic = t.type === "epic";
+  const canSpawn = agents.isSuccess && !isEpic && team?.state !== "active" && !["done", "cancelled"].includes(t.status);
   const epic = t.parent ? epics.get(t.parent) : undefined;
   const epicChoices = [...epics.values()].filter((e) => e.id === t.parent || (e.status !== "done" && e.status !== "cancelled"));
 
@@ -159,6 +164,12 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
               </>
             ) : (
               <span className="muted">не назначена</span>
+            )}
+            {canSpawn && (
+              <button type="button" className="btn ghost" style={{ height: 24 }} onClick={() => setSpawning(true)}>
+                <Icon.userPlus size={12} />
+                Собрать команду
+              </button>
             )}
           </span>
           {!isEpic && (
@@ -399,6 +410,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
       </div>
 
       {viewer.modal}
+      {spawning && <SpawnTeamDialog task={t} onClose={() => setSpawning(false)} />}
     </aside>
   );
 }

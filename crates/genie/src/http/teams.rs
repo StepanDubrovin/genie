@@ -127,6 +127,9 @@ struct SpawnBody {
     template: Option<String>,
     #[serde(default)]
     members: Vec<MemberSpec>,
+    /// Models for the template's members, by member key.
+    #[serde(default)]
+    models: std::collections::BTreeMap<String, String>,
     note: Option<String>,
 }
 
@@ -137,7 +140,8 @@ async fn spawn(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<SpawnBody>) 
         return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) assembles teams"));
     }
     let slug = access.project.clone();
-    let req = SpawnRequest { task: b.task, template: b.template, members: b.members, note: b.note, by: access.actor.clone() };
+    let req =
+        SpawnRequest { task: b.task, template: b.template, members: b.members, models: b.models, note: b.note, by: access.actor.clone() };
     let team = app.blocking(move |app| runtime::spawn_team(app, &slug, req)).await?;
     changed(&app);
     Ok((StatusCode::CREATED, Json(json!(team))))

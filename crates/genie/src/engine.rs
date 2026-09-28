@@ -426,6 +426,7 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
                 task: task.clone(),
                 template: input["template"].as_str().map(str::to_string),
                 members: serde_json::from_value(input["members"].clone()).unwrap_or_default(),
+                models: serde_json::from_value(input["models"].clone()).unwrap_or_default(),
                 note: input["note"].as_str().map(str::to_string),
                 by: actor.clone(),
             };

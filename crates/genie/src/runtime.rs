@@ -1341,6 +1341,8 @@ pub struct SpawnRequest {
     pub task: String,
     pub template: Option<String>,
     pub members: Vec<MemberSpec>,
+    /// Models for a template's members, by member key.
+    pub models: std::collections::BTreeMap<String, String>,
     pub note: Option<String>,
     pub by: Actor,
 }
@@ -1381,7 +1383,7 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
                             MemberSpec {
                                 role: m.role.clone(),
                                 name: m.name.clone(),
-                                model: m.model.clone(),
+                                model: req.models.get(&m.key).filter(|x| !x.trim().is_empty()).cloned().or_else(|| m.model.clone()),
                                 thinking: m.thinking.clone(),
                                 instructions: m.instructions.clone(),
                             },

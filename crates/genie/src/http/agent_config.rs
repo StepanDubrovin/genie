@@ -201,6 +201,7 @@ async fn catalogue(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Valu
     let mut v = agent_config::catalogue(&app.agents(), Some(&access.project));
     v["project"] = json!(access.project);
     v["admin"] = json!(ctx.server_admin().is_ok());
+    v["mcpAdapter"] = json!(app.cfg.runtime.mcp_adapter());
     Ok(Json(v))
 }
 

@@ -1,0 +1,11 @@
+/* «Собрать команду» on a task. */
+.spawn-team .seg { margin-left: 0; align-self: flex-start; }
+.spawn-templates { flex: none; display: flex; flex-direction: column; gap: 6px; max-height: 36vh; overflow-y: auto; }
+.spawn-template { display: grid; grid-template-columns: 18px minmax(0, 1fr); column-gap: 10px; row-gap: 3px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+.spawn-template.on { border-color: var(--accent); background: var(--accent-soft); }
+.spawn-template input { grid-row: span 3; accent-color: var(--accent); margin: 3px 0 0; }
+.spawn-template .t { font-weight: 500; color: var(--text); }
+.spawn-template .s { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.spawn-models { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.spawn-member { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 30px; gap: 8px; align-items: center; }
+.spawn-member select, .spawn-member input { height: 32px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg-panel); color: var(--text); padding: 0 10px; font-size: 12.5px; outline: 0; min-width: 0; }

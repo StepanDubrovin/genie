@@ -1,4 +1,5 @@
 import { NavLink, useLocation } from "react-router";
+import { useAgentConfig } from "@/entities/agent-config";
 import { BookIcon, useDocsTree } from "@/entities/doc";
 import { useMeta } from "@/entities/project";
 import { useLogout, useSession, useSwitchProject } from "@/entities/session";
@@ -29,6 +30,7 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
   const tasks = useTasks().data;
   const docs = useDocsTree().data;
   const docsCount = docs?.pages.length ?? 0;
+  const agents = useAgentConfig();
   const count = (id: ViewId) =>
     tasks ? tasks.filter((t) => inTaskViews(t) && VIEWS[id].statuses.includes(t.status)).length : VIEWS[id].statuses.reduce((n, s) => n + (meta?.counts[s] ?? 0), 0);
   const openEpics = tasks?.filter((t) => t.type === "epic" && t.status !== "done" && t.status !== "cancelled").length ?? 0;
@@ -107,6 +109,12 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
 
       <div className="nav-group">
         <span className="nav-label">Команда и правила</span>
+        {agents.isSuccess && (
+          <NavLink to="/agents" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+            <Icon.userPlus size={15} />
+            <span className="grow">Агенты</span>
+          </NavLink>
+        )}
         <NavLink to="/automations" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
           <Icon.bolt size={15} />
           <span className="grow">Автоматизации</span>

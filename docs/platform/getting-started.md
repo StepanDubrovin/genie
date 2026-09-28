@@ -89,7 +89,7 @@ genie user token anna                    # личный токен для `genie
 
 ## Роли и шаблоны команд
 
-genie поставляется со встроенными ролями (`analyst`, `executor`, `reviewer`, `tester`, `documenter`, `researcher`, `orchestrator`) и пресетами команд (`standard`, `pair`, `full`, `abap`, `spike`, `research`). Администратор сервера настраивает их под свой контекст файлами в каталоге данных; сервер подхватывает изменения без перезапуска. Устройство и решения — [[platform/agent-roles-and-teams]].
+genie поставляется со встроенными ролями (`analyst`, `executor`, `reviewer`, `tester`, `documenter`, `researcher`, `orchestrator`) и пресетами команд (`standard`, `pair`, `full`, `abap`, `spike`, `research`). Администратор сервера настраивает их под свой контекст в вебе («Команда и правила» → «Агенты») или файлами в каталоге данных; сервер подхватывает изменения без перезапуска. Остальные видят роли и шаблоны на той же странице и собирают по ним команды: кнопка «Собрать команду» в карточке задачи. Устройство и решения — [[platform/agent-roles-and-teams]].
 
 ```
 <data>/agents/<id>.md        роль: настройки во frontmatter, промпт в теле

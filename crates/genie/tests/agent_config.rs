@@ -70,6 +70,22 @@ async fn admins_change_roles_and_templates_everyone_reads_them() {
     assert_eq!(cat["admin"], false);
     assert!(cat["teams"].as_array().unwrap().iter().any(|t| t["id"] == "standard"));
     assert!(cat["roles"].as_array().unwrap().iter().all(|r| r.get("prompt").is_none()), "the list leaves prompts out");
+    assert_eq!(
+        cat["classes"]["reviewer"],
+        json!([
+            "status.approve",
+            "status.return",
+            "task.check",
+            "task.block",
+            "docs.read",
+            "docs.write",
+            "mail.team",
+            "mail.orchestrator",
+            "team.peek"
+        ]),
+        "what each class starts from, for the web's checkboxes"
+    );
+    assert!(cat["mcpAdapter"].is_boolean());
 
     let (s, _, _) = call(r, "PUT", "/api/roles/qa").bearer(&member).json(json!({ "content": QA })).send().await;
     assert_eq!(s, StatusCode::FORBIDDEN, "only server admins change roles");
@@ -255,8 +271,16 @@ async fn a_member_added_later_gets_its_own_relations_without_duplicates() {
     h.project("shop");
     let id = ready_task(&h, "Big change");
     let r = &h.router;
-    let (s, team, _) = call(r, "POST", "/api/teams").json(json!({ "task": id, "template": "pair" })).send().await;
+    // A model chosen for one member of the template (the web's «Собрать команду») keeps the template's relations.
+    let (s, team, _) = call(r, "POST", "/api/teams")
+        .json(json!({ "task": id, "template": "pair", "models": { "reviewer": "fake/careful" } }))
+        .send()
+        .await;
     assert_eq!(s, StatusCode::CREATED, "{team}");
+    let reviewer = team["members"].as_array().unwrap().iter().find(|m| m["role"] == "reviewer").cloned().unwrap();
+    assert_eq!(reviewer["model"], "fake/careful", "{team}");
+    assert_eq!(team["spec"]["template"], "pair");
+    assert!(team["spec"]["relations"].as_array().unwrap().iter().any(|r| r["note"].is_string()), "the template's own relations: {team}");
     let (s, added, _) = call(r, "POST", &format!("/api/teams/{id}/members")).json(json!({ "role": "reviewer" })).send().await;
     assert_eq!(s, StatusCode::CREATED, "{added}");
     assert_eq!(added[0]["key"], "reviewer-2");

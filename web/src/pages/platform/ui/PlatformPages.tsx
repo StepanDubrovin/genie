@@ -5,6 +5,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
+import { useAgentConfig } from "@/entities/agent-config";
 import { useSession } from "@/entities/session";
 import {
   type Automation,
@@ -510,6 +511,7 @@ function RuleView({ rule, onEdit }: { rule: Automation; onEdit: () => void }) {
 }
 
 function RuleEditor({ initial, onClose }: { initial: { id?: number; text: string }; onClose: () => void }) {
+  const agents = useAgentConfig().data;
   const [text, setText] = useState(initial.text);
   const [error, setError] = useState<string>();
   const qc = useQueryClient();
@@ -546,6 +548,16 @@ function RuleEditor({ initial, onClose }: { initial: { id?: number; text: string
             task.update, task.get, notify, agent, team, ask, wait, wake_orchestrator, changelog.add, release, http. Подстановки: <code>{"{{ event.task.id }}"}</code>,{" "}
             <code>{"{{ steps.<id>.output.… }}"}</code>.
           </p>
+          {agents && (
+            <p className="muted" style={{ margin: 0 }}>
+              Шаблоны для <code>team.template</code>: {agents.teams.map((t) => t.id).join(", ")}. Роли для <code>agent.role</code>:{" "}
+              {agents.roles
+                .filter((r) => r.class !== "orchestrator")
+                .map((r) => r.id)
+                .join(", ")}
+              .
+            </p>
+          )}
           <textarea className="mono code-edit" rows={22} value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
           {error && <div className="auth-error">{error}</div>}
         </div>

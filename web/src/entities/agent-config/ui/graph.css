@@ -1,0 +1,14 @@
+/* The team of a template as a graph (TemplateGraph). */
+.team-graph { flex: none; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.team-graph-scroll { overflow-x: auto; padding: 4px 0; }
+.team-graph svg { display: block; margin: 0 auto; }
+.team-graph .node rect { fill: var(--bg-panel); stroke: var(--line-strong); stroke-width: 1; }
+.team-graph .node.orch rect { fill: var(--accent-soft); stroke: #2f3463; }
+.team-graph .node.flagged rect { stroke: var(--red); stroke-width: 1.5; }
+.team-graph .nl { fill: var(--text); font-size: 12px; font-weight: 600; }
+.team-graph .ns { fill: var(--muted); font-size: 10.5px; font-family: var(--mono); }
+.team-graph .edge-label { fill: var(--text-2); font-size: 10.5px; font-family: var(--mono); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+.team-graph-legend { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; font-size: 11.5px; color: var(--muted); }
+.team-graph-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.team-graph-legend i { width: 14px; height: 2px; border-radius: 1px; }
+

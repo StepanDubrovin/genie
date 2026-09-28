@@ -1755,6 +1755,11 @@ pub fn catalogue(cfg: &AgentConfig, project: Option<&str>) -> Value {
         .collect();
     let teams: Vec<&TeamDef> = cfg.teams.values().filter(|t| project.is_none_or(|p| t.available_in(p))).collect();
     let mcp: Vec<&McpServer> = cfg.mcp.values().filter(|s| project.is_none_or(|p| s.available_in(p))).collect();
+    // The permissions each process class starts from (a role's `allow`/`deny` adjust them).
+    let classes: serde_json::Map<String, Value> = [Role::Analyst, Role::Executor, Role::Reviewer, Role::Tester, Role::Documenter]
+        .into_iter()
+        .map(|c| (c.as_str().to_string(), json!(genie_core::class_capabilities(c))))
+        .collect();
     json!({
         "roles": roles,
         "teams": teams,
@@ -1762,6 +1767,7 @@ pub fn catalogue(cfg: &AgentConfig, project: Option<&str>) -> Value {
         "mcp": mcp,
         "problems": cfg.problems,
         "permissions": Capability::ALL,
+        "classes": classes,
     })
 }
 
