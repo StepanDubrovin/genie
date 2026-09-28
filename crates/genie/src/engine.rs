@@ -121,13 +121,16 @@ fn event_matches(a: &Automation, kind: &str) -> bool {
 }
 
 fn intake(app: &App, project: &str) -> AppResult<()> {
-    let rules: Vec<Automation> =
-        app.with_server(|db| db.automations(Some(project)))?.into_iter().filter(|a| a.enabled && a.trigger_kind() == "event").collect();
     let cursor = app.with_tracker(project, |t| t.event_cursor(CURSOR))?;
     let events = app.with_tracker(project, |t| t.events_after(cursor, 200))?;
     let Some(last) = events.last().map(|e| e.id) else { return Ok(()) };
+    // Rules are read after the events: a rule created while this pass runs is
+    // already in the list for the events it may concern. A rule applies to the
+    // events from its creation on, never to older history in the same batch.
+    let rules: Vec<Automation> =
+        app.with_server(|db| db.automations(Some(project)))?.into_iter().filter(|a| a.enabled && a.trigger_kind() == "event").collect();
     for e in &events {
-        let candidates: Vec<&Automation> = rules.iter().filter(|a| event_matches(a, &e.kind)).collect();
+        let candidates: Vec<&Automation> = rules.iter().filter(|a| event_matches(a, &e.kind) && e.at >= a.created).collect();
         if candidates.is_empty() {
             continue;
         }

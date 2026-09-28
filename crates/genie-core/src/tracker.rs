@@ -684,12 +684,11 @@ impl Tracker {
             }
             if !input.add_acceptance.is_empty() {
                 scope("acceptance criteria", &[Role::Analyst])?;
-                let mut next: i64 =
+                let first: i64 =
                     self.conn().query_row("SELECT COALESCE(MAX(n), 0) FROM acceptance WHERE task = ?1", [&r.id], |x| x.get::<_, i64>(0))?
                         + 1;
-                for text in &input.add_acceptance {
-                    self.conn().execute("INSERT INTO acceptance(task, n, text) VALUES (?1, ?2, ?3)", params![r.id, next, text])?;
-                    next += 1;
+                for (n, text) in (first..).zip(&input.add_acceptance) {
+                    self.conn().execute("INSERT INTO acceptance(task, n, text) VALUES (?1, ?2, ?3)", params![r.id, n, text])?;
                 }
                 changed.push("acceptance".into());
             }
