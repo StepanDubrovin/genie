@@ -8,6 +8,7 @@ pub mod db;
 pub mod error;
 pub mod events;
 pub mod model;
+pub mod server_db;
 pub mod tracker;
 
 pub use error::{GenieError, Result};

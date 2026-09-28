@@ -7,6 +7,8 @@ import { NewTaskDialog, type NewTaskPreset } from "@/features/create-task";
 import { EpicPage } from "@/pages/epic";
 import { EpicsPage } from "@/pages/epics";
 import { DocsPage } from "@/pages/docs";
+import { InvitePage, LoginPage } from "@/pages/auth";
+import { useSession } from "@/entities/session";
 import { TasksPage } from "@/pages/tasks";
 import { TeamView } from "@/pages/team";
 import { useLiveUpdates } from "@/shared/api";
@@ -136,10 +138,31 @@ function EpicRoute() {
   return <EpicPage onNew={useOutletContext<ShellContext>().onNew} />;
 }
 
+/** Login when needed; a friendly note when the user has no project yet. */
+function Gate() {
+  const session = useSession();
+  if (session.isLoading) return <div className="auth-page" />;
+  if (session.error) return <LoginPage note={`Сервер недоступен: ${session.error.message}`} />;
+  if (!session.data) return <LoginPage />;
+  if (!session.data.projects.length) {
+    return (
+      <LoginPage
+        note={
+          session.data.user.isAdmin
+            ? "Проектов пока нет. Создайте первый: genie project add <slug> [--repo путь]"
+            : "У вас пока нет доступа ни к одному проекту — попросите приглашение у администратора."
+        }
+      />
+    );
+  }
+  return <Shell />;
+}
+
 export const router = createBrowserRouter([
+  { path: "/invite", element: <InvitePage /> },
   {
     path: "/",
-    element: <Shell />,
+    element: <Gate />,
     children: [
       { index: true, element: <Navigate to="/active" replace /> },
       { path: "team/:teamId", element: <TeamView /> },

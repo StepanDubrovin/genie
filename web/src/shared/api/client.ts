@@ -1,6 +1,13 @@
 import { QueryClient, useMutation, useQueryClient } from "@tanstack/react-query";
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status = 0,
+  ) {
+    super(message);
+  }
+}
 
 export async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -9,7 +16,7 @@ export async function request<T>(method: string, url: string, body?: unknown): P
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new ApiError(data.error ?? `${res.status} ${res.statusText}`);
+  if (!res.ok) throw new ApiError(data.error ?? `${res.status} ${res.statusText}`, res.status);
   return data;
 }
 

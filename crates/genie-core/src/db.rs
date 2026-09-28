@@ -177,15 +177,21 @@ pub struct Db {
 }
 
 impl Db {
+    /// Open the task tracker database: tracker schema plus column migrations.
     pub fn open(path: &Path) -> Result<Db> {
+        let db = Db::open_with_schema(path, SCHEMA)?;
+        db.migrate()?;
+        Ok(db)
+    }
+
+    /// Open any genie SQLite file: WAL, busy timeout, foreign keys, then `schema`.
+    pub fn open_with_schema(path: &Path, schema: &str) -> Result<Db> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(10))?;
         conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;")?;
-        conn.execute_batch(SCHEMA)?;
-        let db = Db { conn, depth: Cell::new(0) };
-        db.migrate()?;
-        Ok(db)
+        conn.execute_batch(schema)?;
+        Ok(Db { conn, depth: Cell::new(0) })
     }
 
     pub fn conn(&self) -> &Connection {

@@ -1,6 +1,7 @@
 import { NavLink, useLocation } from "react-router";
 import { BookIcon, useDocsTree } from "@/entities/doc";
 import { useMeta } from "@/entities/project";
+import { useLogout, useSession, useSwitchProject } from "@/entities/session";
 import { EpicIcon, inTaskViews, StageBars, StatusIcon, stageOf, type ViewId, VIEWS, useTasks } from "@/entities/task";
 import { useTeams } from "@/entities/team";
 import { timeAgo, useTick } from "@/shared/lib";
@@ -17,6 +18,9 @@ const NAV: { id: ViewId; icon: "inbox" | "needs_owner" | "in_progress" | "refini
 export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean }) {
   useTick();
   const meta = useMeta().data;
+  const session = useSession().data;
+  const switchProject = useSwitchProject();
+  const logout = useLogout();
   const teams = useTeams().data?.filter((t) => t.state === "active") ?? [];
   const { search, pathname } = useLocation();
   const tasks = useTasks().data;
@@ -34,9 +38,21 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
         </span>
         <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
           <span className="name">{meta?.project ?? "genie"}</span>
-          <span className="sub">genie · трекер репозитория</span>
+          <span className="sub">genie · {session?.mode === "users" ? session.user.name : "локальный режим"}</span>
         </span>
       </div>
+      {session && session.projects.length > 1 && (
+        <label className="project-switch">
+          <select aria-label="Проект" value={session.project ?? ""} onChange={(e) => void switchProject(e.target.value)}>
+            {session.projects.map((p) => (
+              <option key={p.slug} value={p.slug}>
+                {p.name}
+                {p.role === "viewer" ? " (чтение)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <button type="button" className="new-task" onClick={onNew}>
         <Icon.plus size={14} />
         <span className="grow" style={{ textAlign: "left" }}>
@@ -96,6 +112,11 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
           {online ? "Живое обновление" : "Нет связи с сервером"}
         </span>
         <span className="mono">{meta?.tailnet ? `${meta.tailnet}` : location.host}</span>
+        {session?.mode === "users" && (
+          <button type="button" className="logout" onClick={() => void logout()}>
+            Выйти ({session.user.login})
+          </button>
+        )}
       </div>
     </nav>
   );
