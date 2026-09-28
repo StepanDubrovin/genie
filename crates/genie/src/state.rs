@@ -1,0 +1,152 @@
+//! Application state shared by the HTTP layer and the background workers.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
+
+use genie_core::server_db::{Project, ServerDb};
+use genie_core::vault::Vault;
+use genie_core::{GenieError, Tracker};
+use tokio::sync::Notify;
+
+use crate::config::Config;
+
+/// Error from a blocking database call made on behalf of async code.
+#[derive(Debug)]
+pub enum AppError {
+    Genie(GenieError),
+    Internal(String),
+}
+
+impl From<GenieError> for AppError {
+    fn from(e: GenieError) -> Self {
+        AppError::Genie(e)
+    }
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppError::Genie(e) => write!(f, "{e}"),
+            AppError::Internal(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+pub type AppResult<T> = Result<T, AppError>;
+
+pub struct ProjectRt {
+    pub slug: String,
+    pub tracker: Mutex<Tracker>,
+}
+
+pub struct App {
+    pub data: PathBuf,
+    pub cfg: Config,
+    pub web_root: PathBuf,
+    server: Mutex<ServerDb>,
+    /// The knowledge vault shared by all projects of this installation.
+    pub vault: Mutex<Vault>,
+    projects: RwLock<HashMap<String, Arc<ProjectRt>>>,
+    /// Wakes the agent scheduler (new mail, finished turn, new job).
+    pub wake_runtime: Notify,
+    /// Wakes the automation engine (new events, answered questions, finished jobs).
+    pub wake_engine: Notify,
+    /// Wakes the delivery dispatcher (new outbox rows).
+    pub wake_outbox: Notify,
+    /// Path of the running `genie` binary, given to agents so they can call back.
+    pub exe: PathBuf,
+}
+
+impl App {
+    pub fn open(data: &Path, cfg: Config, web_root: PathBuf) -> AppResult<Arc<App>> {
+        std::fs::create_dir_all(data).map_err(|e| AppError::Internal(format!("{}: {e}", data.display())))?;
+        let server = ServerDb::open(&data.join("server.db"))?;
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("genie"));
+        let mut vault = Vault::open(&cfg.vault_path(data), &data.join("vault-index.db"), cfg.vault.commit.unwrap_or(true))?;
+        for p in server.projects()? {
+            vault.ensure_space(&p.slug, p.repo.as_deref().map(Path::new))?;
+        }
+        Ok(Arc::new(App {
+            data: data.to_path_buf(),
+            cfg,
+            web_root,
+            server: Mutex::new(server),
+            vault: Mutex::new(vault),
+            projects: RwLock::new(HashMap::new()),
+            wake_runtime: Notify::new(),
+            wake_engine: Notify::new(),
+            wake_outbox: Notify::new(),
+            exe,
+        }))
+    }
+
+    /// Synchronous access to the server database (call from blocking contexts only).
+    pub fn with_server<T>(&self, f: impl FnOnce(&ServerDb) -> Result<T, GenieError>) -> AppResult<T> {
+        let db = self.server.lock().map_err(|_| AppError::Internal("server db lock poisoned".into()))?;
+        Ok(f(&db)?)
+    }
+
+    /// Runtime handle for a project, opening its tracker on first use.
+    pub fn project_rt(&self, slug: &str) -> AppResult<Arc<ProjectRt>> {
+        if let Some(p) = self.projects.read().map_err(|_| AppError::Internal("registry poisoned".into()))?.get(slug) {
+            return Ok(p.clone());
+        }
+        let project = self.with_server(|db| db.project(slug))?;
+        let tracker = Tracker::open(&project.tracker_dir)?;
+        let rt = Arc::new(ProjectRt { slug: slug.to_string(), tracker: Mutex::new(tracker) });
+        let mut map = self.projects.write().map_err(|_| AppError::Internal("registry poisoned".into()))?;
+        Ok(map.entry(slug.to_string()).or_insert(rt).clone())
+    }
+
+    /// Synchronous access to a project's tracker (call from blocking contexts only).
+    pub fn with_tracker<T>(&self, slug: &str, f: impl FnOnce(&Tracker) -> Result<T, GenieError>) -> AppResult<T> {
+        let rt = self.project_rt(slug)?;
+        let t = rt.tracker.lock().map_err(|_| AppError::Internal("tracker lock poisoned".into()))?;
+        Ok(f(&t)?)
+    }
+
+    pub fn projects(&self) -> AppResult<Vec<Project>> {
+        self.with_server(|db| db.projects())
+    }
+
+    /// Run blocking work (SQLite, git, files) off the async runtime.
+    pub async fn blocking<T: Send + 'static>(self: &Arc<Self>, f: impl FnOnce(&App) -> AppResult<T> + Send + 'static) -> AppResult<T> {
+        let app = self.clone();
+        tokio::task::spawn_blocking(move || f(&app)).await.map_err(|e| AppError::Internal(e.to_string()))?
+    }
+
+    /// Create a project: a tracker directory under `<data>/projects/<slug>`, or an
+    /// existing tracker (e.g. a repository's `.genie/`) registered in place.
+    pub fn create_project(
+        &self,
+        slug: &str,
+        name: &str,
+        repo: Option<&str>,
+        tracker_dir: Option<&str>,
+        prefix: Option<&str>,
+    ) -> AppResult<Project> {
+        let dir = match tracker_dir {
+            Some(d) => PathBuf::from(d),
+            None => self.data.join("projects").join(slug),
+        };
+        let existing = dir.join(genie_core::tracker::DB_FILE).exists();
+        let tracker =
+            if existing { Tracker::open(&dir)? } else { Tracker::init(&dir, prefix, Some(if name.is_empty() { slug } else { name }))? };
+        drop(tracker);
+        let dir = dir.canonicalize().map_err(|e| AppError::Internal(format!("{}: {e}", dir.display())))?;
+        let repo = repo
+            .map(|r| Path::new(r).canonicalize().map(|p| p.to_string_lossy().into_owned()))
+            .transpose()
+            .map_err(|e| AppError::Internal(format!("repo: {e}")))?;
+        let project = self.with_server(|db| db.create_project(slug, name, &dir.to_string_lossy(), repo.as_deref(), None))?;
+        self.with_vault(|v| v.ensure_space(&project.slug, project.repo.as_deref().map(Path::new)))?;
+        Ok(project)
+    }
+
+    /// Synchronous access to the vault (call from blocking contexts only).
+    pub fn with_vault<T>(&self, f: impl FnOnce(&mut Vault) -> Result<T, GenieError>) -> AppResult<T> {
+        let mut v = self.vault.lock().map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+        Ok(f(&mut v)?)
+    }
+}

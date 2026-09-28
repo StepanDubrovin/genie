@@ -66,3 +66,15 @@ npm run typecheck         # сервер/расширение + веб
 npm run dev:web           # Vite с проксированием /api на `genie web` (порт 7420)
 node scripts/e2e.ts --template standard --model litellm/deepseek-v4-flash-vision-exp --analyst-model litellm/deepseek-v4-flash-vision-exp
 ```
+
+## Genie server (Rust)
+
+Командный сервис: несколько проектов и людей, агенты без открытого терминала, автоматизации, Telegram и почта, база знаний в формате Obsidian. Подробно — [docs/platform/getting-started.md](docs/platform/getting-started.md), архитектура — [docs/platform/vision.md](docs/platform/vision.md).
+
+```bash
+cargo build --release -p genie && npm install && npm run build:web
+./target/release/genie project add shop --repo ~/code/shop          # проект (существующий .genie/ подхватится)
+./target/release/genie serve --web web/dist                          # http://127.0.0.1:7420
+echo 'пароль' | ./target/release/genie user add anna --admin --password-stdin   # когда нужен вход и коллеги
+cargo test                                                            # в том числе оба сценария владельца end-to-end
+```

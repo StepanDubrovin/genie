@@ -187,7 +187,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
             </>
           )}
           <span className="k">Метки</span>
-          <span>{t.labels.length ? <Labels labels={t.labels} /> : <span className="muted">—</span>}</span>
+          <span className="wide">{t.labels.length ? <Labels labels={t.labels} /> : <span className="muted">—</span>}</span>
           <span className="k">Интеграция</span>
           <span className="wide">
             <input

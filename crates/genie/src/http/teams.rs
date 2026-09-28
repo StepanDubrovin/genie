@@ -1,0 +1,448 @@
+//! Teams, mail and agent turns. The team JSON matches the TypeScript server so
+//! the SPA's team screen works unchanged.
+
+use std::sync::Arc;
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use genie_core::Role;
+use genie_core::team::{self, NewMember, ORCHESTRATOR, SendMail};
+use genie_core::work::NewJob;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use super::ctx::{Access, Ctx};
+use super::tasks::changed;
+use super::{ApiError, ApiResult};
+use crate::config::MemberSpec;
+use crate::runtime::{self, SpawnRequest};
+use crate::state::App;
+
+pub fn routes() -> Router<Arc<App>> {
+    Router::new()
+        .route("/teams", get(list).post(spawn))
+        .route("/teams/{id}", get(show).delete(remove))
+        .route("/teams/{id}/stop", post(stop))
+        .route("/teams/{id}/mail", post(send))
+        .route("/teams/{id}/members", post(add_member))
+        .route("/teams/{id}/members/{member}", delete(remove_member))
+        .route("/teams/{id}/members/{member}/restart", post(restart_member))
+        .route("/agent/status", post(member_status))
+        .route("/agent/output", post(job_output))
+        .route("/turns", get(turns))
+        .route("/jobs", get(jobs).post(create_job))
+        .route("/jobs/{id}", get(job))
+}
+
+fn view(t: &genie_core::Tracker, id: &str) -> genie_core::Result<Value> {
+    let team = t.bus().get(id)?;
+    let task = t.get(&team.task).ok().map(|x| json!({ "id": x.id, "title": x.title, "status": x.status }));
+    let mut pending = serde_json::Map::new();
+    for m in &team.members {
+        pending.insert(m.name.clone(), json!(t.bus().pending_count(&team.id, &m.name)?));
+    }
+    let mut v = serde_json::to_value(&team)?;
+    v["taskInfo"] = task.unwrap_or(Value::Null);
+    v["pending"] = Value::Object(pending);
+    Ok(v)
+}
+
+/// Agents may touch only their own team; the orchestrator and people any team.
+fn own_team(access: &Access, team: &str) -> ApiResult<()> {
+    match (&access.agent_team, access.agent) {
+        (_, false) => Ok(()),
+        (_, true) if access.actor.role == Role::Orchestrator => Ok(()),
+        (Some(t), true) if t == team => Ok(()),
+        _ => Err(ApiError::new(StatusCode::FORBIDDEN, format!("team {team} is not your team"))),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ListQuery {
+    all: Option<String>,
+}
+
+async fn list(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let all = q.all.as_deref() == Some("1");
+    let slug = access.project.clone();
+    let out = app
+        .blocking(move |app| {
+            app.with_tracker(&slug, |t| {
+                let teams = t.bus().list(all)?;
+                teams.iter().map(|x| view(t, &x.id)).collect::<genie_core::Result<Vec<_>>>()
+            })
+        })
+        .await?;
+    Ok(Json(json!(out)))
+}
+
+async fn show(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let slug = access.project.clone();
+    let (mut v, turns) = app
+        .blocking(move |app| {
+            let v = app.with_tracker(&slug, |t| {
+                let mut v = view(t, &id)?;
+                v["mail"] = serde_json::to_value(t.bus().history(&id, 200)?)?;
+                v["log"] = serde_json::to_value(t.bus().read_log(&id, 200)?)?;
+                Ok(v)
+            })?;
+            let turns = app.with_server(|db| {
+                let all = db.turns(&slug, None, 400)?;
+                Ok(all.into_iter().filter(|x| x.team.as_deref() == Some(id.as_str())).collect::<Vec<_>>())
+            })?;
+            Ok((v, turns))
+        })
+        .await?;
+    v["turns"] = json!(turns);
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct SpawnBody {
+    task: String,
+    template: Option<String>,
+    #[serde(default)]
+    members: Vec<MemberSpec>,
+    note: Option<String>,
+}
+
+async fn spawn(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<SpawnBody>) -> ApiResult<impl IntoResponse> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    if access.agent && access.actor.role != Role::Orchestrator {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) assembles teams"));
+    }
+    let slug = access.project.clone();
+    let req = SpawnRequest { task: b.task, template: b.template, members: b.members, note: b.note, by: access.actor.clone() };
+    let team = app.blocking(move |app| runtime::spawn_team(app, &slug, req)).await?;
+    changed(&app);
+    Ok((StatusCode::CREATED, Json(json!(team))))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct StopBody {
+    #[serde(default)]
+    remove_worktree: bool,
+}
+
+async fn stop(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, body: Option<Json<StopBody>>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    if access.agent && access.actor.role != Role::Orchestrator {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) stops teams"));
+    }
+    let reason = if access.is_human() { "owner" } else { "orchestrator" };
+    let (slug, by) = (access.project.clone(), access.actor.name.clone());
+    let remove = body.map(|Json(b)| b.remove_worktree).unwrap_or(false);
+    let report = app
+        .blocking(move |app| {
+            let mut r = runtime::stop_team(app, &slug, &id, reason, &by)?;
+            if remove {
+                r.push(remove_worktree(app, &slug, &id));
+            }
+            Ok(r)
+        })
+        .await?;
+    changed(&app);
+    Ok(Json(json!({ "ok": true, "report": report })))
+}
+
+fn remove_worktree(app: &App, slug: &str, team: &str) -> String {
+    let Ok(Some(w)) = app.with_tracker(slug, |t| Ok(t.bus().get(team)?.worktree)) else { return "no worktree".into() };
+    let out = std::process::Command::new("git").args(["-C", &w.path, "worktree", "remove", "--force", &w.path]).output();
+    match out {
+        Ok(o) if o.status.success() => format!("worktree {} removed (branch {} kept)", w.path, w.branch),
+        Ok(o) => format!("worktree {} not removed: {}", w.path, String::from_utf8_lossy(&o.stderr).trim()),
+        Err(e) => format!("worktree {} not removed: {e}", w.path),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RemoveQuery {
+    remove_worktree: Option<String>,
+}
+
+async fn remove(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Query(q): Query<RemoveQuery>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    access.admin()?;
+    let (slug, by) = (access.project.clone(), access.actor.name.clone());
+    let remove = q.remove_worktree.as_deref() == Some("1");
+    let report = app
+        .blocking(move |app| {
+            let active = app.with_tracker(&slug, |t| Ok(t.bus().get(&id)?.state == "active"))?;
+            let mut r = if active { runtime::stop_team(app, &slug, &id, "owner", &by)? } else { Vec::new() };
+            if remove {
+                r.push(remove_worktree(app, &slug, &id));
+            }
+            app.with_tracker(&slug, |t| t.bus().delete(&id))?;
+            r.push(format!("team {id} deleted"));
+            Ok(r)
+        })
+        .await?;
+    changed(&app);
+    Ok(Json(json!({ "ok": true, "report": report })))
+}
+
+#[derive(Deserialize)]
+struct MailBody {
+    to: String,
+    text: String,
+    level: Option<String>,
+    intent: Option<String>,
+    #[serde(default)]
+    urgent: bool,
+}
+
+async fn send(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<MailBody>) -> ApiResult<impl IntoResponse> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    own_team(&access, &id)?;
+    let (slug, from, role) = (access.project.clone(), access.actor.name.clone(), access.actor.role);
+    let level = b.level.or_else(|| b.urgent.then(|| "high".to_string()));
+    let mail = app
+        .blocking(move |app| {
+            app.with_tracker(&slug, |t| {
+                t.bus().send(SendMail {
+                    team: &id,
+                    from: if role == Role::Orchestrator { ORCHESTRATOR } else { &from },
+                    from_role: role.as_str(),
+                    to: &b.to,
+                    text: &b.text,
+                    level: level.as_deref(),
+                    intent: b.intent.as_deref(),
+                    kind: if role == Role::Human { "owner" } else { "message" },
+                })
+            })
+        })
+        .await?;
+    app.wake_runtime.notify_one();
+    Ok((StatusCode::CREATED, Json(json!(mail))))
+}
+
+async fn add_member(
+    State(app): State<Arc<App>>,
+    ctx: Ctx,
+    Path(id): Path<String>,
+    Json(spec): Json<MemberSpec>,
+) -> ApiResult<impl IntoResponse> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    if access.agent && access.actor.role != Role::Orchestrator {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) changes a team"));
+    }
+    let (slug, by) = (access.project.clone(), access.actor.name.clone());
+    let max = app.cfg.limits.max_members_per_team;
+    let added = app
+        .blocking(move |app| {
+            app.with_tracker(&slug, |t| {
+                let team = t.bus().get(&id)?;
+                if team.state != "active" {
+                    return Err(genie_core::GenieError::invalid(format!("team {id} is stopped")));
+                }
+                if team.members.len() >= max {
+                    return Err(genie_core::GenieError::invalid(format!("limit: at most {max} members per team")));
+                }
+                let role: Role = spec.role.parse()?;
+                if !genie_core::is_member_role(role) {
+                    return Err(genie_core::GenieError::invalid(format!("{} is not a team role", spec.role)));
+                }
+                let mut taken = t.bus().taken_names()?;
+                let m = NewMember {
+                    name: spec.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| team::pick_name(&spec.role, &mut taken)),
+                    role: spec.role.clone(),
+                    model: spec.model.clone(),
+                    thinking: spec.thinking.clone(),
+                    instructions: spec.instructions.clone(),
+                };
+                let updated = t.bus().add_member(&id, m.clone())?;
+                let task = t.get(&team.task)?;
+                let all: Vec<NewMember> = updated
+                    .members
+                    .iter()
+                    .map(|x| NewMember { name: x.name.clone(), role: x.role.clone(), ..Default::default() })
+                    .collect();
+                let text = runtime::kickoff(&id, &task, &team.cwd, team.worktree.as_ref(), &all, &m, None, None).replacen(
+                    "Welcome to team",
+                    "You are joining team",
+                    1,
+                );
+                let bus = t.bus();
+                bus.send(SendMail {
+                    team: &id,
+                    from: ORCHESTRATOR,
+                    from_role: "orchestrator",
+                    to: &m.name,
+                    text: &text,
+                    level: None,
+                    intent: None,
+                    kind: "kickoff",
+                })?;
+                let note = format!("{} — {} joined the team (added by {by}).", team::display_name(&m.name), m.role);
+                for other in updated.members.iter().filter(|x| x.name != m.name) {
+                    bus.send(SendMail {
+                        team: &id,
+                        from: ORCHESTRATOR,
+                        from_role: "orchestrator",
+                        to: &other.name,
+                        text: &note,
+                        level: Some("low"),
+                        intent: Some("fyi"),
+                        kind: "system",
+                    })?;
+                }
+                Ok(json!([{ "name": m.name, "role": m.role, "model": m.model }]))
+            })
+        })
+        .await?;
+    changed(&app);
+    Ok((StatusCode::CREATED, Json(added)))
+}
+
+async fn remove_member(State(app): State<Arc<App>>, ctx: Ctx, Path((id, member)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    if access.agent && access.actor.role != Role::Orchestrator {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) changes a team"));
+    }
+    let (slug, by) = (access.project.clone(), access.actor.name.clone());
+    app.blocking(move |app| {
+        app.with_tracker(&slug, |t| {
+            let team = t.bus().get(&id)?;
+            let role = team.members.iter().find(|m| m.name == member).map(|m| m.role.clone()).unwrap_or_default();
+            t.bus().remove_member(&id, &member)?;
+            let note = format!("{} — {role} left the team (removed by {by}).", team::display_name(&member));
+            for other in team.members.iter().filter(|x| x.name != member) {
+                t.bus().send(SendMail {
+                    team: &id,
+                    from: ORCHESTRATOR,
+                    from_role: "orchestrator",
+                    to: &other.name,
+                    text: &note,
+                    level: Some("low"),
+                    intent: Some("fyi"),
+                    kind: "system",
+                })?;
+            }
+            Ok(())
+        })
+    })
+    .await?;
+    changed(&app);
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn restart_member(State(app): State<Arc<App>>, ctx: Ctx, Path((id, member)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    if access.agent && access.actor.role != Role::Orchestrator {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) restarts members"));
+    }
+    let slug = access.project.clone();
+    app.blocking(move |app| runtime::restart_member(app, &slug, &id, &member)).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct StatusBody {
+    text: String,
+}
+
+async fn member_status(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<StatusBody>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let Some(team) = access.agent_team.clone() else {
+        return Err(ApiError::bad("only team members have a status line"));
+    };
+    let (slug, name) = (access.project.clone(), access.actor.name.clone());
+    app.blocking(move |app| app.with_tracker(&slug, |t| t.bus().set_member_status(&team, &name, &b.text))).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn job_output(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let Some(job) = access.agent_job else {
+        return Err(ApiError::bad("only one-shot jobs report an output"));
+    };
+    let output = b.get("output").cloned().unwrap_or(b);
+    if !output.is_object() {
+        return Err(ApiError::bad("the output must be a JSON object"));
+    }
+    app.blocking(move |app| app.with_server(|db| db.set_job_output(job, &output))).await?;
+    Ok(Json(json!({ "ok": true, "job": job })))
+}
+
+#[derive(Deserialize, Default)]
+struct TurnsQuery {
+    agent: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn turns(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<TurnsQuery>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let slug = access.project.clone();
+    let out = app.blocking(move |app| app.with_server(|db| db.turns(&slug, q.agent.as_deref(), q.limit.unwrap_or(100).min(500)))).await?;
+    Ok(Json(json!(out)))
+}
+
+async fn jobs(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let slug = access.project.clone();
+    let out = app.blocking(move |app| app.with_server(|db| db.jobs(&slug, 200))).await?;
+    Ok(Json(json!(out)))
+}
+
+async fn job(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let job = app.blocking(move |app| app.with_server(|db| db.job(id))).await?;
+    if job.project != access.project {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "job not found"));
+    }
+    Ok(Json(json!(job)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JobBody {
+    role: String,
+    goal: String,
+    task: Option<String>,
+    model: Option<String>,
+    #[serde(default)]
+    inputs: Value,
+    output_schema: Option<Value>,
+    workspace: Option<String>,
+}
+
+async fn create_job(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<JobBody>) -> ApiResult<impl IntoResponse> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    if access.agent && access.actor.role != Role::Orchestrator {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) starts jobs"));
+    }
+    let slug = access.project.clone();
+    let job = app
+        .blocking(move |app| {
+            app.with_server(|db| {
+                db.create_job(NewJob {
+                    project: slug,
+                    task: b.task,
+                    run_step: None,
+                    role: b.role,
+                    model: b.model,
+                    goal: b.goal,
+                    inputs: b.inputs,
+                    output_schema: b.output_schema,
+                    workspace: b.workspace.unwrap_or_else(|| "none".into()),
+                })
+            })
+        })
+        .await?;
+    app.wake_runtime.notify_one();
+    Ok((StatusCode::CREATED, Json(json!(job))))
+}
