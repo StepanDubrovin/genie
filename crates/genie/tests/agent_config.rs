@@ -123,6 +123,16 @@ async fn admins_change_roles_and_templates_everyone_reads_them() {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert!(v["problems"].as_array().unwrap().iter().any(|p| p["message"].as_str().unwrap().contains("status.approve")), "{v}");
 
+    // The lists say how many automations use a template or a role (once per automation).
+    let spec = json!({ "name": "QA on review", "on": { "event": "task.status_changed" }, "steps": [
+        { "id": "t", "team": { "template": "qa-pair" } },
+        { "id": "a", "agent": { "role": "analyst", "goal": "check" } },
+        { "id": "b", "agent": { "role": "analyst", "goal": "check again" } }
+    ]});
+    h.app.with_server(|db| db.create_automation("shop", &spec, "root")).unwrap();
+    let (_, cat, _) = call(r, "GET", "/api/agent-config").bearer(&member).send().await;
+    assert_eq!(cat["automations"], json!({ "templates": { "qa-pair": 1 }, "roles": { "analyst": 1 } }));
+
     let (s, p, _) = call(r, "POST", "/api/templates/qa-pair/preview").bearer(&member).json(json!({})).send().await;
     assert_eq!(s, StatusCode::OK, "{p}");
     let kickoff =

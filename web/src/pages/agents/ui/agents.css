@@ -136,6 +136,7 @@ fieldset:disabled .ag-perm { cursor: default; }
 .ag-table td { padding: 8px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--text-body); }
 .ag-table tr:last-child td { border-bottom: 0; }
 .ag-cell-action { width: 1%; white-space: nowrap; text-align: right; }
+.ag-soft { margin-left: 8px; }
 .ag-how { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ag-select { height: 28px; max-width: 100%; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bg-panel); color: var(--text-2); font-size: 12px; }
 

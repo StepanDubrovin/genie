@@ -184,6 +184,29 @@ fn automation_refs(app: &App, key: &str, id: &str) -> Vec<Value> {
         .collect()
 }
 
+/// How many automations name each template and each role in their steps, for the lists.
+fn automation_usage(app: &App) -> Value {
+    let rules = app.with_server(|db| db.automations(None)).unwrap_or_default();
+    let mut usage = json!({ "templates": {}, "roles": {} });
+    for a in &rules {
+        let mut named: HashSet<(&str, &str)> = HashSet::new();
+        for step in a.spec["steps"].as_array().into_iter().flatten() {
+            for v in step.as_object().into_iter().flat_map(|o| o.values()) {
+                for (key, kind) in [("template", "templates"), ("role", "roles")] {
+                    if let Some(id) = v.get(key).and_then(Value::as_str) {
+                        named.insert((kind, id));
+                    }
+                }
+            }
+        }
+        for (kind, id) in named {
+            let n = usage[kind][id].as_u64().unwrap_or(0);
+            usage[kind][id] = json!(n + 1);
+        }
+    }
+    usage
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileBody {
@@ -204,6 +227,7 @@ struct DeleteQuery {
 async fn catalogue(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     let mut v = agent_config::catalogue(&app.agents(), Some(&access.project));
+    v["automations"] = app.blocking(|app| Ok(automation_usage(app))).await?;
     v["project"] = json!(access.project);
     v["admin"] = json!(ctx.server_admin().is_ok());
     v["mcpAdapter"] = json!(app.cfg.runtime.mcp_adapter());

@@ -30,6 +30,12 @@ export function RolesTab({ cfg, selected, onSelect }: { cfg: Catalogue; selected
   const team = cfg.roles.filter((r) => r.class !== "orchestrator");
   const orch = cfg.roles.filter((r) => r.class === "orchestrator");
   const current = selected ?? team[0]?.id;
+  // Where a role is used: templates of the catalogue, automations of the server.
+  const used = (id: string) => {
+    const templates = cfg.teams.filter((t) => t.members.some((m) => m.role === id)).length;
+    const automations = cfg.automations?.roles[id] ?? 0;
+    return [templates ? `шаблонов: ${templates}` : "", automations ? `автоматизаций: ${automations}` : ""].filter(Boolean).join(", ");
+  };
   const pick = (r: RoleDef) => (
     <button type="button" key={r.id} className={`pick${r.id === current ? " on" : ""}`} onClick={() => onSelect(r.id)} aria-current={r.id === current}>
       <span className="t">
@@ -40,7 +46,15 @@ export function RolesTab({ cfg, selected, onSelect }: { cfg: Catalogue; selected
         {r.origin !== "builtin" && <Badge tone={r.origin === "custom" ? "accent" : "amber"}>{ORIGIN_TITLE[r.origin]}</Badge>}
       </span>
       <span className="s">
-        {[r.id, CLASS_TITLE[r.class], r.skills ? `навыков: ${r.skills.length}` : "", r.mcp.length ? `MCP: ${r.mcp.length}` : "", r.projects ? `проекты: ${r.projects.join(", ")}` : ""]
+        {[
+          r.id,
+          CLASS_TITLE[r.class],
+          r.model ?? "",
+          r.skills ? `навыков: ${r.skills.length}` : "",
+          r.mcp.length ? `MCP: ${r.mcp.length}` : "",
+          r.projects ? `проекты: ${r.projects.join(", ")}` : "",
+          used(r.id),
+        ]
           .filter(Boolean)
           .join(" · ")}
       </span>
@@ -409,11 +423,12 @@ function Settings({ detail }: { detail: RoleDetail }) {
     if (!fields.length) return setOpen(false);
     if (await act(() => edit(fields), "Настройки роли сохранены")) setOpen(false);
   };
-  const facts: [string, string][] = [
-    ["Файлы", FILES_TITLE[r.files]],
+  // [label, value, a restriction only the harness keeps (an agent with a shell can get round it until containers)]
+  const facts: [string, string, boolean?][] = [
+    ["Файлы", FILES_TITLE[r.files], r.files !== "write"],
     ["Стадии", r.stages.map((s) => STAGE_TITLE[s]).join(", ") || "—"],
     ["Модель", r.model ? `${r.model}${r.thinking ? ` · ${r.thinking}` : ""}` : "из roleModels или модель харнесса"],
-    ["Запрещённые команды", r.denyCommands.join(", ") || "—"],
+    ["Запрещённые команды", r.denyCommands.join(", ") || "—", r.denyCommands.length > 0],
     ["Проекты", r.projects?.join(", ") ?? "все"],
     ["Имена", r.names.join(", ") || "по классу"],
   ];
@@ -431,10 +446,17 @@ function Settings({ detail }: { detail: RoleDetail }) {
     >
       {!open ? (
         <dl className="ag-facts">
-          {facts.map(([k, v]) => (
+          {facts.map(([k, v, soft]) => (
             <div key={k}>
               <dt>{k}</dt>
-              <dd>{v}</dd>
+              <dd>
+                {v}
+                {soft && (
+                  <span className="ag-soft" title="Соблюдает харнесс агента: через shell агент может обойти это ограничение, пока агенты не работают в контейнерах">
+                    <Badge tone="amber">мягкое</Badge>
+                  </span>
+                )}
+              </dd>
             </div>
           ))}
         </dl>

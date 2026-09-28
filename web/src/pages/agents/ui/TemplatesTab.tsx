@@ -48,7 +48,14 @@ export function TemplatesTab({ cfg, selected, onSelect }: { cfg: Catalogue; sele
               {t.origin !== "builtin" && <Badge tone={t.origin === "custom" ? "accent" : "amber"}>{ORIGIN_TITLE[t.origin]}</Badge>}
             </span>
             <span className="s">
-              {[t.id, STAGE_TITLE[t.stage], WORKSPACE_TITLE[t.workspace], `участников: ${t.members.length}`, t.projects ? `проекты: ${t.projects.join(", ")}` : ""]
+              {[
+                t.id,
+                STAGE_TITLE[t.stage],
+                WORKSPACE_TITLE[t.workspace],
+                `участников: ${t.members.length}`,
+                t.projects ? `проекты: ${t.projects.join(", ")}` : "",
+                cfg.automations?.templates[t.id] ? `автоматизаций: ${cfg.automations.templates[t.id]}` : "",
+              ]
                 .filter(Boolean)
                 .join(" · ")}
             </span>
