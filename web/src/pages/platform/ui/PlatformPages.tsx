@@ -8,6 +8,7 @@ import { Link, useNavigate, useSearchParams } from "react-router";
 import { useSession } from "@/entities/session";
 import {
   type Automation,
+  type Notification,
   RUN_STATUS,
   TRIGGER_NAME,
   useAutomations,
@@ -67,59 +68,67 @@ export function AnswerPage() {
     }
   };
   const qn = data?.questionnaire;
+  const closed = done || (qn && qn.status !== "open");
   return (
     <div className="auth-page">
-      <div className="auth-card answer-card">
-        <div className="brand">
-          <span className="logo">
-            <Icon.spark size={14} style={{ color: "#fff" }} />
-          </span>
-          <span className="name">genie</span>
-        </div>
+      <div className="answer">
+        <span className="logo-mark lg">
+          <Icon.mark size={22} />
+        </span>
         {error && <div className="auth-error">{error}</div>}
         {!qn && !error && <div className="muted">Загрузка…</div>}
         {qn && (
           <>
-            <h1>
-              Вопросы от {qn.askedBy}
-              {qn.task ? ` · ${qn.task}` : ""}
-            </h1>
-            {data?.taskTitle && <p className="auth-sub">{data.taskTitle}</p>}
-            {done || qn.status !== "open" ? (
-              <p className="auth-sub">{qn.status === "expired" ? "Срок ответа истёк." : "Спасибо! Ответы записаны в задачу, команда продолжит работу."}</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <span className="ctx">
+                {qn.task ? <span className="mono">{qn.task}</span> : "genie"} · спрашивает {qn.askedBy}
+              </span>
+              <h1>{closed ? "Ответы получены" : "Нужны ваши ответы"}</h1>
+              {data?.taskTitle && <p className="lead">{data.taskTitle}</p>}
+            </div>
+            {closed ? (
+              <div className="done">
+                {qn.status === "expired" ? "Срок ответа истёк — вопрос передан владельцу проекта." : "Спасибо! Ответы записаны в задачу, команда продолжит работу."}
+              </div>
             ) : (
               <form
-                className="auth-form"
                 onSubmit={(e) => {
                   e.preventDefault();
                   void submit();
                 }}
               >
                 {qn.questions.map((q) => (
-                  <div key={q.n} className="field">
-                    <b style={{ color: "var(--text)" }}>
-                      {q.n}. {q.text}
-                    </b>
-                    {q.why && <span>{q.why}</span>}
+                  <fieldset key={q.n}>
+                    <legend>
+                      <span className="n">{q.n}.</span> {q.text}
+                    </legend>
+                    {q.why && <span className="why">{q.why}</span>}
                     {q.answer ? (
-                      <span className="answered">✓ {q.answer}</span>
+                      <span className="answered">
+                        <Icon.check size={13} />
+                        {q.answer}
+                      </span>
                     ) : (
                       <>
-                        {q.options.length > 0 && (
-                          <div className="opts">
-                            {q.options.map((o) => (
-                              <button type="button" key={o} className={`chip${answers[q.n] === o ? " on" : ""}`} onClick={() => setAnswers({ ...answers, [q.n]: o })}>
-                                {o}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        <textarea rows={2} value={answers[q.n] ?? ""} placeholder="Ваш ответ" onChange={(e) => setAnswers({ ...answers, [q.n]: e.target.value })} />
+                        {q.options.map((o) => (
+                          <label key={o} className={`opt${answers[q.n] === o ? " on" : ""}`}>
+                            <input type="radio" name={`q${q.n}`} checked={answers[q.n] === o} onChange={() => setAnswers({ ...answers, [q.n]: o })} />
+                            {o}
+                          </label>
+                        ))}
+                        <textarea
+                          rows={q.options.length ? 2 : 3}
+                          aria-label={`Ответ на вопрос ${q.n}`}
+                          value={q.options.includes(answers[q.n] ?? "") ? "" : (answers[q.n] ?? "")}
+                          placeholder={q.options.length ? "Или свой ответ" : "Ваш ответ"}
+                          onChange={(e) => setAnswers({ ...answers, [q.n]: e.target.value })}
+                        />
                       </>
                     )}
-                  </div>
+                  </fieldset>
                 ))}
-                <button className="btn primary">Отправить ответы</button>
+                <button className="btn primary submit">Отправить ответы</button>
+                <span className="note">Вход не нужен — ссылка работает, пока вопрос открыт</span>
               </form>
             )}
           </>
@@ -137,10 +146,17 @@ export function NotificationsPage() {
   const act = useAction();
   const navigate = useNavigate();
   const items = q.data?.items ?? [];
+  const days: { day: string; items: Notification[] }[] = [];
+  for (const n of items) {
+    const day = dayName(n.created);
+    if (days.at(-1)?.day !== day) days.push({ day, items: [] });
+    days.at(-1)!.items.push(n);
+  }
   return (
     <main className="main">
       <header className="topbar">
         <h1>Уведомления</h1>
+        {(q.data?.unread ?? 0) > 0 && <span className="sub">{q.data?.unread} непрочитанных</span>}
         <span className="grow" />
         {(q.data?.unread ?? 0) > 0 && (
           <button type="button" className="btn" onClick={() => void act(() => request("POST", "/api/notifications/read", {}))}>
@@ -150,28 +166,47 @@ export function NotificationsPage() {
       </header>
       <div className="scroll">
         {!items.length && <div className="empty">{q.isPending ? "Загрузка…" : "Уведомлений нет"}</div>}
-        {items.map((n) => (
-          <button
-            type="button"
-            key={n.id}
-            className={`notif${n.readAt ? "" : " unread"}`}
-            onClick={() =>
-              void act(async () => {
-                if (!n.readAt) await request("POST", "/api/notifications/read", { id: n.id });
-                if (n.link) navigate(n.link);
-              })
-            }
-          >
-            <span className="notif-head">
-              <b>{n.title}</b>
-              <span className="when">{timeAgo(n.created)}</span>
-            </span>
-            {n.body && <span className="notif-body">{n.body}</span>}
-          </button>
-        ))}
+        {items.length > 0 && (
+          <div className="notifs">
+            {days.map((d) => (
+              <section key={d.day} className="notif-day">
+                <h2>{d.day}</h2>
+                {d.items.map((n) => (
+                  <button
+                    type="button"
+                    key={n.id}
+                    className={`notif${n.readAt ? "" : " unread"}`}
+                    onClick={() =>
+                      void act(async () => {
+                        if (!n.readAt) await request("POST", "/api/notifications/read", { id: n.id });
+                        if (n.link) navigate(n.link);
+                      })
+                    }
+                  >
+                    <span className="dot" aria-label={n.readAt ? undefined : "не прочитано"} />
+                    <span className="txt">
+                      <b>{n.title}</b>
+                      {n.body && <span className="notif-body">{n.body}</span>}
+                    </span>
+                    <span className="when">{timeAgo(n.created)}</span>
+                  </button>
+                ))}
+              </section>
+            ))}
+          </div>
+        )}
       </div>
     </main>
   );
+}
+
+function dayName(iso: string): string {
+  const d = new Date(iso);
+  const start = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((start(new Date()) - start(d)) / 86_400_000);
+  if (diff <= 0) return "Сегодня";
+  if (diff === 1) return "Вчера";
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
 }
 
 // ------------------------------------------------------------------ profile
@@ -192,12 +227,19 @@ export function ProfilePage() {
       </header>
       <div className="scroll settings">
         <section>
-          <h2>{session?.user.name}</h2>
-          <p className="muted">
-            {session?.user.login}
-            {session?.user.isAdmin ? " · администратор" : ""}
-            {session?.user.email ? ` · ${session.user.email}` : ""}
-          </p>
+          <div className="me-line">
+            <span className="me" aria-hidden="true">
+              {(session?.user.name || session?.user.login || "?").slice(0, 2).toUpperCase()}
+            </span>
+            <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <h2>{session?.user.name}</h2>
+              <span className="muted">
+                {session?.user.login}
+                {session?.user.isAdmin ? " · администратор" : ""}
+                {session?.user.email ? ` · ${session.user.email}` : ""}
+              </span>
+            </span>
+          </div>
           {local && <p className="muted">Сервер работает без пользователей (локальный режим). Создайте учётку: genie user add &lt;login&gt; --admin --password-stdin</p>}
         </section>
         {!local && (
@@ -228,7 +270,7 @@ export function ProfilePage() {
                   >
                     Привязать Telegram
                   </button>
-                  {code && <p className="mono">{code}</p>}
+                  {code && <p className="secret">{code}</p>}
                 </>
               )}
             </section>
@@ -267,7 +309,7 @@ export function ProfilePage() {
               >
                 Выпустить токен
               </button>
-              {token && <p className="mono break">{token}</p>}
+              {token && <p className="secret">{token}</p>}
             </section>
           </>
         )}
@@ -282,48 +324,63 @@ export function AutomationsPage() {
   useTick();
   const rules = useAutomations();
   const playbooks = usePlaybooks();
-  const [selected, setSelected] = useState<number>();
+  const [sp, setSp] = useSearchParams();
   const [editing, setEditing] = useState<{ id?: number; text: string }>();
   const act = useAction();
   const installed = new Set((rules.data ?? []).map((r) => r.name));
+  const selected = Number(sp.get("rule") ?? "") || rules.data?.[0]?.id;
   const current = rules.data?.find((r) => r.id === selected);
   return (
     <main className="main">
       <header className="topbar">
         <h1>Автоматизации</h1>
+        <span className="sub d-only">правила запускают агентов, уведомления и вопросы людям</span>
         <span className="grow" />
         <button type="button" className="btn primary" onClick={() => setEditing({ text: JSON.stringify(EMPTY_RULE, null, 2) })}>
           <Icon.plus size={13} />
           <span className="d-only">Новое правило</span>
         </button>
       </header>
-      <div className="scroll settings">
-        <section>
-          <h2>Правила</h2>
-          {!rules.data?.length && <p className="muted">Правил пока нет — начните с готового плейбука ниже.</p>}
+      <div className="split">
+        <section className="split-list" aria-label="Правила">
           {rules.data?.map((r) => (
-            <RuleRow key={r.id} rule={r} open={selected === r.id} onOpen={() => setSelected(selected === r.id ? undefined : r.id)} onEdit={() => setEditing({ id: r.id, text: JSON.stringify(r.spec, null, 2) })} />
-          ))}
-        </section>
-        {current && <Runs automation={current.id} />}
-        <section>
-          <h2>Плейбуки</h2>
-          {playbooks.data?.map((p) => (
-            <div className="rule" key={p.id}>
-              <span className="grow">
-                <b>{p.title}</b>
-                <span className="muted"> · {String((p.spec as { name?: string }).name ?? "")}</span>
+            <button type="button" key={r.id} className={`pick${r.id === current?.id ? " on" : ""}`} onClick={() => setSp({ rule: String(r.id) })}>
+              <span className="t">
+                <span className={`state-dot ${r.enabled ? "ok" : "off"}`} />
+                <span>{r.name}</span>
               </span>
-              <button
-                type="button"
-                className="btn"
-                disabled={installed.has(String((p.spec as { name?: string }).name))}
-                onClick={() => void act(() => request("POST", `/api/automations/playbooks/${p.id}`), "Правило добавлено")}
-              >
-                {installed.has(String((p.spec as { name?: string }).name)) ? "Добавлен" : "Добавить"}
-              </button>
-            </div>
+              <span className="s">{describeTrigger(r)}</span>
+              <span className="s">
+                {r.lastRun ? `последний запуск ${timeAgo(r.lastRun.started)} · ${RUN_STATUS[r.lastRun.status] ?? r.lastRun.status}` : "ещё не запускалось"}
+              </span>
+            </button>
           ))}
+          {rules.isSuccess && !rules.data.length && <p className="muted" style={{ margin: 0, padding: "4px 14px 8px" }}>Правил пока нет — начните с плейбука.</p>}
+          {!!playbooks.data?.length && <span className="label">Плейбуки</span>}
+          {playbooks.data?.map((p) => {
+            const name = String((p.spec as { name?: string }).name ?? "");
+            const added = installed.has(name);
+            return (
+              <div key={p.id} className="pick plain playbook">
+                <span className="s">{p.title}</span>
+                <span>
+                  <button type="button" className="btn" disabled={added} onClick={() => void act(() => request("POST", `/api/automations/playbooks/${p.id}`), "Правило добавлено")}>
+                    {added ? "Добавлен" : "Добавить"}
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+        </section>
+        <section className="split-main" aria-label="Правило">
+          {current ? (
+            <RuleView key={current.id} rule={current} onEdit={() => setEditing({ id: current.id, text: JSON.stringify(current.spec, null, 2) })} />
+          ) : (
+            <div className="pane-empty">
+              <Icon.bolt size={22} />
+              {rules.isPending ? "Загрузка…" : "Выберите правило или добавьте плейбук"}
+            </div>
+          )}
         </section>
       </div>
       {editing && <RuleEditor initial={editing} onClose={() => setEditing(undefined)} />}
@@ -337,32 +394,118 @@ const EMPTY_RULE = {
   steps: [{ id: "tell", notify: { to: ["task.author"], title: "{{ event.task.id }} готова", text: "{{ event.task.title }}" } }],
 };
 
-function RuleRow({ rule, open, onOpen, onEdit }: { rule: Automation; open: boolean; onOpen: () => void; onEdit: () => void }) {
+type Spec = { on?: Record<string, unknown>; steps?: Record<string, unknown>[] };
+const STEP_FIELDS = new Set(["id", "if", "retry", "timeout", "onError"]);
+
+function describeTrigger(rule: Automation): string {
+  const on = (rule.spec as Spec).on ?? {};
+  const where = on.where && typeof on.where === "object" ? Object.entries(on.where as Record<string, unknown>).map(([k, v]) => condition(k, v)) : [];
+  let text: string;
+  if (typeof on.event === "string") text = `Событие ${on.event}${where.length ? `, ${where.join(", ")}` : ""}`;
+  else if (typeof on.schedule === "string") text = `Расписание ${on.schedule}${typeof on.tz === "string" ? `, ${on.tz}` : ""}`;
+  else if (on.webhook) text = "Webhook";
+  else text = "Вручную";
+  if (!rule.enabled) text += " · выключено";
+  if (rule.dryRun) text += " · пробный режим";
+  return text;
+}
+
+function condition(key: string, v: unknown): string {
+  if (Array.isArray(v)) return `${key} ∈ ${v.map(String).join(", ")}`;
+  if (v && typeof v === "object") {
+    const [op, arg] = Object.entries(v as Record<string, unknown>)[0] ?? ["", ""];
+    const val = Array.isArray(arg) ? arg.map(String).join(", ") : String(arg);
+    const ops: Record<string, string> = { not: "≠", contains: "содержит", not_contains: "без", gt: ">", lt: "<", prefix: "начинается с" };
+    if (op === "exists") return arg ? `есть ${key}` : `нет ${key}`;
+    return `${key} ${ops[op] ?? op} ${val}`;
+  }
+  return `${key} = ${String(v)}`;
+}
+
+/** `{{ event.task.id }}` reads as ‹task.id› in step summaries. */
+function untemplate(text: string): string {
+  return text.replace(/\{\{\s*([^}|]+?)\s*(\|[^}]*)?\}\}/g, (_, path: string) => `‹${path.replace(/^event\./, "").replace(/^steps\.[^.]+\.output\./, "")}›`);
+}
+
+function describeStep(step: Record<string, unknown>): { kind: string; text: string } {
+  const kind = Object.keys(step).find((k) => !STEP_FIELDS.has(k)) ?? "?";
+  const body = (step[kind] ?? {}) as Record<string, unknown>;
+  const pick = (...keys: string[]) => {
+    const v = keys.map((k) => body[k]).find((x) => typeof x === "string" && x) as string | undefined;
+    return v && untemplate(v);
+  };
+  const to = (v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : String(v ?? ""));
+  let text: string;
+  switch (kind) {
+    case "agent":
+      text = `${String(body.role ?? "агент")}: ${short(pick("goal") ?? "", 90)}`;
+      break;
+    case "notify":
+      text = `${short(pick("title") ?? "уведомление", 70)} → ${to(body.to)}`;
+      break;
+    case "ask":
+      text = `Вопросы → ${to(body.to)}`;
+      break;
+    case "task.status":
+      text = `Статус → ${String(body.to ?? "")}`;
+      break;
+    case "changelog.add":
+      text = `Запись в чейнджлог: ${untemplate(String(body.group ?? "changed"))}`;
+      break;
+    case "wait":
+      text = `Пауза ${String(body.for ?? "")}`;
+      break;
+    case "team":
+      text = `Команда ${String(body.template ?? "")}`;
+      break;
+    default:
+      text = short(pick("text", "title", "version", "url") ?? body, 90);
+  }
+  return { kind, text };
+}
+
+function short(v: unknown, n: number): string {
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+function RuleView({ rule, onEdit }: { rule: Automation; onEdit: () => void }) {
   const act = useAction();
+  const steps = ((rule.spec as Spec).steps ?? []).map(describeStep);
   return (
-    <div className={`rule${open ? " on" : ""}`}>
-      <button type="button" className="grow rule-main" onClick={onOpen}>
-        <b>{rule.name}</b>
-        <span className="muted">
-          {" "}
-          · {TRIGGER_NAME[rule.trigger] ?? rule.trigger}
-          {rule.dryRun ? " · пробный режим" : ""}
-          {rule.lastRun ? ` · последний запуск ${RUN_STATUS[rule.lastRun.status] ?? rule.lastRun.status} ${timeAgo(rule.lastRun.started)}` : " · ещё не запускалось"}
-        </span>
-      </button>
-      {rule.trigger === "manual" && (
-        <button type="button" className="btn" onClick={() => void act(() => request("POST", `/api/automations/${rule.id}/run`, {}), "Запущено")}>
-          Запустить
+    <>
+      <div className="pane-head">
+        <div className="ttl">
+          <h2>{rule.name}</h2>
+          <span className="sub">{describeTrigger(rule)}</span>
+        </div>
+        <label className="toggle">
+          <input type="checkbox" checked={rule.enabled} onChange={(e) => void act(() => request("POST", `/api/automations/${rule.id}/enabled`, { enabled: e.target.checked }))} />
+          Включено
+        </label>
+        <button type="button" className="btn" onClick={onEdit}>
+          Изменить
         </button>
-      )}
-      <button type="button" className="btn ghost" onClick={onEdit}>
-        Изменить
-      </button>
-      <label className="toggle">
-        <input type="checkbox" checked={rule.enabled} onChange={(e) => void act(() => request("POST", `/api/automations/${rule.id}/enabled`, { enabled: e.target.checked }))} />
-        {rule.enabled ? "вкл" : "выкл"}
-      </label>
-    </div>
+        {rule.trigger === "manual" && (
+          <button type="button" className="btn" onClick={() => void act(() => request("POST", `/api/automations/${rule.id}/run`, {}), "Запущено")}>
+            Запустить
+          </button>
+        )}
+      </div>
+      <div className="pane-body">
+        {steps.length > 0 && (
+          <ol className="steps" aria-label="Шаги">
+            {steps.map((st, i) => (
+              <li key={i}>
+                <span className="k">{st.kind}</span>
+                <span className="d">{st.text}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+        <Runs automation={rule.id} />
+      </div>
+    </>
   );
 }
 
@@ -426,45 +569,69 @@ function RuleEditor({ initial, onClose }: { initial: { id?: number; text: string
 }
 
 function Runs({ automation }: { automation: number }) {
+  useTick();
   const runs = useRuns(automation);
   const [open, setOpen] = useState<number>();
   const run = useRun(open);
   const act = useAction();
   return (
     <section>
-      <h2>Запуски</h2>
-      {!runs.data?.length && <p className="muted">Запусков пока не было.</p>}
-      {runs.data?.map((r) => (
-        <div key={r.id}>
-          <button type="button" className={`rule rule-main${open === r.id ? " on" : ""}`} onClick={() => setOpen(open === r.id ? undefined : r.id)}>
-            <span className={`run-dot ${r.status}`} />
-            <span className="grow">
-              #{r.id} · {RUN_STATUS[r.status] ?? r.status} · {timeAgo(r.started)}
-              {r.error ? <span className="muted"> · {r.error}</span> : null}
-            </span>
-          </button>
-          {open === r.id && run.data && (
-            <div className="run-steps">
-              {run.data.steps.map((s) => (
-                <details key={s.id}>
-                  <summary>
-                    <span className={`run-dot ${s.status}`} /> {s.stepId} <span className="muted">({s.kind}) · {RUN_STATUS[s.status] ?? s.status}</span>
-                    {s.error && <span className="auth-error"> · {s.error}</span>}
-                  </summary>
-                  <pre className="view">{JSON.stringify({ input: s.input, output: s.output, wait: s.wait }, null, 2)}</pre>
-                </details>
-              ))}
-              {["queued", "running", "waiting"].includes(run.data.status) && (
-                <button type="button" className="btn ghost" onClick={() => void act(() => request("POST", `/api/runs/${r.id}/cancel`), "Отменено")}>
-                  Отменить запуск
-                </button>
+      <h3>Последние запуски</h3>
+      {!runs.data?.length ? (
+        <p className="muted" style={{ margin: 0 }}>
+          {runs.isPending ? "Загрузка…" : "Запусков пока не было."}
+        </p>
+      ) : (
+        <div className="runs">
+          {runs.data.map((r) => (
+            <div key={r.id} className="run">
+              <button type="button" className="run-row" aria-expanded={open === r.id} onClick={() => setOpen(open === r.id ? undefined : r.id)}>
+                <span className={`st ${r.status}`}>
+                  {r.status === "running" ? <span className="spin" /> : <span className={`state-dot ${r.status}`} />}
+                  {RUN_STATUS[r.status] ?? r.status}
+                </span>
+                <span className="id">#{r.id}</span>
+                <span className="nt">{r.error ?? triggerNote(r.triggerKey)}</span>
+                <span className="when">{timeAgo(r.started)}</span>
+              </button>
+              {open === r.id && run.data && (
+                <ol className="run-steps">
+                  {run.data.steps.map((s) => (
+                    <li key={s.id}>
+                      <details>
+                        <summary>
+                          <span className="sid">{s.stepId}</span>
+                          <span>
+                            {s.kind} · {RUN_STATUS[s.status] ?? s.status}
+                            {s.attempt > 1 ? ` · попытка ${s.attempt}` : ""}
+                            {s.error && <span className="err"> · {s.error}</span>}
+                          </span>
+                        </summary>
+                        <pre className="view">{JSON.stringify({ input: s.input, output: s.output, wait: s.wait }, null, 2)}</pre>
+                      </details>
+                    </li>
+                  ))}
+                  {["queued", "running", "waiting"].includes(run.data.status) && (
+                    <li>
+                      <button type="button" className="btn" onClick={() => void act(() => request("POST", `/api/runs/${r.id}/cancel`), "Отменено")}>
+                        Отменить запуск
+                      </button>
+                    </li>
+                  )}
+                </ol>
               )}
             </div>
-          )}
+          ))}
         </div>
-      ))}
+      )}
     </section>
   );
+}
+
+function triggerNote(key: string): string {
+  const kind = key.split(":")[0];
+  if (kind === "event") return `по событию #${key.split(":").at(-1)}`;
+  return ({ schedule: "по расписанию", manual: "запущено вручную", webhook: "по webhook" } as Record<string, string>)[kind] ?? key;
 }
 
 // ------------------------------------------------------------------ knowledge proposals
@@ -474,7 +641,7 @@ function PageBody({ text }: { text: string }) {
   const m = /^---\n([\s\S]*?)\n---\n?/.exec(text);
   return (
     <>
-      {m && <pre className="view frontmatter">{m[1]}</pre>}
+      {m && <pre className="frontmatter">{m[1]}</pre>}
       <Markdown text={m ? text.slice(m[0].length) : text} />
     </>
   );
@@ -483,8 +650,8 @@ function PageBody({ text }: { text: string }) {
 export function ProposalsPage() {
   useTick();
   const [sp, setSp] = useSearchParams();
-  const selected = Number(sp.get("proposal") ?? "") || undefined;
   const list = useProposals();
+  const selected = Number(sp.get("proposal") ?? "") || list.data?.[0]?.id;
   const one = useProposal(selected);
   const act = useAction();
   const decide = (verb: "approve" | "reject", force = false) =>
@@ -492,61 +659,84 @@ export function ProposalsPage() {
       await request("POST", `/api/docs/proposals/${selected}/${verb}`, { force });
       setSp({});
     }, verb === "approve" ? "Правка опубликована" : "Предложение отклонено");
+  const p = one.data?.proposal;
   return (
     <main className="main">
       <header className="topbar">
-        <h1>Предложения в базу знаний</h1>
+        <h1>Предложения</h1>
+        <span className="sub d-only">агенты предлагают правки знаний, владельцы раздела решают</span>
         <span className="grow" />
-        <Link className="btn ghost" to="/docs">
+        <Link className="btn" to="/docs">
           К документации
         </Link>
       </header>
-      <div className="scroll settings">
-        {!list.data?.length && <div className="empty">Открытых предложений нет</div>}
-        {list.data?.map((p) => (
-          <button type="button" key={p.id} className={`rule rule-main${selected === p.id ? " on" : ""}`} onClick={() => setSp({ proposal: String(p.id) })}>
-            <span className="grow">
-              <b className="mono">{p.path}</b>
-              <span className="muted">
-                {" "}
-                · {p.author}
-                {p.authorKind === "agent" ? " (агент)" : ""}
-                {p.task ? ` · ${p.task}` : ""} · {timeAgo(p.created)}
+      <div className="split narrow">
+        <section className="split-list" aria-label="Открытые предложения">
+          {list.isSuccess && !list.data.length && <p className="muted" style={{ margin: 0, padding: "4px 14px" }}>Открытых предложений нет.</p>}
+          {list.data?.map((x) => (
+            <button type="button" key={x.id} className={`pick plain${selected === x.id ? " on" : ""}`} onClick={() => setSp({ proposal: String(x.id) })}>
+              <span className="t">
+                <span>{pageTitle(x.path)}</span>
               </span>
-            </span>
-          </button>
-        ))}
-        {one.data && (
-          <section className="proposal">
-            <h2>
-              #{one.data.proposal.id} · {one.data.proposal.path}
-            </h2>
-            {one.data.proposal.note && <p className="muted">{one.data.proposal.note}</p>}
-            {one.data.owners.length > 0 && <p className="muted">Владельцы раздела: {one.data.owners.join(", ")}</p>}
-            <div className="compare">
-              <div>
-                <h3>Сейчас</h3>
-                {one.data.current ? <PageBody text={one.data.current} /> : <p className="muted">Новая страница</p>}
-              </div>
-              <div>
-                <h3>Предложено</h3>
-                <PageBody text={one.data.proposal.content ?? ""} />
-              </div>
+              <span className="s">
+                {x.author}
+                {x.authorKind === "agent" ? " (агент)" : ""}
+                {x.task ? ` · по задаче ${x.task}` : ""} · {timeAgo(x.created)}
+              </span>
+            </button>
+          ))}
+        </section>
+        <section className="split-main" aria-label="Предложение">
+          {!p ? (
+            <div className="pane-empty">
+              <Icon.proposal size={22} />
+              {list.isPending || (selected && one.isPending) ? "Загрузка…" : "Здесь появятся правки, которые ждут вашего решения"}
             </div>
-            <div className="actions">
-              <button type="button" className="btn primary" onClick={() => void decide("approve")}>
-                Опубликовать
-              </button>
-              <button type="button" className="btn" onClick={() => void decide("reject")}>
-                Отклонить
-              </button>
-              <button type="button" className="btn ghost" onClick={() => void decide("approve", true)} title="Если страница изменилась после предложения">
-                Опубликовать поверх изменений
-              </button>
-            </div>
-          </section>
-        )}
+          ) : (
+            <>
+              <div className="pane-head">
+                <div className="ttl">
+                  <h2>{pageTitle(p.path)}</h2>
+                  <span className="sub">
+                    <span className="mono">{p.path}</span>
+                    {one.data!.owners.length > 0 ? ` · владельцы раздела: ${one.data!.owners.join(", ")}` : ""}
+                  </span>
+                </div>
+                <button type="button" className="btn" onClick={() => void decide("reject")}>
+                  Отклонить
+                </button>
+                <button type="button" className="btn" onClick={() => void decide("approve", true)} title="Если страница изменилась после предложения">
+                  Опубликовать поверх
+                </button>
+                <button type="button" className="btn primary" onClick={() => void decide("approve")}>
+                  Опубликовать
+                </button>
+              </div>
+              <div className="proposal-state">
+                <span className={`state-dot ${one.data!.current == null ? "running" : "ok"}`} />
+                {one.data!.current == null ? "Новая страница" : "Правка существующей страницы — при конфликте сервер попросит опубликовать поверх"}
+              </div>
+              {p.note && <p className="proposal-note">{p.note}</p>}
+              <div className="compare">
+                <div>
+                  <span className="hd">Сейчас</span>
+                  <div className="bd">{one.data!.current ? <PageBody text={one.data!.current} /> : <p className="muted">Страницы ещё нет</p>}</div>
+                </div>
+                <div>
+                  <span className="hd">Предложение</span>
+                  <div className="bd">
+                    <PageBody text={p.content ?? ""} />
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </section>
       </div>
     </main>
   );
+}
+
+function pageTitle(path: string): string {
+  return path.replace(/\.md$/, "").split("/").join(" / ");
 }

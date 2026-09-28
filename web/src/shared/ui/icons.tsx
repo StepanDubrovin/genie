@@ -84,4 +84,44 @@ export const Icon = {
       <path d="M8 1.5v4M8 10.5v4M1.5 8h4M10.5 8h4M3.4 3.4l2.2 2.2M10.4 10.4l2.2 2.2M12.6 3.4l-2.2 2.2M5.6 10.4l-2.2 2.2" />
     </svg>
   ),
+  /** genie mark: the logo in the sidebar and on public pages. */
+  mark: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)}>
+      <path d="M8 2v3M8 11v3M2 8h3M11 8h3" />
+      <circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+  bolt: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <path d="M9 1.8L3.5 9h4l-1 5.2L12.5 7h-4z" />
+    </svg>
+  ),
+  bell: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z" />
+      <path d="M6.5 14h3" />
+    </svg>
+  ),
+  proposal: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <path d="M4 2.5v6.5a3 3 0 0 0 3 3h5" />
+      <path d="M10 9.5l2.5 2.5L10 14.5" />
+    </svg>
+  ),
+  gear: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <circle cx="8" cy="8" r="2.2" />
+      <path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4L5 11M11 5l1.4-1.4" />
+    </svg>
+  ),
+  logout: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <path d="M6.5 2.5H3.5v11h3M10 5l3 3-3 3M13 8H6.5" />
+    </svg>
+  ),
+  updown: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)}>
+      <path d="M5 6l3-3 3 3M5 10l3 3 3-3" />
+    </svg>
+  ),
 };

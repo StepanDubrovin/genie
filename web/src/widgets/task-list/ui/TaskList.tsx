@@ -38,7 +38,7 @@ export function TaskList({
   }
 
   return (
-    <div role="list" aria-label="Задачи">
+    <div role="list" aria-label="Задачи" className="task-groups">
       {groups.map((g) => (
         <section key={g.status} aria-label={STATUS_NAME[g.status]}>
           <div className="group-head">

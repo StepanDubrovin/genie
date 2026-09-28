@@ -3,7 +3,7 @@ import { BookIcon, useDocsTree } from "@/entities/doc";
 import { useMeta } from "@/entities/project";
 import { useLogout, useSession, useSwitchProject } from "@/entities/session";
 import { useNotifications, useProposals } from "@/entities/platform";
-import { EpicIcon, inTaskViews, StageBars, StatusIcon, stageOf, type ViewId, VIEWS, useTasks } from "@/entities/task";
+import { EpicIcon, inTaskViews, StatusIcon, type ViewId, VIEWS, useTasks } from "@/entities/task";
 import { useTeams } from "@/entities/team";
 import { timeAgo, useTick } from "@/shared/lib";
 import { Icon } from "@/shared/ui";
@@ -33,29 +33,35 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
     tasks ? tasks.filter((t) => inTaskViews(t) && VIEWS[id].statuses.includes(t.status)).length : VIEWS[id].statuses.reduce((n, s) => n + (meta?.counts[s] ?? 0), 0);
   const openEpics = tasks?.filter((t) => t.type === "epic" && t.status !== "done" && t.status !== "cancelled").length ?? 0;
 
+  const project = session?.projects.find((p) => p.slug === session.project);
+  const many = (session?.projects.length ?? 0) > 1;
+  const me = session?.mode === "users" ? session.user.name || session.user.login : "Локальный режим";
+
   return (
     <nav className="sidebar" aria-label="Навигация">
-      <div className="brand">
-        <span className="logo">
-          <Icon.spark size={14} style={{ color: "#fff" }} />
+      <div className={`project${many ? " switch" : ""}`}>
+        <span className="logo-mark">
+          <Icon.mark size={15} />
         </span>
-        <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-          <span className="name">{meta?.project ?? "genie"}</span>
-          <span className="sub">genie · {session?.mode === "users" ? session.user.name : "локальный режим"}</span>
+        <span className="txt">
+          <span className="name">{project?.name ?? meta?.project ?? "genie"}</span>
+          <span className="sub">{project ? `${ROLE_NAME[project.role] ?? project.role} · ${project.hasRepo ? "с репозиторием" : "без кода"}` : "genie"}</span>
         </span>
+        {many && session && (
+          <>
+            <Icon.updown size={12} className="caret" />
+            <select aria-label="Сменить проект" value={session.project ?? ""} onChange={(e) => void switchProject(e.target.value)}>
+              {session.projects.map((p) => (
+                <option key={p.slug} value={p.slug}>
+                  {p.name}
+                  {p.role === "viewer" ? " (чтение)" : ""}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
       </div>
-      {session && session.projects.length > 1 && (
-        <label className="project-switch">
-          <select aria-label="Проект" value={session.project ?? ""} onChange={(e) => void switchProject(e.target.value)}>
-            {session.projects.map((p) => (
-              <option key={p.slug} value={p.slug}>
-                {p.name}
-                {p.role === "viewer" ? " (чтение)" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
+
       <button type="button" className="new-task" onClick={onNew}>
         <Icon.plus size={14} />
         <span className="grow" style={{ textAlign: "left" }}>
@@ -64,85 +70,103 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
         <kbd>C</kbd>
       </button>
 
-      {NAV.map((n) => {
-        const c = count(n.id);
-        return (
-          <NavLink key={n.id} to={{ pathname: `/${n.id}`, search: keepLayout(search) }} className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
-            <StatusIcon status={n.icon} size={15} />
-            <span className="grow">{VIEWS[n.id].name}</span>
-            {n.id === "decisions" && c > 0 ? <span className="count alert">{c}</span> : <span className="count">{c || ""}</span>}
-          </NavLink>
-        );
-      })}
+      <div className="nav-group">
+        {NAV.map((n) => {
+          const c = count(n.id);
+          return (
+            <NavLink key={n.id} to={{ pathname: `/${n.id}`, search: keepLayout(search) }} className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+              <StatusIcon status={n.icon} size={15} />
+              <span className="grow">{VIEWS[n.id].name}</span>
+              {n.id === "decisions" && c > 0 ? <span className="count alert">{c}</span> : <span className="count">{c || ""}</span>}
+            </NavLink>
+          );
+        })}
+        <NavLink to="/epics" className={({ isActive }) => `nav-item${isActive || pathname.startsWith("/epic/") ? " on" : ""}`}>
+          <EpicIcon size={15} />
+          <span className="grow">Эпики</span>
+          <span className="count">{openEpics || ""}</span>
+        </NavLink>
+      </div>
 
-      <NavLink to="/epics" className={({ isActive }) => `nav-item${isActive || pathname.startsWith("/epic/") ? " on" : ""}`}>
-        <EpicIcon size={15} />
-        <span className="grow">Эпики</span>
-        <span className="count">{openEpics || ""}</span>
-      </NavLink>
+      <div className="nav-group">
+        <span className="nav-label">Знания</span>
+        <NavLink
+          to={{ pathname: "/docs", search: keepLayout(search) }}
+          className={({ isActive }) => `nav-item${(isActive || pathname.startsWith("/docs")) && !pathname.startsWith("/docs/proposals") ? " on" : ""}`}
+        >
+          <BookIcon size={15} />
+          <span className="grow">Документация</span>
+          <span className="count">{docs ? docsCount : ""}</span>
+        </NavLink>
+        <NavLink to="/docs/proposals" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+          <Icon.proposal size={15} />
+          <span className="grow">Предложения</span>
+          <span className="count">{proposals || ""}</span>
+        </NavLink>
+      </div>
 
-      <NavLink to={{ pathname: "/docs", search: keepLayout(search) }} className={({ isActive }) => `nav-item${isActive || pathname.startsWith("/docs") ? " on" : ""}`}>
-        <BookIcon size={15} />
-        <span className="grow">Документация</span>
-        <span className="count">{docs ? docsCount : ""}</span>
-      </NavLink>
+      <div className="nav-group">
+        <span className="nav-label">Команда и правила</span>
+        <NavLink to="/automations" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+          <Icon.bolt size={15} />
+          <span className="grow">Автоматизации</span>
+        </NavLink>
+        <NavLink to="/notifications" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+          <Icon.bell size={15} />
+          <span className="grow">Уведомления</span>
+          {unread > 0 && <span className="unread-dot" role="img" aria-label={`непрочитанных: ${unread}`} />}
+        </NavLink>
+      </div>
 
-      <NavLink to="/docs/proposals" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
-        <Icon.check size={15} />
-        <span className="grow">Предложения</span>
-        {proposals > 0 ? <span className="count alert">{proposals}</span> : <span className="count" />}
-      </NavLink>
-
-      <NavLink to="/automations" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
-        <Icon.spark size={15} />
-        <span className="grow">Автоматизации</span>
-      </NavLink>
-
-      <NavLink to="/notifications" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
-        <Icon.send size={15} />
-        <span className="grow">Уведомления</span>
-        {unread > 0 ? <span className="count alert">{unread}</span> : <span className="count" />}
-      </NavLink>
-
-      {teams.length > 0 && <div className="nav-section">Команды</div>}
-      {teams.map((t) => {
-        const status = t.taskInfo?.status;
-        const working = t.members.some((m) => m.activity === "working");
-        const waiting = status === "needs_owner";
-        return (
-          <NavLink key={t.id} to={`/team/${encodeURIComponent(t.id)}`} className={({ isActive }) => `team-link${isActive ? " on" : ""}`}>
-            <span className="top">
-              {waiting ? <span className="dot-amber" /> : working ? <span className="spin" /> : <span className="dot-idle" />}
-              <span className="mono" style={{ color: "var(--text)" }}>
-                {t.id}
-              </span>
-              <span style={{ color: waiting ? "var(--amber)" : "var(--muted)" }}>{waiting ? "ждёт вас" : status ? statusShort(status) : ""}</span>
-              <span className="when">{timeAgo(t.created)}</span>
-            </span>
-            <span className="bars">
-              <StageBars stage={status ? stageOf(status) : 0} amber={waiting} />
-            </span>
-          </NavLink>
-        );
-      })}
+      {teams.length > 0 && (
+        <div className="nav-group">
+          <span className="nav-label">Работают сейчас</span>
+          {teams.map((t) => {
+            const status = t.taskInfo?.status;
+            const working = t.members.some((m) => m.activity === "working");
+            const waiting = status === "needs_owner";
+            return (
+              <NavLink key={t.id} to={`/team/${encodeURIComponent(t.id)}`} className={({ isActive }) => `team-link${isActive ? " on" : ""}`}>
+                {waiting ? <span className="dot-amber" /> : working ? <span className="spin" /> : <span className="dot-idle" />}
+                <span className="mono">{t.id}</span>
+                <span className={`st${waiting ? " amber" : ""}`}>{waiting ? "ждёт вас" : status ? statusShort(status) : ""}</span>
+                <span className="when">{timeAgo(t.created)}</span>
+              </NavLink>
+            );
+          })}
+        </div>
+      )}
 
       <div className="side-foot">
-        <span className={`live${online ? "" : " off"}`}>
-          <i />
-          {online ? "Живое обновление" : "Нет связи с сервером"}
+        <span className="me" aria-hidden="true">
+          {initials(me)}
         </span>
-        <span className="mono">{meta?.tailnet ? `${meta.tailnet}` : location.host}</span>
-        <NavLink to="/profile" className="logout">
-          Профиль
+        <span className="who">
+          <span className="nm">{me}</span>
+          <span className={`live${online ? "" : " off"}`} title={meta?.tailnet ?? location.host}>
+            <i />
+            {online ? "онлайн" : "нет связи"}
+          </span>
+        </span>
+        <NavLink to="/profile" className="icon-btn" aria-label="Профиль и каналы" title="Профиль и каналы">
+          <Icon.gear size={14} />
         </NavLink>
         {session?.mode === "users" && (
-          <button type="button" className="logout" onClick={() => void logout()}>
-            Выйти ({session.user.login})
+          <button type="button" className="icon-btn" aria-label="Выйти" title={`Выйти (${session.user.login})`} onClick={() => void logout()}>
+            <Icon.logout size={14} />
           </button>
         )}
       </div>
     </nav>
   );
+}
+
+const ROLE_NAME: Record<string, string> = { owner: "владелец", admin: "админ", member: "участник", viewer: "только чтение" };
+
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const two = parts.length > 1 ? parts[0][0] + parts[1][0] : name.slice(0, 2);
+  return two.toUpperCase();
 }
 
 function statusShort(s: string): string {

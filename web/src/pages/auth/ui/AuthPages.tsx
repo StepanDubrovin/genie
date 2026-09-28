@@ -5,22 +5,19 @@ import { sessionKey } from "@/entities/session";
 import { request } from "@/shared/api";
 import { Icon } from "@/shared/ui";
 
-function AuthCard({ title, sub, children }: { title: string; sub?: string; children: ReactNode }) {
+function AuthCard({ title, sub, foot, children }: { title: string; sub?: string; foot?: ReactNode; children: ReactNode }) {
   return (
     <div className="auth-page">
       <div className="auth-card">
-        <div className="brand">
-          <span className="logo">
-            <Icon.spark size={14} style={{ color: "#fff" }} />
+        <div className="auth-head">
+          <span className="logo-mark lg">
+            <Icon.mark size={22} />
           </span>
-          <span style={{ display: "flex", flexDirection: "column" }}>
-            <span className="name">genie</span>
-            <span className="sub">задачи, знания и команды агентов</span>
-          </span>
+          <h1>{title}</h1>
+          {sub && <p className="auth-sub">{sub}</p>}
         </div>
-        <h1>{title}</h1>
-        {sub && <p className="auth-sub">{sub}</p>}
         {children}
+        {foot && <p className="auth-foot">{foot}</p>}
       </div>
     </div>
   );
@@ -52,7 +49,7 @@ export function LoginPage({ note }: { note?: string }) {
   const [password, setPassword] = useState("");
   const { onSubmit, error, busy } = useSubmit(() => request("POST", "/api/auth/login", { login, password }));
   return (
-    <AuthCard title="Вход" sub={note}>
+    <AuthCard title="Вход в genie" sub={note} foot="Нет аккаунта? Попросите у администратора ссылку-приглашение.">
       <form className="auth-form" onSubmit={onSubmit}>
         <label className="field">
           Логин

@@ -886,7 +886,10 @@ impl Vault {
         let (rel, abs) = self.resolve(path)?;
         let mut page = self.page(&rel)?.ok_or_else(|| GenieError::not_found(format!("documentation page {rel} not found")))?;
         self.staleness(&mut page);
-        let text = std::fs::read_to_string(&abs).map_err(|_| GenieError::not_found(format!("documentation page {rel} not found")))?;
+        let file = std::fs::read_to_string(&abs).map_err(|_| GenieError::not_found(format!("documentation page {rel} not found")))?;
+        // The page's fields travel in `page`; `content` is the Markdown body, as in the TS contract
+        // (the web editor saves frontmatter + body, so a body with frontmatter would duplicate it).
+        let text = parse_doc(&file, &rel).body;
         let mut content = text.clone();
         if let Some(h) = heading {
             let lines: Vec<&str> = text.lines().collect();
@@ -1183,6 +1186,7 @@ mod tests {
         assert_eq!(hits[0].page.path, "shop/auth.md", "ё/е match both ways");
         assert!(hits[0].snippet.contains('['));
         let r = v.read("shop/auth.md", None, None).unwrap();
+        assert!(!r.content.starts_with("---") && !r.content.contains("paths:"), "content is the body: {}", r.content);
         assert_eq!(r.links[0].resolution, "resolved");
         assert_eq!(r.links[1].resolution, "unresolved", "missing attachment");
         let g = v.read("shop/glossary", None, None).unwrap();
