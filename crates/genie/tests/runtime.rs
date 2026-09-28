@@ -117,3 +117,27 @@ async fn a_crashed_turn_gives_its_mail_back_and_is_retried() {
     let retried = turns.iter().filter(|t| t.agent == failed[0].agent && t.status == "succeeded").count();
     assert!(retried >= 1, "the same agent ran again and succeeded");
 }
+
+#[test]
+fn recovery_stops_only_verified_stray_agent_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::load(dir.path()).unwrap();
+    cfg.runtime.enabled = false;
+    let app = App::open(dir.path(), cfg, PathBuf::from("/nonexistent")).unwrap();
+    app.create_project("shop", "", None, None, None).unwrap();
+    let spawn = |env: &[(&str, &str)]| std::process::Command::new("sleep").arg("30").envs(env.iter().copied()).spawn().unwrap();
+    let mut stray = spawn(&[("GENIE_PROJECT", "shop"), ("GENIE_AGENT_NAME", "bender")]);
+    let mut other = spawn(&[]);
+    app.with_server(|db| {
+        let a = db.start_turn("shop", "G-1/bender", Some("G-1"), Some("bender"), None)?;
+        db.set_turn_pid(a, stray.id())?;
+        let b = db.start_turn("shop", "G-1/yoda", Some("G-1"), Some("yoda"), None)?;
+        db.set_turn_pid(b, other.id())
+    })
+    .unwrap();
+    genie::runtime::recover(&app).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(stray.try_wait().unwrap().is_some(), "the stray agent was stopped");
+    assert!(other.try_wait().unwrap().is_none(), "a process that is not that agent is left alone");
+    other.kill().unwrap();
+}

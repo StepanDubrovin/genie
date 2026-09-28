@@ -111,7 +111,29 @@ pub fn recover(app: &App) -> AppResult<()> {
     if !interrupted.is_empty() {
         println!("genie runtime: {} turn(s) were interrupted by the restart", interrupted.len());
     }
+    // An agent process may have outlived the server; its turn will run again, so
+    // stop the stray one — only if /proc shows it is really that agent.
+    for t in &interrupted {
+        let Some(pid) = t.pid else { continue };
+        let name = match (&t.member, t.job) {
+            (Some(m), _) => m.clone(),
+            (None, Some(j)) => format!("job-{j}"),
+            _ => ORCHESTRATOR.to_string(),
+        };
+        if is_our_agent(pid, &t.project, &name) {
+            let _ = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+            println!("genie runtime: stopped stray agent process {pid} ({}/{name})", t.project);
+        }
+    }
     Ok(())
+}
+
+/// Does `/proc/<pid>/environ` belong to this project's agent `name`?
+fn is_our_agent(pid: i64, project: &str, name: &str) -> bool {
+    let Ok(env) = std::fs::read(format!("/proc/{pid}/environ")) else { return false };
+    let vars: Vec<&[u8]> = env.split(|b| *b == 0).collect();
+    let has = |kv: String| vars.contains(&kv.as_bytes());
+    has(format!("GENIE_PROJECT={project}")) && has(format!("GENIE_AGENT_NAME={name}"))
 }
 
 async fn schedule(app: &Arc<App>, slots: &Arc<Semaphore>) -> AppResult<()> {

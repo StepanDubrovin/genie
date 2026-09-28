@@ -145,7 +145,7 @@ async fn agent_tokens_are_bound_to_their_project_and_role() {
         .unwrap();
     let r = &h.remote;
     let (s, t, _) = call(r, "POST", "/api/tasks").bearer(&token).no_csrf().json(json!({ "title": "x" })).send().await;
-    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "executors cannot create tasks: {t}");
+    assert_eq!(s, StatusCode::FORBIDDEN, "executors cannot create loose tasks: {t}");
     let (s, _, _) = call(r, "GET", "/api/tasks").bearer(&token).header("x-genie-project", "payments").send().await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     let (s, _, _) = call(r, "GET", "/api/tasks").bearer("gna_forged").send().await;
@@ -177,4 +177,54 @@ async fn invitations_create_members() {
     assert_eq!(s, StatusCode::CREATED);
     let (_, me, _) = call(&h.remote, "GET", "/api/auth/me").cookie(&cookies[0]).send().await;
     assert_eq!(me["projects"][0]["role"], "member");
+}
+
+#[tokio::test]
+async fn team_members_act_only_on_their_task_its_subtasks_and_epic_notes() {
+    use genie_core::team::{NewMember, NewTeam};
+    use genie_core::{Actor, CreateInput, TaskType};
+    let h = Harness::new();
+    h.project("shop");
+    h.app
+        .with_tracker("shop", |t| {
+            let o = Actor::new("orchestrator", Role::Orchestrator);
+            t.create(&o, CreateInput { title: "Epic".into(), task_type: Some(TaskType::Epic), ..Default::default() })?; // G-1
+            t.create(&o, CreateInput { title: "Mine".into(), parent: Some("G-1".into()), ..Default::default() })?; // G-2
+            t.create(&o, CreateInput { title: "Other".into(), ..Default::default() })?; // G-3
+            t.create(&o, CreateInput { title: "Sub".into(), parent: Some("G-2".into()), ..Default::default() })?; // G-4
+            t.bus().create(
+                "orchestrator",
+                "orchestrator",
+                NewTeam {
+                    id: "G-2".into(),
+                    task: "G-2".into(),
+                    cwd: "/tmp".into(),
+                    members: vec![NewMember { name: "sherlock".into(), role: "analyst".into(), ..Default::default() }],
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let token = h
+        .app
+        .with_server(|db| db.create_agent_token("shop", Role::Analyst, "sherlock", Some("G-2"), None, chrono::Duration::hours(1)))
+        .unwrap();
+    let r = &h.remote;
+    let token = &token;
+    let send = |m: &'static str, uri: String, body: serde_json::Value| async move {
+        call(r, m, &uri).bearer(token).no_csrf().json(body).send().await.0
+    };
+    assert_eq!(send("PATCH", "/api/tasks/G-2".into(), json!({ "plan": "p" })).await, StatusCode::OK);
+    assert_eq!(send("PATCH", "/api/tasks/G-4".into(), json!({ "plan": "p" })).await, StatusCode::OK, "subtasks are in scope");
+    assert_eq!(
+        send("POST", "/api/tasks/G-1/comments".into(), json!({ "text": "shared finding" })).await,
+        StatusCode::CREATED,
+        "notes on the epic"
+    );
+    assert_eq!(send("PATCH", "/api/tasks/G-1".into(), json!({ "plan": "p" })).await, StatusCode::FORBIDDEN, "but not edits of the epic");
+    assert_eq!(send("POST", "/api/tasks/G-3/comments".into(), json!({ "text": "x" })).await, StatusCode::FORBIDDEN);
+    assert_eq!(send("POST", "/api/tasks/G-3/status".into(), json!({ "status": "refining" })).await, StatusCode::FORBIDDEN);
+    assert_eq!(send("POST", "/api/tasks".into(), json!({ "title": "loose" })).await, StatusCode::FORBIDDEN);
+    assert_eq!(send("POST", "/api/tasks".into(), json!({ "title": "piece", "parent": "G-2" })).await, StatusCode::CREATED);
 }

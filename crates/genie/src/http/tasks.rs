@@ -44,6 +44,53 @@ pub async fn tracker<T: Send + 'static>(
     Ok(out)
 }
 
+/// What an agent does to a task: change it, or only leave a note (comment, artifact).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Touch {
+    Edit,
+    Note,
+}
+
+/// Agents act within their assignment: a team member (or job) changes only its
+/// own task and its subtasks, and may leave notes on that task's epic. The
+/// orchestrator and people are not limited here (the workflow rules still apply).
+pub async fn in_scope(app: &Arc<App>, access: &Access, id: &str, touch: Touch) -> ApiResult<()> {
+    if !access.agent || access.actor.role == Role::Orchestrator {
+        return Ok(());
+    }
+    let (slug, team, job, id) = (access.project.clone(), access.agent_team.clone(), access.agent_job, id.to_string());
+    let verdict = app
+        .blocking(move |app| {
+            let home = match (&team, job) {
+                (Some(t), _) => Some(app.with_tracker(&slug, |tr| Ok(tr.bus().get(t)?.task))?),
+                (None, Some(j)) => app.with_server(|db| db.job(j))?.task,
+                _ => None,
+            };
+            let Some(home) = home else { return Ok(Err("this agent has no task to work on".to_string())) };
+            app.with_tracker(&slug, |t| {
+                let target = t.normalize_id(&id)?;
+                let home = t.normalize_id(&home)?;
+                // The task itself or one of its descendants.
+                let mut cur = Some(target.clone());
+                for _ in 0..10 {
+                    match cur {
+                        Some(c) if c == home => return Ok(Ok(())),
+                        Some(c) => cur = t.get(&c).ok().and_then(|x| x.parent),
+                        None => break,
+                    }
+                }
+                if touch == Touch::Note && t.epic_of(&home)?.as_deref() == Some(target.as_str()) {
+                    return Ok(Ok(()));
+                }
+                Ok(Err(format!(
+                    "agents change only their own task ({home}) and its subtasks, and leave notes on its epic; {target} is outside"
+                )))
+            })
+        })
+        .await?;
+    verdict.map_err(|m| ApiError::new(StatusCode::FORBIDDEN, m))
+}
+
 /// Something changed in a project: wake the workers that react to it.
 pub fn changed(app: &App) {
     app.wake_engine.notify_one();
@@ -139,6 +186,13 @@ fn text(v: &Value) -> Option<String> {
 async fn create(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<Value>) -> ApiResult<impl IntoResponse> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    if access.agent && access.actor.role != Role::Orchestrator {
+        let parent = b["parent"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ApiError::new(StatusCode::FORBIDDEN, "agents create only subtasks of their own task (pass parent)"))?;
+        in_scope(&app, &access, parent, Touch::Edit).await?;
+    }
     let input = CreateInput {
         title: b["title"].as_str().unwrap_or_default().to_string(),
         task_type: b["type"].as_str().and_then(|t| t.parse().ok()),
@@ -161,6 +215,7 @@ async fn create(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<Value>) -> 
 async fn update(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    in_scope(&app, &access, &id, Touch::Edit).await?;
     let input = UpdateInput {
         title: b.get("title").and_then(text),
         task_type: b["type"].as_str().and_then(|t| t.parse().ok()),
@@ -191,6 +246,7 @@ async fn update(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
 async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    in_scope(&app, &access, &id, Touch::Edit).await?;
     let to_raw = b["status"].as_str().unwrap_or_default().to_string();
     let to: Status = to_raw.parse().map_err(|_| ApiError::bad(format!("unknown status {to_raw}")))?;
     // The owner's moves in the web UI are authoritative (as in the TypeScript server);
@@ -209,6 +265,7 @@ async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
 async fn comment(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<impl IntoResponse> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    in_scope(&app, &access, &id, Touch::Note).await?;
     let text = b["text"].as_str().unwrap_or_default().to_string();
     let kind =
         if access.is_human() { CommentKind::Owner } else { b["kind"].as_str().and_then(|k| k.parse().ok()).unwrap_or(CommentKind::Note) };
@@ -226,6 +283,7 @@ async fn check(
 ) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    in_scope(&app, &access, &id, Touch::Edit).await?;
     let done = body.map(|Json(b)| b["done"] != json!(false)).unwrap_or(true);
     let actor = access.actor.clone();
     let task = tracker(&app, &access, move |t| t.check(&actor, &id, n, done)).await?;
@@ -236,6 +294,7 @@ async fn check(
 async fn add_artifact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<impl IntoResponse> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    in_scope(&app, &access, &id, Touch::Note).await?;
     let kind = b["kind"].as_str().and_then(|k| k.parse().ok()).or(Some(ArtifactKind::Doc));
     let content = match b["contentBase64"].as_str() {
         Some(b64) => base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| ApiError::bad(format!("contentBase64: {e}")))?,
@@ -314,6 +373,7 @@ async fn read_artifact(
 async fn split(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<impl IntoResponse> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    in_scope(&app, &access, &id, Touch::Edit).await?;
     let children: Vec<CreateInput> = b["children"]
         .as_array()
         .map(|a| {
@@ -345,6 +405,7 @@ async fn split(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Js
 async fn block(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    in_scope(&app, &access, &id, Touch::Edit).await?;
     let reason = b["reason"].as_str().unwrap_or_default().trim().to_string();
     if reason.is_empty() {
         return Err(ApiError::bad("reason is required"));
@@ -358,6 +419,7 @@ async fn block(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Js
 async fn unblock(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    in_scope(&app, &access, &id, Touch::Edit).await?;
     let actor = access.actor.clone();
     let task = tracker(&app, &access, move |t| t.unblock(&actor, &id)).await?;
     changed(&app);
