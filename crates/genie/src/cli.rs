@@ -50,6 +50,8 @@ enum Command {
         #[arg(long)]
         email: Option<String>,
     },
+    /// Consistent snapshot of every database and the vault into a directory.
+    Backup { dir: PathBuf },
     /// Knowledge vault maintenance.
     #[command(subcommand)]
     Vault(VaultCmd),
@@ -220,6 +222,11 @@ pub async fn run() -> Result<(), String> {
             println!("{}/invite?token={token}", cfg.public_url());
         }
         Command::Agent(cmd) => crate::agent_cli::run(cmd).await?,
+        Command::Backup { dir } => {
+            let cfg = Config::load(&data)?;
+            let report = backup(&data, &cfg, &dir)?;
+            println!("{report}");
+        }
         Command::Vault(cmd) => {
             let cfg = Config::load(&data)?;
             let vault_dir = cfg.vault_path(&data);
@@ -285,4 +292,44 @@ pub async fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `VACUUM INTO` gives a consistent copy of a live SQLite database (WAL included)
+/// without stopping the server; the vault is bundled with git (or copied).
+pub fn backup(data: &std::path::Path, cfg: &Config, dir: &std::path::Path) -> Result<String, String> {
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let out = dir.join(format!("genie-{stamp}"));
+    std::fs::create_dir_all(out.join("projects")).map_err(|e| e.to_string())?;
+    let snapshot = |src: &std::path::Path, dst: &std::path::Path| -> Result<(), String> {
+        let conn = rusqlite::Connection::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(30)).map_err(|e| e.to_string())?;
+        conn.execute("VACUUM INTO ?1", [dst.to_string_lossy()]).map_err(|e| format!("{}: {e}", src.display()))?;
+        Ok(())
+    };
+    let mut lines = Vec::new();
+    snapshot(&data.join("server.db"), &out.join("server.db"))?;
+    lines.push("server.db".to_string());
+    let db = ServerDb::open(&data.join("server.db")).map_err(|e| e.to_string())?;
+    for p in db.projects().map_err(|e| e.to_string())? {
+        let src = std::path::Path::new(&p.tracker_dir).join("genie.db");
+        snapshot(&src, &out.join("projects").join(format!("{}.db", p.slug)))?;
+        lines.push(format!("projects/{}.db ({})", p.slug, src.display()));
+    }
+    let vault = cfg.vault_path(data);
+    if vault.join(".git").exists() {
+        let bundle = out.join("vault.bundle");
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&vault)
+            .args(["bundle", "create"])
+            .arg(&bundle)
+            .arg("--all")
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !st.status.success() {
+            return Err(format!("git bundle: {}", String::from_utf8_lossy(&st.stderr)));
+        }
+        lines.push("vault.bundle (restore: git clone vault.bundle vault)".into());
+    }
+    Ok(format!("backup in {}:\n  {}", out.display(), lines.join("\n  ")))
 }

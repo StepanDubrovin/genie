@@ -67,9 +67,14 @@ npm run dev:web           # Vite с проксированием /api на `geni
 node scripts/e2e.ts --template standard --model litellm/deepseek-v4-flash-vision-exp --analyst-model litellm/deepseek-v4-flash-vision-exp
 ```
 
-**Rust-сервер (перенос, идёт Ф0).** Ядро и `genie serve` переписываются на Rust — план и статус в [docs/platform/backend.md](docs/platform/backend.md). Сейчас Rust-сервер открывает существующий `.genie/genie.db` на месте и отдаёт веб-интерфейсу чтение задач, эпиков и живой поток; рабочим инструментом пока остаётся TypeScript-версия.
+## Genie server (Rust)
+
+Командный сервис: несколько проектов и людей, агенты без открытого терминала, автоматизации, Telegram и почта, база знаний в формате Obsidian. Подробно — [docs/platform/getting-started.md](docs/platform/getting-started.md), архитектура — [docs/platform/vision.md](docs/platform/vision.md).
 
 ```bash
-cargo test                                          # ядро трекера, журнал событий, сервер
-cargo run -p genie -- serve --dir <repo>/.genie     # веб на http://127.0.0.1:7420 (нужен npm run build:web)
+cargo build --release -p genie && npm install && npm run build:web
+./target/release/genie project add shop --repo ~/code/shop          # проект (существующий .genie/ подхватится)
+./target/release/genie serve --web web/dist                          # http://127.0.0.1:7420
+echo 'пароль' | ./target/release/genie user add anna --admin --password-stdin   # когда нужен вход и коллеги
+cargo test                                                            # в том числе оба сценария владельца end-to-end
 ```
