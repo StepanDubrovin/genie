@@ -8,6 +8,7 @@ import { EpicPage } from "@/pages/epic";
 import { EpicsPage } from "@/pages/epics";
 import { DocsPage } from "@/pages/docs";
 import { InvitePage, LoginPage } from "@/pages/auth";
+import { AnswerPage, AutomationsPage, NotificationsPage, ProfilePage, ProposalsPage } from "@/pages/platform";
 import { useSession } from "@/entities/session";
 import { TasksPage } from "@/pages/tasks";
 import { TeamView } from "@/pages/team";
@@ -32,8 +33,9 @@ function Shell() {
   const tasks = useTasks().data;
   const teamRoute = location.pathname.startsWith("/team/");
   const docsRoute = location.pathname.startsWith("/docs");
+  const platformRoute = ["/automations", "/notifications", "/profile"].some((p) => location.pathname.startsWith(p));
   // Pages without a task list: palette actions that need one go to "active".
-  const ownPage = teamRoute || location.pathname.startsWith("/epic") || docsRoute;
+  const ownPage = teamRoute || location.pathname.startsWith("/epic") || docsRoute || platformRoute;
   const openTaskId = teamRoute ? undefined : (sp.get("task") ?? undefined);
   const openTask = tasks?.find((t) => t.id === openTaskId);
 
@@ -160,6 +162,7 @@ function Gate() {
 
 export const router = createBrowserRouter([
   { path: "/invite", element: <InvitePage /> },
+  { path: "/answer", element: <AnswerPage /> },
   {
     path: "/",
     element: <Gate />,
@@ -170,6 +173,10 @@ export const router = createBrowserRouter([
       { path: "epic/:epicId", element: <EpicRoute /> },
       { path: "docs", element: <DocsPage /> },
       { path: "docs/edit", element: <DocsPage /> },
+      { path: "docs/proposals", element: <ProposalsPage /> },
+      { path: "automations", element: <AutomationsPage /> },
+      { path: "notifications", element: <NotificationsPage /> },
+      { path: "profile", element: <ProfilePage /> },
       { path: ":view", element: <TasksRoute /> },
     ],
   },

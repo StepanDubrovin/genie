@@ -2,6 +2,7 @@ import { NavLink, useLocation } from "react-router";
 import { BookIcon, useDocsTree } from "@/entities/doc";
 import { useMeta } from "@/entities/project";
 import { useLogout, useSession, useSwitchProject } from "@/entities/session";
+import { useNotifications, useProposals } from "@/entities/platform";
 import { EpicIcon, inTaskViews, StageBars, StatusIcon, stageOf, type ViewId, VIEWS, useTasks } from "@/entities/task";
 import { useTeams } from "@/entities/team";
 import { timeAgo, useTick } from "@/shared/lib";
@@ -21,6 +22,8 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
   const session = useSession().data;
   const switchProject = useSwitchProject();
   const logout = useLogout();
+  const unread = useNotifications().data?.unread ?? 0;
+  const proposals = useProposals().data?.length ?? 0;
   const teams = useTeams().data?.filter((t) => t.state === "active") ?? [];
   const { search, pathname } = useLocation();
   const tasks = useTasks().data;
@@ -84,6 +87,23 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
         <span className="count">{docs ? docsCount : ""}</span>
       </NavLink>
 
+      <NavLink to="/docs/proposals" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+        <Icon.check size={15} />
+        <span className="grow">Предложения</span>
+        {proposals > 0 ? <span className="count alert">{proposals}</span> : <span className="count" />}
+      </NavLink>
+
+      <NavLink to="/automations" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+        <Icon.spark size={15} />
+        <span className="grow">Автоматизации</span>
+      </NavLink>
+
+      <NavLink to="/notifications" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+        <Icon.send size={15} />
+        <span className="grow">Уведомления</span>
+        {unread > 0 ? <span className="count alert">{unread}</span> : <span className="count" />}
+      </NavLink>
+
       {teams.length > 0 && <div className="nav-section">Команды</div>}
       {teams.map((t) => {
         const status = t.taskInfo?.status;
@@ -112,6 +132,9 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
           {online ? "Живое обновление" : "Нет связи с сервером"}
         </span>
         <span className="mono">{meta?.tailnet ? `${meta.tailnet}` : location.host}</span>
+        <NavLink to="/profile" className="logout">
+          Профиль
+        </NavLink>
         {session?.mode === "users" && (
           <button type="button" className="logout" onClick={() => void logout()}>
             Выйти ({session.user.login})

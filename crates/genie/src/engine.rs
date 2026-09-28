@@ -715,7 +715,7 @@ pub fn playbooks() -> Vec<(&'static str, &'static str, Value)> {
                     { "id": "criteria", "if": "{{ steps.analyse.output.draft_acceptance | length }}", "task.comment": { "kind": "decision", "text": "Черновик критериев приёмки от аналитика:\n{{ steps.analyse.output.draft_acceptance | lines }}" } },
                     { "id": "ask", "if": "{{ steps.analyse.output.questions | length }}", "ask": {
                         "to": ["event.actor"],
-                        "from": "аналитик",
+                        "from": "аналитика",
                         "questions": "{{ steps.analyse.output.questions }}",
                         "remindAfter": "24h",
                         "timeout": "72h",
