@@ -1,6 +1,6 @@
 {
   "name": "genie",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Orchestrator + focus teams for pi: local task tracker, peer-to-peer team messaging, per-team worktrees, mixed-model teams.",
   "type": "module",
