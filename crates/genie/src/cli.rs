@@ -302,6 +302,13 @@ pub async fn run() -> Result<(), String> {
             match cmd {
                 AgentsCmd::Check => {
                     println!("{}", crate::agent_config::report(&agents));
+                    let with_mcp: Vec<&str> = agents.roles.values().filter(|r| !r.mcp.is_empty()).map(|r| r.id.as_str()).collect();
+                    if !with_mcp.is_empty() && !cfg.runtime.mcp_adapter() {
+                        println!(
+                            "warning: roles {} have MCP connections, but pi does not load pi-mcp-adapter: `pi install npm:pi-mcp-adapter` (or set runtime.mcpAdapter)",
+                            with_mcp.join(", ")
+                        );
+                    }
                     let errors = agents.errors().count();
                     if errors > 0 {
                         return Err(format!("{errors} error(s) in the agent configuration of {}", data.display()));

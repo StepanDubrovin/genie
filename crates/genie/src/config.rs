@@ -89,7 +89,12 @@ impl Default for Language {
 /// placeholder in it resolved to a non-empty value, so optional flags
 /// (`--model {model}`) disappear when unset. Placeholders: `{sessionDir}`,
 /// `{sessionId}`, `{model}`, `{thinking}`, `{promptFile}`, `{message}` (turns),
-/// `{extension}` (sessions), `{readonlyTools}` (read-only roles), `{cwd}`.
+/// `{extension}` (sessions), `{readonlyTools}` (read-only roles), `{cwd}`,
+/// `{guard}` (the genie guard extension), `{mcpConfig}` (the role's MCP
+/// connections for pi-mcp-adapter), `{limitSkills}` (the role lists its skills)
+/// and `{skill}` — a list: its group is repeated for each skill directory.
+/// `{?name}` adds nothing but keeps its group only when `name` is set
+/// (`["--no-skills", "{?limitSkills}"]`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RuntimeConfig {
@@ -111,11 +116,45 @@ pub struct RuntimeConfig {
     pub delivery_budget: usize,
     /// Extra environment for agent processes.
     pub env: BTreeMap<String, String>,
+    /// Whether pi loads pi-mcp-adapter, so agents get their MCP config (`{mcpConfig}`):
+    /// unset — found in pi's settings (`pi install npm:pi-mcp-adapter`); `true`/`false` — say so.
+    pub mcp_adapter: Option<bool>,
     /// Disable to run the server without starting any agent (UI-only mode).
     pub enabled: bool,
 }
 
 impl RuntimeConfig {
+    /// Whether pi loads pi-mcp-adapter (which reads `--mcp-config`; pi refuses the flag
+    /// without it): `mcpAdapter`, else a command loading it, else pi's settings — its
+    /// packages and extensions — or its extensions directory.
+    pub fn mcp_adapter(&self) -> bool {
+        const NAME: &str = "pi-mcp-adapter";
+        if let Some(v) = self.mcp_adapter {
+            return v;
+        }
+        if self.command.iter().chain(&self.session_command).flatten().any(|a| a.contains(NAME)) {
+            return true;
+        }
+        let home = std::env::var("HOME").unwrap_or_default();
+        let dir = match self.env.get("PI_CODING_AGENT_DIR").cloned().or_else(|| std::env::var("PI_CODING_AGENT_DIR").ok()) {
+            Some(d) => match d.strip_prefix("~/") {
+                Some(rest) => PathBuf::from(&home).join(rest),
+                None => PathBuf::from(d),
+            },
+            None => PathBuf::from(&home).join(".pi").join("agent"),
+        };
+        let settings: serde_json::Value =
+            std::fs::read_to_string(dir.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let listed = ["packages", "extensions"]
+            .iter()
+            .filter_map(|k| settings[*k].as_array())
+            .flatten()
+            .any(|e| e.as_str().or_else(|| e["source"].as_str()).is_some_and(|s| s.contains(NAME)));
+        listed
+            || std::fs::read_dir(dir.join("extensions"))
+                .is_ok_and(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().contains(NAME)))
+    }
+
     /// Whether members and the orchestrator run as live sessions.
     pub fn live_sessions(&self) -> bool {
         match self.mode.as_str() {
@@ -139,6 +178,10 @@ impl Default for RuntimeConfig {
                 g(&["--thinking", "{thinking}"]),
                 g(&["--append-system-prompt", "{promptFile}"]),
                 g(&["--exclude-tools", "{readonlyTools}"]),
+                g(&["--no-skills", "{?limitSkills}"]),
+                g(&["--skill", "{skill}"]),
+                g(&["-e", "{guard}"]),
+                g(&["--mcp-config", "{mcpConfig}"]),
                 g(&["{message}"]),
             ],
             session_command: vec![
@@ -149,7 +192,11 @@ impl Default for RuntimeConfig {
                 g(&["--thinking", "{thinking}"]),
                 g(&["--append-system-prompt", "{promptFile}"]),
                 g(&["--exclude-tools", "{readonlyTools}"]),
+                g(&["--no-skills", "{?limitSkills}"]),
+                g(&["--skill", "{skill}"]),
                 g(&["-e", "{extension}"]),
+                g(&["-e", "{guard}"]),
+                g(&["--mcp-config", "{mcpConfig}"]),
             ],
             max_concurrent: 4,
             max_sessions: 12,
@@ -159,6 +206,7 @@ impl Default for RuntimeConfig {
             ask_timeout_secs: 180,
             delivery_budget: genie_core::team::DELIVERY_BUDGET,
             env: BTreeMap::new(),
+            mcp_adapter: None,
             enabled: true,
         }
     }
@@ -303,5 +351,25 @@ mod tests {
         assert_eq!(cfg.runtime.max_concurrent, 1);
         assert_eq!(cfg.runtime.turn_timeout_secs, 1800, "unset runtime fields keep defaults");
         assert_eq!(cfg.limits.max_members_per_team, 6);
+    }
+
+    #[test]
+    fn pi_mcp_adapter_is_found_in_pis_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = RuntimeConfig::default();
+        rt.env.insert("PI_CODING_AGENT_DIR".into(), dir.path().to_string_lossy().into_owned());
+        assert!(!rt.mcp_adapter(), "no settings");
+        let settings = |v: &str| std::fs::write(dir.path().join("settings.json"), v).unwrap();
+        settings(r#"{"packages": ["npm:pi-web-access"]}"#);
+        assert!(!rt.mcp_adapter());
+        settings(r#"{"packages": ["npm:pi-web-access", "npm:pi-mcp-adapter@3.1.0"]}"#);
+        assert!(rt.mcp_adapter(), "pi install npm:pi-mcp-adapter");
+        settings(r#"{"packages": [{"source": "git:github.com/nicobailon/pi-mcp-adapter", "extensions": ["index.ts"]}]}"#);
+        assert!(rt.mcp_adapter(), "a filtered package entry");
+        settings("{}");
+        std::fs::create_dir_all(dir.path().join("extensions/pi-mcp-adapter")).unwrap();
+        assert!(rt.mcp_adapter(), "the extensions directory");
+        rt.mcp_adapter = Some(false);
+        assert!(!rt.mcp_adapter(), "the setting wins");
     }
 }

@@ -28,7 +28,7 @@ use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 
-use crate::agent_config::{AgentConfig, MailMode, RelKind, Relation, RoleDef, SpecMember, Stage, TeamSpec, Workspace};
+use crate::agent_config::{AgentConfig, FileAccess, MailMode, RelKind, Relation, RoleDef, SpecMember, Stage, TeamSpec, Workspace};
 use crate::config::MemberSpec;
 use crate::state::{App, AppError, AppResult};
 
@@ -229,6 +229,7 @@ struct Prepared {
     thinking: Option<String>,
     prompt: String,
     message: String,
+    kit: Kit,
     /// Per-turn agent token, revoked when the turn ends.
     token: String,
 }
@@ -291,6 +292,26 @@ fn project_workspace(app: &App, p: &Project, sub: &str) -> PathBuf {
     }
 }
 
+/// Where a team member works: the team's directory, or an empty one of its own
+/// when its role does not work with files (`files: none`).
+fn member_workspace(app: &App, project: &Project, role: &RoleDef, team_cwd: &str, team: &str, member: &str) -> PathBuf {
+    let cwd = PathBuf::from(team_cwd);
+    if role.files == FileAccess::None {
+        project_workspace_dir(app, &project.slug, &format!("{team}-{member}"))
+    } else if cwd.is_dir() {
+        cwd
+    } else {
+        project_workspace(app, project, team)
+    }
+}
+
+/// `<data>/workspaces/<project>/<name>`, created on first use.
+fn project_workspace_dir(app: &App, slug: &str, name: &str) -> PathBuf {
+    let d = app.data.join("workspaces").join(slug).join(name);
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
 /// Model and thinking: an explicit choice (member, job), then the role, then
 /// `roleModels` by role id and by class.
 fn role_model(app: &App, role: &RoleDef, model: Option<String>, thinking: Option<String>) -> (Option<String>, Option<String>) {
@@ -334,6 +355,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
             let agents = app.agents();
             let def = orchestrator_role(&agents)?;
             let (model, thinking) = role_model(app, &def, None, None);
+            let cwd = project_workspace(app, &project, "orchestrator");
             Ok(Some(Prepared {
                 turn,
                 role: Role::Orchestrator,
@@ -343,7 +365,8 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 team: None,
                 task: None,
                 job: None,
-                cwd: project_workspace(app, &project, "orchestrator"),
+                kit: kit(&agents, slug, &def, def.files, &cwd),
+                cwd,
                 session_id: format!("{slug}-orchestrator"),
                 model,
                 thinking,
@@ -366,7 +389,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
             app.with_server(|db| db.set_turn_mail(turn, &mail.iter().map(|m| m.id).collect::<Vec<_>>()))?;
             app.with_tracker(slug, |t| t.bus().set_activity(team, member, "working", Some(json!({ "kind": "turn", "turn": turn }))))?;
             let (model, thinking) = role_model(app, &def, m.model.clone(), m.thinking.clone());
-            let cwd = PathBuf::from(&t.cwd);
+            let cwd = member_workspace(app, &project, &def, &t.cwd, team, member);
             Ok(Some(Prepared {
                 turn,
                 role: def.class,
@@ -376,7 +399,8 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 team: Some(team.clone()),
                 task: Some(t.task.clone()),
                 job: None,
-                cwd: if cwd.is_dir() { cwd } else { project_workspace(app, &project, team) },
+                kit: kit(&agents, slug, &def, def.files, &cwd),
+                cwd,
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,
                 thinking,
@@ -395,38 +419,97 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 Ok(Some(j))
             })?;
             let Some(j) = j else { return Ok(None) };
-            let agents = app.agents();
-            let def = running_role(&agents, &j.role)?;
             let turn = app.with_server(|db| db.start_turn(slug, &label, None, None, Some(*job)))?;
-            let (model, thinking) = role_model(app, &def, j.model.clone(), None);
-            let cwd = match j.workspace.as_str() {
-                "scratch" | "none" => {
-                    let d = app.data.join("workspaces").join(slug).join(format!("job-{job}"));
-                    let _ = std::fs::create_dir_all(&d);
-                    d
-                }
-                _ => project_workspace(app, &project, "jobs"),
-            };
-            Ok(Some(Prepared {
-                turn,
-                role: def.class,
-                role_id: def.id.clone(),
-                readonly: def.excluded_tools().unwrap_or_default(),
-                name: format!("job-{job}"),
-                team: None,
-                task: j.task.clone(),
-                job: Some(*job),
-                cwd,
-                // A job starts fresh on each attempt: no hidden state between retries.
-                session_id: format!("{slug}-job-{job}-{}", j.attempts + 1),
-                model,
-                thinking,
-                prompt: agent_prompt(app, &agents, &project, &def, None, false, Reader::Job),
-                message: job_message(&j),
-                token: String::new(),
-            }))
+            // A job that cannot start (its role removed, no worktree) fails this attempt instead of hanging.
+            let prepared = prepare_job(app, &project, &j, turn);
+            if let Err(e) = &prepared {
+                let (error, max) = (e.to_string(), i64::from(app.cfg.runtime.max_attempts.max(1)));
+                app.with_server(|db| {
+                    db.finish_turn(turn, "failed", None, Some(&error), None)?;
+                    db.finish_job(*job, false, Some(&error), max).map(|_| ())
+                })?;
+            }
+            prepared.map(Some)
         }
     }
+}
+
+fn prepare_job(app: &App, project: &Project, j: &Job, turn: i64) -> AppResult<Prepared> {
+    let agents = app.agents();
+    let def = running_role(&agents, &j.role)?;
+    let (model, thinking) = role_model(app, &def, j.model.clone(), None);
+    let place = job_workspace(app, project, j, def.files)?;
+    Ok(Prepared {
+        turn,
+        role: def.class,
+        role_id: def.id.clone(),
+        readonly: if place.files == FileAccess::Write { String::new() } else { "edit,write".into() },
+        name: format!("job-{}", j.id),
+        team: None,
+        task: j.task.clone(),
+        job: Some(j.id),
+        kit: kit(&agents, &project.slug, &def, place.files, &place.cwd),
+        cwd: place.cwd,
+        // A job starts fresh on each attempt: no hidden state between retries.
+        session_id: format!("{}-job-{}-{}", project.slug, j.id, j.attempts + 1),
+        model,
+        thinking,
+        prompt: agent_prompt(app, &agents, project, &def, None, false, Reader::Job),
+        message: job_message(j, &place.note),
+        token: String::new(),
+    })
+}
+
+/// Where a job works and what it may change there.
+struct JobPlace {
+    cwd: PathBuf,
+    files: FileAccess,
+    /// For the job's message.
+    note: String,
+}
+
+/// A job's `workspace`: `read-only` — the repository without edit and write;
+/// `worktree` — its own git worktree (kept across attempts); `scratch` and
+/// `none` — an empty directory of the job, as for a role with `files: none`.
+fn job_workspace(app: &App, project: &Project, j: &Job, role_files: FileAccess) -> AppResult<JobPlace> {
+    let own_dir = || project_workspace_dir(app, &project.slug, &format!("job-{}", j.id));
+    if role_files == FileAccess::None {
+        let cwd = own_dir();
+        return Ok(JobPlace {
+            note: format!(
+                "You work in `{}`, an empty directory of this job: your role does not work with the project's files.",
+                cwd.display()
+            ),
+            cwd,
+            files: role_files,
+        });
+    }
+    Ok(match (j.workspace.as_str(), &project.repo) {
+        ("read-only", repo) => {
+            let cwd = project_workspace(app, project, "jobs");
+            let what = if repo.is_some() { "the project's repository" } else { "the project's directory" };
+            JobPlace {
+                note: format!("You work in {what} `{}` read-only: read, search and run checks, but do not change files.", cwd.display()),
+                files: if role_files == FileAccess::Write { FileAccess::Read } else { role_files },
+                cwd,
+            }
+        }
+        ("worktree", Some(repo)) => {
+            let w = job_worktree(app, Path::new(repo), j)?;
+            JobPlace {
+                note: format!(
+                    "You work in your own git worktree `{}` on branch `{}`, made from the repository's HEAD. Commit your changes there: the branch is your result and stays after the job.",
+                    w.path, w.branch
+                ),
+                cwd: PathBuf::from(w.path),
+                files: role_files,
+            }
+        }
+        _ => {
+            let cwd = own_dir();
+            JobPlace { note: format!("You work in `{}`, an empty directory of this job.", cwd.display()), cwd, files: role_files }
+        }
+    })
 }
 
 /// Launch the harness for a prepared turn and wait for it (with a timeout).
@@ -438,7 +521,8 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
     let sessions = app.data.join("sessions").join(key.project());
     tokio::fs::create_dir_all(&sessions).await.map_err(|e| e.to_string())?;
     let token = p.token.clone();
-    let vars: HashMap<&str, String> = HashMap::from([
+    let files = p.kit.write(app, &dir, &p.role_id).map_err(|e| e.to_string())?;
+    let mut vars: HashMap<&str, String> = HashMap::from([
         ("sessionDir", sessions.to_string_lossy().into_owned()),
         ("sessionId", p.session_id.clone()),
         ("model", p.model.clone().unwrap_or_default()),
@@ -448,10 +532,12 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
         ("readonlyTools", p.readonly.clone()),
         ("cwd", p.cwd.to_string_lossy().into_owned()),
     ]);
-    let argv = build_command(&app.cfg.runtime.command, &vars);
+    let lists = p.kit.placeholders(&files, &mut vars);
+    let argv = build_command(&app.cfg.runtime.command, &vars, &lists);
     let Some((program, args)) = argv.split_first() else { return Err("runtime.command is empty".into()) };
     let who = Identity { role: p.role, role_id: &p.role_id, name: &p.name, team: p.team.as_deref(), task: p.task.as_deref(), job: p.job };
     let mut cmd = agent_command(app, program, args, &p.cwd, key.project(), &who, &token);
+    kit_env(&mut cmd, &files, &argv);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
     if let Some(pid) = child.id() {
@@ -536,6 +622,140 @@ pub(crate) fn agent_command(
     cmd
 }
 
+// --- what the harness gets from the role ------------------------------------------
+
+/// An agent's harness setup from its role, besides the prompt: skills, MCP
+/// connections and the rules of the genie guard extension.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Kit {
+    /// `{skill}`: the role's skills, then the repository's skill directories.
+    pub skills: Vec<String>,
+    /// `{?limitSkills}`: the role lists its skills, so the harness loads no others.
+    pub limit_skills: bool,
+    /// The pi-mcp-adapter config with only the role's connections (secrets resolved).
+    pub mcp: serde_json::Value,
+    /// The guard's rules (`GENIE_POLICY`).
+    pub policy: serde_json::Value,
+}
+
+/// The files a started agent reads.
+pub(crate) struct KitFiles {
+    pub policy: PathBuf,
+    /// Only when pi loads pi-mcp-adapter (pi refuses `--mcp-config` otherwise).
+    pub mcp_config: Option<PathBuf>,
+    pub guard: PathBuf,
+}
+
+/// The rules the guard enforces for a role (`files` may be narrower than the role's: a read-only job).
+pub(crate) fn policy(agents: &AgentConfig, project: &str, role: &RoleDef, files: FileAccess) -> serde_json::Value {
+    let mcp: serde_json::Map<String, serde_json::Value> = agents
+        .mcp_for(project, role)
+        .into_iter()
+        .map(|(s, tools)| (s.id.clone(), tools.map_or(serde_json::Value::Null, |t| json!(t))))
+        .collect();
+    json!({ "role": role.id, "files": files, "denyCommands": role.deny_commands, "mcp": mcp })
+}
+
+/// The kit of an agent working in `cwd`.
+pub(crate) fn kit(agents: &AgentConfig, project: &str, role: &RoleDef, files: FileAccess, cwd: &Path) -> Kit {
+    let mut skills: Vec<String> =
+        role.skills.iter().flatten().filter_map(|name| agents.skills.get(name)).map(|s| s.dir.to_string_lossy().into_owned()).collect();
+    skills.extend(repo_skill_dirs(cwd).into_iter().map(|d| d.to_string_lossy().into_owned()));
+    let servers: serde_json::Map<String, serde_json::Value> = agents
+        .mcp_for(project, role)
+        .into_iter()
+        .map(|(s, tools)| {
+            let mut entry = s.resolved();
+            if let (Some(tools), Some(o)) = (tools, entry.as_object_mut()) {
+                o.insert("includeTools".into(), json!(tools));
+            }
+            (s.id.clone(), entry)
+        })
+        .collect();
+    Kit { skills, limit_skills: role.skills.is_some(), mcp: json!({ "mcpServers": servers }), policy: policy(agents, project, role, files) }
+}
+
+/// The project's own skills, which every agent gets: `.pi/skills` and `.agents/skills`
+/// from the working directory up to the repository root.
+fn repo_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let root = cwd.ancestors().find(|d| d.join(".git").exists());
+    let mut out: Vec<PathBuf> = vec![cwd.join(".pi").join("skills")];
+    for d in cwd.ancestors() {
+        out.push(d.join(".agents").join("skills"));
+        if root.is_none_or(|r| d == r) {
+            break;
+        }
+    }
+    out.retain(|d| d.is_dir());
+    out
+}
+
+impl Kit {
+    /// Write the agent's rules and MCP config into its runtime directory `dir`.
+    pub(crate) fn write(&self, app: &App, dir: &Path, role: &str) -> std::io::Result<KitFiles> {
+        let text = |v: &serde_json::Value| serde_json::to_string_pretty(v).unwrap_or_default();
+        let adapter = app.cfg.runtime.mcp_adapter();
+        let files = KitFiles {
+            policy: dir.join("policy.json"),
+            mcp_config: adapter.then(|| dir.join("mcp.json")),
+            guard: crate::sessions::write_guard(app)?,
+        };
+        write_private(&files.policy, &text(&self.policy))?;
+        match &files.mcp_config {
+            Some(path) => write_private(path, &text(&self.mcp))?,
+            None => {
+                let _ = std::fs::remove_file(dir.join("mcp.json"));
+                if self.mcp["mcpServers"].as_object().is_some_and(|m| !m.is_empty()) {
+                    warn_once(&format!(
+                        "genie runtime: the role {role} has MCP connections, but pi does not load pi-mcp-adapter (`pi install npm:pi-mcp-adapter`, or set runtime.mcpAdapter); its agents run without MCP"
+                    ));
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    /// Add the kit's placeholders for the harness command to `vars`; returns its lists.
+    pub(crate) fn placeholders(&self, files: &KitFiles, vars: &mut HashMap<&str, String>) -> HashMap<&'static str, Vec<String>> {
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        vars.insert("guard", path(&files.guard));
+        vars.insert("mcpConfig", files.mcp_config.as_deref().map(path).unwrap_or_default());
+        vars.insert("limitSkills", if self.limit_skills { "yes".into() } else { String::new() });
+        HashMap::from([("skill", self.skills.clone())])
+    }
+}
+
+/// Print a warning once per server run.
+fn warn_once(text: &str) {
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.get_or_insert_default().insert(text.to_string()) {
+        eprintln!("{text}");
+    }
+}
+
+/// Tell the started agent where its rules are; with its MCP config on the command
+/// line, pi-mcp-adapter reads that file only (no user-wide or repository configs).
+pub(crate) fn kit_env(cmd: &mut tokio::process::Command, files: &KitFiles, argv: &[String]) {
+    cmd.env("GENIE_POLICY", &files.policy);
+    if files.mcp_config.as_ref().is_some_and(|m| argv.iter().any(|a| Path::new(a) == m)) {
+        cmd.env("PI_MCP_CONFIG_MODE", "exclusive");
+    }
+}
+
+/// Write a file only its owner can read (it may hold secrets), replacing it at once.
+pub(crate) fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts.open(&tmp)?.write_all(text.as_bytes())?;
+    std::fs::rename(&tmp, path)
+}
+
 /// What a live session runs as.
 pub(crate) struct Spec {
     pub role: Role,
@@ -550,6 +770,7 @@ pub(crate) struct Spec {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub prompt: String,
+    pub kit: Kit,
 }
 
 impl Spec {
@@ -577,6 +798,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
             let agents = app.agents();
             let def = orchestrator_role(&agents)?;
             let (model, thinking) = role_model(app, &def, None, None);
+            let cwd = project_workspace(app, &project, "orchestrator");
             Ok(Some(Spec {
                 role: Role::Orchestrator,
                 role_id: def.id.clone(),
@@ -584,7 +806,8 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 name: ORCHESTRATOR.into(),
                 team: None,
                 task: None,
-                cwd: project_workspace(app, &project, "orchestrator"),
+                kit: kit(&agents, slug, &def, def.files, &cwd),
+                cwd,
                 session_id: format!("{slug}-orchestrator"),
                 model,
                 thinking,
@@ -600,7 +823,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
             let agents = app.agents();
             let def = running_role(&agents, &m.role)?;
             let (model, thinking) = role_model(app, &def, m.model.clone(), m.thinking.clone());
-            let cwd = PathBuf::from(&t.cwd);
+            let cwd = member_workspace(app, &project, &def, &t.cwd, team, member);
             Ok(Some(Spec {
                 role: def.class,
                 role_id: def.id.clone(),
@@ -608,7 +831,8 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 name: member.clone(),
                 team: Some(team.clone()),
                 task: Some(t.task.clone()),
-                cwd: if cwd.is_dir() { cwd } else { project_workspace(app, &project, team) },
+                kit: kit(&agents, slug, &def, def.files, &cwd),
+                cwd,
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,
                 thinking,
@@ -619,40 +843,70 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
     }
 }
 
-/// Expand argument groups; a group with an empty placeholder is dropped.
-/// Single pass over the template, so text inside a substituted value (a
-/// message mentioning `{model}`) is never expanded again.
-pub fn build_command(groups: &[Vec<String>], vars: &HashMap<&str, String>) -> Vec<String> {
+/// Expand argument groups; a group with an empty placeholder is dropped, and a
+/// group with a list placeholder (from `lists`) is repeated for each item.
+/// `{?name}` adds nothing and keeps its group only when `name` is set. Single
+/// pass over the template, so text inside a substituted value (a message
+/// mentioning `{model}`) is never expanded again.
+pub fn build_command(groups: &[Vec<String>], vars: &HashMap<&str, String>, lists: &HashMap<&str, Vec<String>>) -> Vec<String> {
     let mut out = Vec::new();
-    'group: for g in groups {
-        let mut expanded = Vec::new();
-        for arg in g {
-            let mut s = String::new();
-            let mut rest = arg.as_str();
-            while let Some(start) = rest.find('{') {
-                s.push_str(&rest[..start]);
-                let after = &rest[start + 1..];
-                match after.find('}').map(|end| (&after[..end], end)) {
-                    Some((name, end)) if vars.contains_key(name) => {
-                        let v = &vars[name];
-                        if v.is_empty() {
-                            continue 'group;
-                        }
-                        s.push_str(v);
-                        rest = &after[end + 1..];
-                    }
-                    _ => {
-                        s.push('{');
-                        rest = after;
-                    }
+    for g in groups {
+        let list = g.iter().find_map(|arg| lists.keys().copied().find(|k| arg.contains(&format!("{{{k}}}"))));
+        match list {
+            Some(name) => {
+                for item in &lists[name] {
+                    let mut one = vars.clone();
+                    one.insert(name, item.clone());
+                    out.extend(expand_group(g, &one, lists).unwrap_or_default());
                 }
             }
-            s.push_str(rest);
-            expanded.push(s);
+            None => out.extend(expand_group(g, vars, lists).unwrap_or_default()),
         }
-        out.extend(expanded);
     }
     out
+}
+
+/// One argument group; `None` when a placeholder in it is empty.
+fn expand_group(g: &[String], vars: &HashMap<&str, String>, lists: &HashMap<&str, Vec<String>>) -> Option<Vec<String>> {
+    let set = |name: &str| vars.get(name).is_some_and(|v| !v.is_empty()) || lists.get(name).is_some_and(|l| !l.is_empty());
+    let known = |name: &str| vars.contains_key(name) || lists.contains_key(name);
+    let mut expanded = Vec::new();
+    for arg in g {
+        let mut s = String::new();
+        let mut rest = arg.as_str();
+        let mut condition = false;
+        while let Some(start) = rest.find('{') {
+            s.push_str(&rest[..start]);
+            let after = &rest[start + 1..];
+            match after.find('}').map(|end| (&after[..end], end)) {
+                Some((name, end)) if name.strip_prefix('?').is_some_and(known) => {
+                    if !set(&name[1..]) {
+                        return None;
+                    }
+                    condition = true;
+                    rest = &after[end + 1..];
+                }
+                Some((name, end)) if vars.contains_key(name) => {
+                    let v = &vars[name];
+                    if v.is_empty() {
+                        return None;
+                    }
+                    s.push_str(v);
+                    rest = &after[end + 1..];
+                }
+                _ => {
+                    s.push('{');
+                    rest = after;
+                }
+            }
+        }
+        s.push_str(rest);
+        // An argument made only of conditions adds nothing.
+        if !(condition && s.is_empty()) {
+            expanded.push(s);
+        }
+    }
+    Some(expanded)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -936,6 +1190,7 @@ fn agent_prompt(
     let lang = &app.cfg.language;
     let mut out = role.full_prompt();
     out.push_str(&tools_section(live, role, reader, app.cfg.runtime.ask_timeout_secs));
+    out.push_str(&mcp_section(agents, &project.slug, role));
     out.push_str(&format!(
         "\n## Project\n\nProject `{}` ({}). {}\n\nLanguage: write tasks, comments, artifacts and team mail in {}; anything addressed to people (questions for the owner, needs_owner notes) in {}.\n",
         project.slug,
@@ -950,6 +1205,26 @@ fn agent_prompt(
     }
     if let Some(i) = instructions.filter(|i| !i.trim().is_empty()) {
         out.push_str(&format!("\n## Instructions for you\n\n{i}\n"));
+    }
+    out
+}
+
+/// The MCP connections the role was granted (their descriptions tell when to use them).
+fn mcp_section(agents: &AgentConfig, project: &str, role: &RoleDef) -> String {
+    let grants = agents.mcp_for(project, role);
+    if grants.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n## MCP connections\n\nYour role may use these MCP connections, and no others:\n\n");
+    for (s, tools) in grants {
+        out.push_str(&format!("- `{}`", s.id));
+        if !s.description.is_empty() {
+            out.push_str(&format!(" — {}", s.description));
+        }
+        if let Some(t) = tools {
+            out.push_str(&format!(" (only the tools {})", t.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ")));
+        }
+        out.push('\n');
     }
     out
 }
@@ -979,8 +1254,8 @@ fn member_message(mail: &[Mail]) -> String {
     format!("{}\n\nAct on this now, then end your turn. Replies arrive as your next turn.", team::render_batch(mail))
 }
 
-fn job_message(j: &Job) -> String {
-    let mut out = format!("[genie job {} · role {}]\n\n## Goal\n\n{}\n", j.id, j.role, j.goal.trim());
+fn job_message(j: &Job, workspace: &str) -> String {
+    let mut out = format!("[genie job {} · role {}]\n\n## Goal\n\n{}\n\n## Workspace\n\n{workspace}\n", j.id, j.role, j.goal.trim());
     if let Some(t) = &j.task {
         out.push_str(&format!("\nTask: {t} (read it with `genie agent show {t}`).\n"));
     }
@@ -999,6 +1274,37 @@ fn job_message(j: &Job) -> String {
 
 // --- team operations -----------------------------------------------------------
 
+/// Where the worktree of a team (or a job) goes, and its branch (`worktrees` in the config).
+fn worktree_place(app: &App, repo: &Path, team: &str, task: &str) -> (PathBuf, String) {
+    let repo_name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
+    let fill = |tpl: &str| {
+        tpl.replace("{mainRoot}", &repo.to_string_lossy()).replace("{repo}", &repo_name).replace("{team}", team).replace("{task}", task)
+    };
+    // `{mainRoot}/../…` without the `..` (the repository path is canonical, so this is exact).
+    let mut dir = PathBuf::new();
+    for c in Path::new(&fill(&app.cfg.worktrees.dir)).components() {
+        match c {
+            std::path::Component::ParentDir if dir.file_name().is_some() => {
+                dir.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => dir.push(other),
+        }
+    }
+    (dir, fill(&app.cfg.worktrees.branch))
+}
+
+/// A job's own worktree (`job-<id>`), kept across its attempts.
+fn job_worktree(app: &App, repo: &Path, j: &Job) -> AppResult<TeamWorktree> {
+    let name = format!("job-{}", j.id);
+    let task = j.task.clone().unwrap_or_else(|| name.clone());
+    let (dir, branch) = worktree_place(app, repo, &name, &task);
+    if dir.join(".git").exists() {
+        return Ok(TeamWorktree { path: dir.to_string_lossy().into_owned(), branch, base: None });
+    }
+    create_worktree(app, repo, &name, &task)
+}
+
 /// Worktree for a team: `git worktree add` on a fresh branch from HEAD.
 fn create_worktree(app: &App, repo: &Path, team: &str, task: &str) -> AppResult<TeamWorktree> {
     let run = |dir: &Path, args: &[&str]| -> AppResult<String> {
@@ -1013,12 +1319,7 @@ fn create_worktree(app: &App, repo: &Path, team: &str, task: &str) -> AppResult<
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    let repo_name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
-    let fill = |tpl: &str| {
-        tpl.replace("{mainRoot}", &repo.to_string_lossy()).replace("{repo}", &repo_name).replace("{team}", team).replace("{task}", task)
-    };
-    let dir = PathBuf::from(fill(&app.cfg.worktrees.dir));
-    let branch = fill(&app.cfg.worktrees.branch);
+    let (dir, branch) = worktree_place(app, repo, team, task);
     let base = run(repo, &["rev-parse", "HEAD"])?;
     if dir.exists() {
         return Err(AppError::Internal(format!("worktree directory {} already exists", dir.display())));
@@ -1606,6 +1907,21 @@ mod tests {
             vec!["{message}".into()],
         ];
         let vars = HashMap::from([("model", String::new()), ("sessionId", "s1".to_string()), ("message", "hi {model}".to_string())]);
-        assert_eq!(build_command(&groups, &vars), vec!["pi", "--print", "--session-id", "s1", "hi {model}"]);
+        assert_eq!(build_command(&groups, &vars, &HashMap::new()), vec!["pi", "--print", "--session-id", "s1", "hi {model}"]);
+    }
+
+    #[test]
+    fn list_placeholders_repeat_their_group_and_conditions_keep_it() {
+        let g = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let groups = vec![g(&["pi"]), g(&["--no-skills", "{?limitSkills}"]), g(&["--skill", "{skill}"]), g(&["-e", "{guard}"])];
+        let mut vars = HashMap::from([("limitSkills", "yes".to_string()), ("guard", "/g.ts".to_string())]);
+        let mut lists = HashMap::from([("skill", vec!["/s/a".to_string(), "/s/b".to_string()])]);
+        assert_eq!(build_command(&groups, &vars, &lists), vec!["pi", "--no-skills", "--skill", "/s/a", "--skill", "/s/b", "-e", "/g.ts"]);
+        // A role without its own skill list: no --no-skills; no skill directories: no --skill.
+        vars.insert("limitSkills", String::new());
+        lists.insert("skill", Vec::new());
+        assert_eq!(build_command(&groups, &vars, &lists), vec!["pi", "-e", "/g.ts"]);
+        // An unknown placeholder stays as text.
+        assert_eq!(build_command(&[g(&["{?nope}", "{x}"])], &vars, &lists), vec!["{?nope}", "{x}"]);
     }
 }

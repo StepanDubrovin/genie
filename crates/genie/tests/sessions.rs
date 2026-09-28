@@ -26,7 +26,9 @@ use serde_json::{Value, json};
 struct Req {
     at: Instant,
     model: String,
-    /// `(role, text)` of every message in the request.
+    /// The system prompt.
+    system: String,
+    /// `(role, text)` of every other message in the request.
     messages: Vec<(String, String)>,
 }
 
@@ -59,6 +61,10 @@ fn decide(messages: &[(String, String)]) -> Value {
         let cmd = text[i + 5..].lines().next().unwrap_or_default().trim().to_string();
         return json!({ "tool": "bash", "args": { "command": cmd } });
     }
+    if let Some(i) = text.rfind("MCP: ") {
+        let args: Value = serde_json::from_str(text[i + 5..].lines().next().unwrap_or_default().trim()).unwrap_or_default();
+        return json!({ "tool": "mcp", "args": args });
+    }
     if let (Some(r), Some(a)) = (text.find("genie agent reply "), text.find("ANSWER=")) {
         let id: String = text[r + 18..].chars().take_while(|c| c.is_ascii_digit()).collect();
         let answer: String = text[a + 7..].chars().take_while(|c| c.is_alphanumeric()).collect();
@@ -69,18 +75,18 @@ fn decide(messages: &[(String, String)]) -> Value {
 
 async fn completions(State(log): State<Log>, body: Bytes) -> impl IntoResponse {
     let r: Value = serde_json::from_slice(&body).unwrap_or_default();
-    let messages: Vec<(String, String)> = r["messages"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    let all = r["messages"].as_array().cloned().unwrap_or_default();
+    let is_system = |m: &Value| m["role"] == "system" || m["role"] == "developer";
+    let system = all.iter().filter(|m| is_system(m)).map(|m| text_of(&m["content"])).collect::<Vec<_>>().join("\n");
+    let messages: Vec<(String, String)> = all
         .iter()
-        .filter(|m| m["role"] != "system")
+        .filter(|m| !is_system(m))
         .map(|m| (m["role"].as_str().unwrap_or_default().to_string(), text_of(&m["content"])))
         .collect();
     let model = r["model"].as_str().unwrap_or_default().to_string();
     let n = {
         let mut l = log.lock().unwrap();
-        l.push(Req { at: Instant::now(), model: model.clone(), messages: messages.clone() });
+        l.push(Req { at: Instant::now(), model: model.clone(), system, messages: messages.clone() });
         l.len()
     };
     let out = decide(&messages);
@@ -436,4 +442,88 @@ async fn watchdogs_stop_silent_steps_and_report_loops() {
         until("bender idle", 20, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
     }
     until("the loop report", 10, || orchestrator_mail(app, "stuck in a loop")).await;
+}
+
+fn write(path: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// The tool result the model got right after `needle` was sent.
+async fn tool_result(log: &Log, needle: &str) -> String {
+    until(&format!("the tool result after {needle}"), 30, || {
+        let l = log.lock().unwrap();
+        let sent = l.iter().position(|r| r.model == "executor" && r.last().1.contains(needle))?;
+        l[sent + 1..].iter().find(|r| r.model == "executor" && r.last().0 == "tool").map(|r| r.last().1.clone())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_role_gets_its_skills_and_the_guard_keeps_it_within_its_grants() {
+    let Some(pi) = pi_bin() else {
+        assert!(std::env::var("CI").is_err(), "pi is not installed: run `npm ci` before `cargo test`");
+        return;
+    };
+    let fake_mcp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-mcp.ts");
+    let pi_path = pi.to_string_lossy().into_owned();
+    let l = live(pi, |cfg| {
+        // The default session command (guard, skills, MCP config) on the test's pi, plus a
+        // stand-in for pi-mcp-adapter's `mcp` tool. Without the adapter pi still accepts --mcp-config.
+        let mut cmd = genie::config::RuntimeConfig::default().session_command;
+        cmd[0][0] = pi_path;
+        cmd.push(vec!["-e".into(), fake_mcp.to_string_lossy().into_owned()]);
+        cfg.runtime.session_command = cmd;
+    })
+    .await;
+    let (app, log) = (&l.app, &l.log);
+    install_dump(app, log);
+    let data = app.data.clone();
+
+    // In this server the executor role has a skill, a denied command and one MCP connection.
+    write(&data.join("agents/executor.md"), "---\nskills: [owasp]\ndenyCommands: [\"git push*\"]\nmcp: [docs]\n---\n");
+    write(&data.join("skills/owasp/SKILL.md"), "---\nname: owasp\ndescription: OWASP checks.\n---\nx\n");
+    write(
+        &data.join("pi-agent/skills/user-wide/SKILL.md"),
+        "---\nname: user-wide\ndescription: Installed for the machine's user.\n---\nx\n",
+    );
+    write(&data.join("work/.agents/skills/house-style/SKILL.md"), "---\nname: house-style\ndescription: The repository's style.\n---\nx\n");
+    write(
+        &data.join("mcp.json"),
+        &json!({ "mcpServers": { "docs": { "command": "docs-mcp" }, "secret": { "url": "https://secret.example/mcp" } } }).to_string(),
+    );
+    app.reload_agents();
+
+    // Its skills and the repository's, and no others; its MCP connection in the prompt —
+    // from the first request of the fresh session on.
+    mail(app, "anna", "human", "bender", "RUN: echo ready", None);
+    let req = until("bender's first request", 60, || request_with(log, "executor", "echo ready")).await;
+    assert!(req.system.contains("You are the **executor** of a focus team"), "the role's prompt:\n{}", req.system);
+    assert!(req.system.contains("<name>owasp</name>"), "the role's skill:\n{}", req.system);
+    assert!(req.system.contains("<name>house-style</name>"), "the repository's skill");
+    assert!(!req.system.contains("user-wide"), "no other skills");
+    assert!(req.system.contains("## MCP connections") && req.system.contains("`docs`"), "{}", req.system);
+
+    // A denied command is blocked, the rest of the shell works.
+    mail(app, "anna", "human", "bender", "RUN: echo one && git push origin main", None);
+    let out = tool_result(log, "git push origin main").await;
+    assert!(out.contains("may not run `git push*`"), "{out}");
+
+    // MCP: the granted connection passes, another one and installing servers do not.
+    mail(app, "anna", "human", "bender", r#"MCP: {"server": "docs", "tool": "search", "args": {"q": "export"}}"#, None);
+    assert!(tool_result(log, r#""tool": "search""#).await.contains("FAKE-MCP"), "a granted connection");
+    mail(app, "anna", "human", "bender", r#"MCP: {"server": "secret", "tool": "dump"}"#, None);
+    let out = tool_result(log, r#""tool": "dump""#).await;
+    assert!(out.contains("secret is not granted") && !out.contains("FAKE-MCP"), "{out}");
+    mail(app, "anna", "human", "bender", r#"MCP: {"action": "install", "url": "https://evil.example/mcp"}"#, None);
+    assert!(tool_result(log, "evil.example").await.contains("do not install MCP servers"));
+
+    // A rule changed while the agent runs applies at its next tool call, without a restart.
+    let pid = session_state(app, "bender").unwrap().2;
+    write(&data.join("agents/executor.md"), "---\nskills: [owasp]\ndenyCommands: [\"git push*\", \"curl *\"]\nmcp: [docs]\n---\n");
+    app.reload_agents();
+    mail(app, "anna", "human", "bender", "RUN: curl https://example.com", None);
+    let out = tool_result(log, "curl https://example.com").await;
+    assert!(out.contains("may not run `curl *`"), "{out}");
+    assert_eq!(session_state(app, "bender").unwrap().2, pid, "the same session");
 }

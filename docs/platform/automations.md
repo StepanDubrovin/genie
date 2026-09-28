@@ -66,7 +66,7 @@ verified: 2026-09-28
 
 Получатели `to`: `event.actor`, `task.author`, `task.assignees`, `project.owners`, `project.admins`, `project.members`, `@login`.
 
-Агентные задания запускаются тем же механизмом, что участники команд (ход харнесса с промптом роли и `genie agent`); `workspace`: `none`, `read-only` (репозиторий проекта), `worktree`, `scratch`. Задание без `genie agent output` считается неуспешным и повторяется до `runtime.maxAttempts`.
+Агентные задания запускаются тем же механизмом, что участники команд (ход харнесса с промптом, навыками, MCP и правилами роли и `genie agent`). `workspace`: `read-only` — репозиторий проекта без инструментов записи; `worktree` — свой git-worktree `job-<id>` на ветке `genie/job-<id>` (повторные попытки работают в нём же, после задания он остаётся с веткой-результатом); `scratch` и `none` — пустой каталог задания. Задание без `genie agent output` считается неуспешным и повторяется до `runtime.maxAttempts`; задание, которое не удалось запустить (роль удалена, worktree не создался), — тоже.
 
 ## Надёжность
 

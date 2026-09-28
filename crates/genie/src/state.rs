@@ -102,7 +102,8 @@ impl App {
         self.agents.read().map(|a| a.clone()).unwrap_or_else(|e| e.into_inner().clone())
     }
 
-    /// Re-read the agent configuration from its files; broken items keep their last valid version.
+    /// Re-read the agent configuration from its files; broken items keep their last
+    /// valid version. Running agents get their new guard rules at once.
     pub fn reload_agents(&self) -> Arc<AgentConfig> {
         let previous = self.agents();
         let fresh = Arc::new(AgentConfig::load(&self.data, &self.cfg, Some(&previous)));
@@ -110,6 +111,7 @@ impl App {
             Ok(mut a) => *a = fresh.clone(),
             Err(e) => *e.into_inner() = fresh.clone(),
         }
+        crate::sessions::refresh_policies(self);
         fresh
     }
 

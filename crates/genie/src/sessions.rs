@@ -39,6 +39,8 @@ use crate::state::{App, AppError, AppResult};
 
 /// The pi extension that delivers mail into a session (written to `<data>/runtime`).
 pub const EXTENSION: &str = include_str!("../pi/genie-bus.ts");
+/// The pi extension that keeps every agent (sessions and turns) within its role.
+pub const GUARD: &str = include_str!("../pi/genie-guard.ts");
 
 /// Activity lines kept per session for `peek`.
 const RECENT: usize = 30;
@@ -191,6 +193,8 @@ pub struct Session {
     pub key: AgentKey,
     pub pid: u32,
     pub role: Role,
+    /// The configured role (its rules are rewritten when the configuration changes).
+    pub role_id: String,
     pub name: String,
     pub team: Option<String>,
     pub task: Option<String>,
@@ -274,12 +278,34 @@ pub fn extension_path(app: &App) -> PathBuf {
 }
 
 pub fn write_extension(app: &App) -> std::io::Result<PathBuf> {
-    let path = extension_path(app);
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(EXTENSION) {
+    write_runtime_file(extension_path(app), EXTENSION)
+}
+
+/// The guard extension, written for agents to load.
+pub fn write_guard(app: &App) -> std::io::Result<PathBuf> {
+    write_runtime_file(app.data.join("runtime").join("genie-guard.ts"), GUARD)
+}
+
+fn write_runtime_file(path: PathBuf, text: &str) -> std::io::Result<PathBuf> {
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
         std::fs::create_dir_all(path.parent().expect("runtime dir"))?;
-        std::fs::write(&path, EXTENSION)?;
+        std::fs::write(&path, text)?;
     }
     Ok(path)
+}
+
+/// Rewrite the guard rules of running sessions from the current configuration, so
+/// a changed rule (a revoked MCP connection, a new denied command) applies at once.
+pub fn refresh_policies(app: &App) {
+    let agents = app.agents();
+    for s in app.sessions.all() {
+        let Some(role) = agents.roles.get(&s.role_id) else { continue };
+        let policy = runtime::policy(&agents, s.key.project(), role, role.files);
+        let text = serde_json::to_string_pretty(&policy).unwrap_or_default();
+        if let Err(e) = runtime::write_private(&s.dir.join("policy.json"), &text) {
+            eprintln!("genie runtime: {}: rules of {}: {e}", s.key.project(), s.key.label());
+        }
+    }
 }
 
 fn session_dir(app: &App, key: &AgentKey) -> PathBuf {
@@ -345,6 +371,7 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
     let prompt_file = dir.join("prompt.md");
     tokio::fs::write(&prompt_file, &spec.prompt).await.map_err(|e| AppError::Internal(e.to_string()))?;
     let extension = write_extension(app).map_err(|e| AppError::Internal(e.to_string()))?;
+    let files = spec.kit.write(app, &dir, &spec.role_id).map_err(|e| AppError::Internal(e.to_string()))?;
     let sessions = app.data.join("sessions").join(key.project());
     tokio::fs::create_dir_all(&sessions).await.map_err(|e| AppError::Internal(e.to_string()))?;
     let (slug, role, role_id, name, team) =
@@ -357,7 +384,7 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
         })
         .await?;
     let readonly = spec.readonly.clone();
-    let vars: HashMap<&str, String> = HashMap::from([
+    let mut vars: HashMap<&str, String> = HashMap::from([
         ("sessionDir", sessions.to_string_lossy().into_owned()),
         ("sessionId", spec.session_id.clone()),
         ("model", spec.model.clone().unwrap_or_default()),
@@ -367,9 +394,11 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
         ("readonlyTools", readonly),
         ("cwd", spec.cwd.to_string_lossy().into_owned()),
     ]);
-    let argv = runtime::build_command(&app.cfg.runtime.session_command, &vars);
+    let lists = spec.kit.placeholders(&files, &mut vars);
+    let argv = runtime::build_command(&app.cfg.runtime.session_command, &vars, &lists);
     let Some((program, args)) = argv.split_first() else { return Err(AppError::Internal("runtime.sessionCommand is empty".into())) };
     let mut cmd = runtime::agent_command(app, program, args, &spec.cwd, key.project(), &spec.identity(), &token);
+    runtime::kit_env(&mut cmd, &files, &argv);
     cmd.env("GENIE_SESSION", "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -386,6 +415,7 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
         key: key.clone(),
         pid,
         role: spec.role,
+        role_id: spec.role_id.clone(),
         name: spec.name.clone(),
         team: spec.team.clone(),
         task: spec.task.clone(),

@@ -12,6 +12,10 @@
 //   session (it does nothing while the agent is working: the next boundary
 //   takes the mail).
 //
+// A fresh session is woken with a prompt instead (the mail goes alongside): a
+// turn started by `sendMessage` skips pi's prompt preparation, so its first
+// request would reach the model without the system prompt — without the role.
+//
 // A delivery is acknowledged when the model is about to see it (`context`).
 // Mail ids already in the session are reported as `seen`, so a delivery whose
 // acknowledgement was lost (crash, restart) is settled instead of injected
@@ -36,6 +40,8 @@ export default function genieBus(pi: any) {
   const delivered = new Set<number>();
   /** Deliveries put into the session and not yet acknowledged. */
   const unacked = new Set<number>();
+  /** The session's transcript holds pi's system prompt (a fresh one does not yet). */
+  let primed = false;
 
   function report(what: string, e: unknown): void {
     console.error(`[genie-bus] ${what}: ${e instanceof Error ? e.message : String(e)}`);
@@ -77,6 +83,7 @@ export default function genieBus(pi: any) {
         if (entry?.type === "custom_message" && entry.customType === MAIL) {
           for (const id of entry.details?.mailIds ?? []) delivered.add(id);
         }
+        if (entry?.type === "message" && entry.message?.role === "system") primed = true;
       }
     } catch (e) {
       report("session_start", e);
@@ -117,7 +124,14 @@ export default function genieBus(pi: any) {
     handler: async (_args: string, ctx: any) => {
       if (!ctx.isIdle()) return; // working: the next step boundary takes the mail
       const d = await lease();
-      if (d) pi.sendMessage(asMessage(d), { triggerTurn: true });
+      if (!d) return;
+      if (primed) {
+        pi.sendMessage(asMessage(d), { triggerTurn: true });
+        return;
+      }
+      primed = true;
+      pi.sendMessage(asMessage(d), { deliverAs: "nextTurn" });
+      pi.sendUserMessage("Your genie session has started; your mail follows.");
     },
   });
 }
