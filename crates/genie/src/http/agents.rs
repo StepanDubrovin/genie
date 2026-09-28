@@ -9,8 +9,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use genie_core::Role;
 use genie_core::team::{self, ORCHESTRATOR, SendMail};
+use genie_core::{Capability, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -148,6 +148,7 @@ async fn ask(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<AskBody>) -> A
     if access.actor.role != Role::Orchestrator && access.agent_team.as_deref() != Some(team.as_str()) {
         return Err(ApiError::new(StatusCode::FORBIDDEN, format!("team {team} is not your team")));
     }
+    access.can(if b.to == ORCHESTRATOR { Capability::MailOrchestrator } else { Capability::MailTeam })?;
     let (slug, role) = (access.project.clone(), access.actor.role);
     let me = if role == Role::Orchestrator { ORCHESTRATOR.to_string() } else { access.actor.name.clone() };
     let (to, text, t2, me2) = (b.to.clone(), b.text.clone(), team.clone(), me.clone());
@@ -298,6 +299,7 @@ async fn peek(
     if access.agent && access.actor.role != Role::Orchestrator && access.agent_team.as_deref() != Some(team.as_str()) {
         return Err(ApiError::new(StatusCode::FORBIDDEN, format!("team {team} is not your team")));
     }
+    access.can(Capability::TeamPeek)?;
     let key = key_of(&access.project, &team, &member);
     let Some(s) = app.sessions.get(&key) else {
         return Ok(Json(json!({ "agent": key.label(), "session": null })));

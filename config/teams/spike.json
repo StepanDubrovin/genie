@@ -1,0 +1,15 @@
+{
+  "title": "Спайк",
+  "description": "Research without code changes on a ready task: the researcher investigates and submits findings, the reviewer challenges the conclusions.",
+  "stage": "delivery",
+  "workspace": "repo",
+  "members": [
+    {"role": "researcher"},
+    {"role": "reviewer"}
+  ],
+  "relations": [
+    {"from": "researcher", "to": "reviewer", "type": "handoff", "on": "review", "note": "the findings are submitted for review"},
+    {"from": "reviewer", "to": "researcher", "type": "returns", "on": "changes_requested", "note": "gaps in the findings"},
+    {"from": "reviewer", "to": "orchestrator", "type": "reports", "note": "the verdict on the findings"}
+  ]
+}

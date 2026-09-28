@@ -109,8 +109,6 @@ pub struct NewJob {
     pub workspace: String,
 }
 
-pub const JOB_ROLES: &[&str] = &["analyst", "executor", "reviewer", "tester", "documenter", "orchestrator"];
-
 impl ServerDb {
     pub fn start_turn(&self, project: &str, agent: &str, team: Option<&str>, member: Option<&str>, job: Option<i64>) -> Result<i64> {
         self.conn().execute(
@@ -163,7 +161,10 @@ impl ServerDb {
     // --- jobs ----------------------------------------------------------------
 
     pub fn create_job(&self, j: NewJob) -> Result<Job> {
-        if !JOB_ROLES.contains(&j.role.as_str()) {
+        // Any configured role; the server checks it exists before queueing the job.
+        let valid = j.role.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && j.role.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !valid {
             return Err(GenieError::invalid(format!("unknown agent role {}", j.role)));
         }
         if j.goal.trim().is_empty() {
@@ -274,7 +275,9 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(db.create_job(NewJob { role: "wizard".into(), goal: "x".into(), workspace: "none".into(), ..Default::default() }).is_err());
+        assert!(
+            db.create_job(NewJob { role: "Wizard!".into(), goal: "x".into(), workspace: "none".into(), ..Default::default() }).is_err()
+        );
         db.start_job(job.id).unwrap();
         assert!(db.set_job_output(job.id, &json!({ "ok": 1 })).is_ok());
         assert_eq!(db.finish_job(job.id, false, Some("crash"), 2).unwrap().status, "queued");

@@ -182,6 +182,8 @@ const COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
     ("mail", "reply_to", "ALTER TABLE mail ADD COLUMN reply_to INTEGER"),
     ("mail", "awaits", "ALTER TABLE mail ADD COLUMN awaits INTEGER NOT NULL DEFAULT 0"),
     ("mail", "superseded_by", "ALTER TABLE mail ADD COLUMN superseded_by INTEGER"),
+    // Configurable roles and templates: the template snapshot a team was assembled from.
+    ("teams", "spec", "ALTER TABLE teams ADD COLUMN spec TEXT"),
 ];
 
 /// Current time in the format the TypeScript tracker writes (`Date#toISOString`).

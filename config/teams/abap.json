@@ -1,0 +1,18 @@
+{
+  "title": "ABAP",
+  "description": "ABAP work: the SAP system is read-only through MCP, the owner transfers code and creates transports. No git worktree unless the repo uses abapGit.",
+  "stage": "delivery",
+  "workspace": "repo",
+  "members": [
+    {"role": "analyst", "instructions": "Use the read-only SAP MCP servers to study the objects involved. List every ABAP object (type + name) the change touches. Parallel teams must not touch the same objects."},
+    {"role": "executor", "instructions": "The SAP system is read-only for you. Deliver the complete source of every changed or new ABAP object as `code` artifacts (one per object, named like zcl_foo.clas.abap), plus a short transfer guide (order of objects, activation notes). With abapGit repos, commit the files instead."},
+    {"role": "reviewer", "instructions": "Review the ABAP code artifacts against clean ABAP guidelines and the current system state (read via MCP): syntax plausibility, naming, performance (SELECT in loops, buffering), authorisation checks, and that only agreed objects change."}
+  ],
+  "relations": [
+    {"from": "analyst", "to": "executor", "type": "handoff", "note": "the plan and the list of objects are ready"},
+    {"from": "executor", "to": "reviewer", "type": "handoff", "on": "review", "note": "the work is submitted for review"},
+    {"from": "reviewer", "to": "executor", "type": "returns", "on": "changes_requested", "note": "review findings"},
+    {"from": "reviewer", "to": "orchestrator", "type": "reports", "note": "the verdict"},
+    {"from": "executor", "to": "analyst", "type": "consults", "note": "questions about the objects"}
+  ]
+}

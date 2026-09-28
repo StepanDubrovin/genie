@@ -86,6 +86,10 @@ pub struct Team {
     pub created: String,
     pub updated: String,
     pub members: Vec<Member>,
+    /// How the team works, fixed when it was assembled: the template, member
+    /// keys, relations between members and the team charter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
@@ -167,6 +171,7 @@ pub struct NewTeam {
     pub cwd: String,
     pub worktree: Option<TeamWorktree>,
     pub members: Vec<NewMember>,
+    pub spec: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -259,13 +264,13 @@ impl Bus<'_> {
     }
 
     pub fn get(&self, team: &str) -> Result<Team> {
-        type Row = (String, String, Option<String>, String, Option<String>, String, Option<String>, String, String);
+        type Row = (String, String, Option<String>, String, Option<String>, String, Option<String>, String, String, Option<String>);
         let row: Row = self
             .conn()
             .query_row(
-                "SELECT id, task, template, cwd, worktree, state, stop_reason, created, updated FROM teams WHERE id = ?1",
+                "SELECT id, task, template, cwd, worktree, state, stop_reason, created, updated, spec FROM teams WHERE id = ?1",
                 [team],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )
             .optional()?
             .ok_or_else(|| GenieError::not_found(format!("team {team} not found")))?;
@@ -282,6 +287,7 @@ impl Bus<'_> {
             created: row.7,
             updated: row.8,
             members,
+            spec: row.9.and_then(|s| serde_json::from_str(&s).ok()),
         })
     }
 
@@ -377,8 +383,16 @@ impl Bus<'_> {
             }
             let at = now();
             self.conn().execute(
-                "INSERT INTO teams(id, task, template, cwd, worktree, state, created, updated) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
-                params![team.id, team.task, team.template, team.cwd, team.worktree.as_ref().map(|w| json!(w).to_string()), at],
+                "INSERT INTO teams(id, task, template, cwd, worktree, state, created, updated, spec) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, ?7)",
+                params![
+                    team.id,
+                    team.task,
+                    team.template,
+                    team.cwd,
+                    team.worktree.as_ref().map(|w| json!(w).to_string()),
+                    at,
+                    team.spec.as_ref().map(Value::to_string)
+                ],
             )?;
             for (i, m) in team.members.iter().enumerate() {
                 self.insert_member(&team.id, m, i as i64)?;
@@ -396,6 +410,12 @@ impl Bus<'_> {
             Ok(())
         })?;
         self.get(&team.id)
+    }
+
+    /// Replace the snapshot of how the team works (a member joined or left).
+    pub fn set_spec(&self, team: &str, spec: &Value) -> Result<()> {
+        self.conn().execute("UPDATE teams SET spec = ?1, updated = ?2 WHERE id = ?3", params![spec.to_string(), now(), team])?;
+        Ok(())
     }
 
     pub fn add_member(&self, team: &str, m: NewMember) -> Result<Team> {
@@ -914,14 +934,21 @@ pub fn display_name(name: &str) -> String {
 
 /// Pick a free name for a role; `taken` is extended.
 pub fn pick_name(role: &str, taken: &mut std::collections::HashSet<String>) -> String {
-    let pool = name_pool(role);
-    let free: Vec<&&str> = pool.iter().filter(|n| !taken.contains(**n)).collect();
+    let pool: Vec<String> = name_pool(role).iter().map(|s| s.to_string()).collect();
+    pick_from(&pool, taken)
+}
+
+/// Pick a free name from a pool (a configured role's names): a random free one,
+/// else the first with a number. `taken` is extended.
+pub fn pick_from(pool: &[String], taken: &mut std::collections::HashSet<String>) -> String {
+    let free: Vec<&String> = pool.iter().filter(|n| !taken.contains(*n)).collect();
     let name = if free.is_empty() {
-        (2..).map(|i| format!("{}{i}", pool[0])).find(|c| !taken.contains(c)).unwrap_or_default()
+        let base = pool.first().map(String::as_str).unwrap_or("agent");
+        (2..).map(|i| format!("{base}{i}")).find(|c| !taken.contains(c)).unwrap_or_default()
     } else {
         let mut b = [0u8; 2];
         getrandom::fill(&mut b).expect("OS random source");
-        free[u16::from_le_bytes(b) as usize % free.len()].to_string()
+        free[u16::from_le_bytes(b) as usize % free.len()].clone()
     };
     taken.insert(name.clone());
     name

@@ -55,6 +55,9 @@ enum Command {
     /// Knowledge vault maintenance.
     #[command(subcommand)]
     Vault(VaultCmd),
+    /// Roles, team templates, skills and MCP connections of this server.
+    #[command(subcommand)]
+    Agents(AgentsCmd),
     /// Act as an agent (or script genie) through the server API.
     #[command(subcommand)]
     Agent(crate::agent_cli::AgentCmd),
@@ -99,6 +102,14 @@ enum VaultCmd {
     },
     /// Rebuild the search index from the files.
     Reindex,
+}
+
+#[derive(Subcommand)]
+enum AgentsCmd {
+    /// Check the configuration files in the data directory; exits with an error when something is broken.
+    Check,
+    /// Roles and team templates as the server sees them.
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -282,6 +293,44 @@ pub async fn run() -> Result<(), String> {
                     let v =
                         genie_core::vault::Vault::open(&vault_dir, &index, cfg.vault.commit.unwrap_or(true)).map_err(|e| e.to_string())?;
                     println!("index rebuilt for {}", v.root().display());
+                }
+            }
+        }
+        Command::Agents(cmd) => {
+            let cfg = Config::load(&data)?;
+            let agents = crate::agent_config::AgentConfig::load(&data, &cfg, None);
+            match cmd {
+                AgentsCmd::Check => {
+                    println!("{}", crate::agent_config::report(&agents));
+                    let errors = agents.errors().count();
+                    if errors > 0 {
+                        return Err(format!("{errors} error(s) in the agent configuration of {}", data.display()));
+                    }
+                }
+                AgentsCmd::Ls => {
+                    println!("Roles:");
+                    for r in agents.roles.values() {
+                        let caps: Vec<&str> = r.capabilities.iter().map(|c| c.as_str()).filter(|c| c.starts_with("status.")).collect();
+                        println!(
+                            "  {:<20} {:<12} {:<9} {}{}",
+                            r.id,
+                            r.class.as_str(),
+                            format!("{:?}", r.origin).to_lowercase(),
+                            r.title,
+                            if caps.is_empty() { String::new() } else { format!(" · {}", caps.join(", ")) }
+                        );
+                    }
+                    println!("Team templates:");
+                    for t in agents.teams.values() {
+                        let roles: Vec<&str> = t.members.iter().map(|m| m.role.as_str()).collect();
+                        println!("  {:<20} {:<9} {} · {}", t.id, format!("{:?}", t.origin).to_lowercase(), t.title, roles.join(", "));
+                    }
+                    if !agents.skills.is_empty() {
+                        println!("Skills: {}", agents.skills.keys().cloned().collect::<Vec<_>>().join(", "));
+                    }
+                    if !agents.mcp.is_empty() {
+                        println!("MCP connections: {}", agents.mcp.keys().cloned().collect::<Vec<_>>().join(", "));
+                    }
                 }
             }
         }

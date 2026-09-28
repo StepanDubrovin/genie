@@ -23,12 +23,13 @@ use std::time::{Duration, Instant};
 use genie_core::server_db::Project;
 use genie_core::team::{self, Mail, NewMember, NewTeam, ORCHESTRATOR, TeamWorktree};
 use genie_core::work::Job;
-use genie_core::{Actor, CLOSED, GenieError, Role, Status, StatusOptions, Task};
+use genie_core::{Actor, CLOSED, Capability, GenieError, Role, Status, StatusOptions, TEAM_TRANSITIONS, Task};
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 
-use crate::config::{self, MemberSpec};
+use crate::agent_config::{AgentConfig, MailMode, RelKind, Relation, RoleDef, SpecMember, Stage, TeamSpec, Workspace};
+use crate::config::MemberSpec;
 use crate::state::{App, AppError, AppResult};
 
 /// Which agent a turn is for.
@@ -71,6 +72,7 @@ fn with_state<T>(f: impl FnOnce(&mut SchedState) -> T) -> T {
 /// Start background workers: crash recovery, then the scheduler.
 pub fn start(app: &Arc<App>) {
     crate::knowledge::start_watcher(app);
+    crate::agent_config::start_watcher(app);
     crate::engine::start(app);
     crate::channels::start(app);
     if let Err(e) = recover(app) {
@@ -213,6 +215,10 @@ fn failures(key: &AgentKey) -> u32 {
 struct Prepared {
     turn: i64,
     role: Role,
+    /// The configured role (its id; `role` is its class).
+    role_id: String,
+    /// `--exclude-tools` for read-only roles.
+    readonly: String,
     name: String,
     team: Option<String>,
     task: Option<String>,
@@ -242,8 +248,12 @@ async fn run_turn(app: &Arc<App>, key: &AgentKey) -> bool {
     let turn = p.turn;
     let mut p = p;
     let ttl = chrono::Duration::seconds(app.cfg.runtime.turn_timeout_secs as i64 + 300);
-    let (slug, role, name, team, job) = (key.project().to_string(), p.role, p.name.clone(), p.team.clone(), p.job);
-    match app.blocking(move |app| app.with_server(|db| db.create_agent_token(&slug, role, &name, team.as_deref(), job, ttl))).await {
+    let (slug, role, role_id, name, team, job) =
+        (key.project().to_string(), p.role, p.role_id.clone(), p.name.clone(), p.team.clone(), p.job);
+    match app
+        .blocking(move |app| app.with_server(|db| db.create_role_token(&slug, role, Some(&role_id), &name, team.as_deref(), job, ttl)))
+        .await
+    {
         Ok(t) => p.token = t,
         Err(e) => {
             eprintln!("genie runtime: turn {turn}: {e}");
@@ -281,9 +291,32 @@ fn project_workspace(app: &App, p: &Project, sub: &str) -> PathBuf {
     }
 }
 
-fn role_model(app: &App, role: &str, model: Option<String>, thinking: Option<String>) -> (Option<String>, Option<String>) {
-    let d = app.cfg.role_models.get(role);
-    (model.or_else(|| d.and_then(|d| d.model.clone())), thinking.or_else(|| d.and_then(|d| d.thinking.clone())))
+/// Model and thinking: an explicit choice (member, job), then the role, then
+/// `roleModels` by role id and by class.
+fn role_model(app: &App, role: &RoleDef, model: Option<String>, thinking: Option<String>) -> (Option<String>, Option<String>) {
+    let by_id = app.cfg.role_models.get(&role.id);
+    let by_class = app.cfg.role_models.get(role.class.as_str());
+    let model = model
+        .or_else(|| role.model.clone())
+        .or_else(|| by_id.and_then(|d| d.model.clone()))
+        .or_else(|| by_class.and_then(|d| d.model.clone()));
+    let thinking = thinking
+        .or_else(|| role.thinking.clone())
+        .or_else(|| by_id.and_then(|d| d.thinking.clone()))
+        .or_else(|| by_class.and_then(|d| d.thinking.clone()));
+    (model, thinking)
+}
+
+/// The role a running member or job acts in. A role removed from the configuration
+/// is an error the orchestrator hears about, not a silent fallback.
+fn running_role(agents: &AgentConfig, id: &str) -> AppResult<RoleDef> {
+    agents.roles.get(id).cloned().ok_or_else(|| {
+        GenieError::invalid(format!("role {id} is no longer in the agent configuration; restore it or replace the member")).into()
+    })
+}
+
+fn orchestrator_role(agents: &AgentConfig) -> AppResult<RoleDef> {
+    agents.orchestrator().cloned().ok_or_else(|| AppError::Internal("the orchestrator role is missing from the configuration".into()))
 }
 
 fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
@@ -298,10 +331,14 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 return Ok(None);
             }
             app.with_server(|db| db.set_turn_mail(turn, &mail.iter().map(|m| m.id).collect::<Vec<_>>()))?;
-            let (model, thinking) = role_model(app, "orchestrator", None, None);
+            let agents = app.agents();
+            let def = orchestrator_role(&agents)?;
+            let (model, thinking) = role_model(app, &def, None, None);
             Ok(Some(Prepared {
                 turn,
                 role: Role::Orchestrator,
+                role_id: def.id.clone(),
+                readonly: def.excluded_tools().unwrap_or_default(),
                 name: ORCHESTRATOR.into(),
                 team: None,
                 task: None,
@@ -310,7 +347,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 session_id: format!("{slug}-orchestrator"),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &project, "orchestrator", None, false),
+                prompt: agent_prompt(app, &agents, &project, &def, None, false, Reader::Orchestrator),
                 message: orchestrator_message(&project, &mail),
                 token: String::new(),
             }))
@@ -318,7 +355,8 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
         AgentKey::Member { project: slug, team, member } => {
             let t = app.with_tracker(slug, |t| t.bus().get(team))?;
             let Some(m) = t.members.iter().find(|m| &m.name == member).cloned() else { return Ok(None) };
-            let role: Role = m.role.parse().map_err(AppError::Genie)?;
+            let agents = app.agents();
+            let def = running_role(&agents, &m.role)?;
             let turn = app.with_server(|db| db.start_turn(slug, &label, Some(team), Some(member), None))?;
             let mail = app.with_tracker(slug, |t| t.bus().lease(Some(team), member, turn))?;
             if mail.is_empty() {
@@ -327,11 +365,13 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
             }
             app.with_server(|db| db.set_turn_mail(turn, &mail.iter().map(|m| m.id).collect::<Vec<_>>()))?;
             app.with_tracker(slug, |t| t.bus().set_activity(team, member, "working", Some(json!({ "kind": "turn", "turn": turn }))))?;
-            let (model, thinking) = role_model(app, &m.role, m.model.clone(), m.thinking.clone());
+            let (model, thinking) = role_model(app, &def, m.model.clone(), m.thinking.clone());
             let cwd = PathBuf::from(&t.cwd);
             Ok(Some(Prepared {
                 turn,
-                role,
+                role: def.class,
+                role_id: def.id.clone(),
+                readonly: def.excluded_tools().unwrap_or_default(),
                 name: member.clone(),
                 team: Some(team.clone()),
                 task: Some(t.task.clone()),
@@ -340,7 +380,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &project, &m.role, m.instructions.as_deref(), false),
+                prompt: agent_prompt(app, &agents, &project, &def, m.instructions.as_deref(), false, Reader::Member),
                 message: member_message(&mail),
                 token: String::new(),
             }))
@@ -355,9 +395,10 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 Ok(Some(j))
             })?;
             let Some(j) = j else { return Ok(None) };
-            let role: Role = j.role.parse().map_err(AppError::Genie)?;
+            let agents = app.agents();
+            let def = running_role(&agents, &j.role)?;
             let turn = app.with_server(|db| db.start_turn(slug, &label, None, None, Some(*job)))?;
-            let (model, thinking) = role_model(app, &j.role, j.model.clone(), None);
+            let (model, thinking) = role_model(app, &def, j.model.clone(), None);
             let cwd = match j.workspace.as_str() {
                 "scratch" | "none" => {
                     let d = app.data.join("workspaces").join(slug).join(format!("job-{job}"));
@@ -368,7 +409,9 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
             };
             Ok(Some(Prepared {
                 turn,
-                role,
+                role: def.class,
+                role_id: def.id.clone(),
+                readonly: def.excluded_tools().unwrap_or_default(),
                 name: format!("job-{job}"),
                 team: None,
                 task: j.task.clone(),
@@ -378,7 +421,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 session_id: format!("{slug}-job-{job}-{}", j.attempts + 1),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &project, &j.role, None, false),
+                prompt: agent_prompt(app, &agents, &project, &def, None, false, Reader::Job),
                 message: job_message(&j),
                 token: String::new(),
             }))
@@ -395,7 +438,6 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
     let sessions = app.data.join("sessions").join(key.project());
     tokio::fs::create_dir_all(&sessions).await.map_err(|e| e.to_string())?;
     let token = p.token.clone();
-    let readonly = config::role_excluded_tools(&app.data, p.role.as_str());
     let vars: HashMap<&str, String> = HashMap::from([
         ("sessionDir", sessions.to_string_lossy().into_owned()),
         ("sessionId", p.session_id.clone()),
@@ -403,12 +445,12 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
         ("thinking", p.thinking.clone().unwrap_or_default()),
         ("promptFile", prompt_file.to_string_lossy().into_owned()),
         ("message", p.message.clone()),
-        ("readonlyTools", if matches!(key, AgentKey::Job { .. }) { String::new() } else { readonly.unwrap_or_default() }),
+        ("readonlyTools", p.readonly.clone()),
         ("cwd", p.cwd.to_string_lossy().into_owned()),
     ]);
     let argv = build_command(&app.cfg.runtime.command, &vars);
     let Some((program, args)) = argv.split_first() else { return Err("runtime.command is empty".into()) };
-    let who = Identity { role: p.role, name: &p.name, team: p.team.as_deref(), task: p.task.as_deref(), job: p.job };
+    let who = Identity { role: p.role, role_id: &p.role_id, name: &p.name, team: p.team.as_deref(), task: p.task.as_deref(), job: p.job };
     let mut cmd = agent_command(app, program, args, &p.cwd, key.project(), &who, &token);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
@@ -453,6 +495,7 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
 /// Who an agent process is: its environment for `genie agent` and the extension.
 pub(crate) struct Identity<'a> {
     pub role: Role,
+    pub role_id: &'a str,
     pub name: &'a str,
     pub team: Option<&'a str>,
     pub task: Option<&'a str>,
@@ -479,6 +522,7 @@ pub(crate) fn agent_command(
         .env("GENIE_TOKEN", token)
         .env("GENIE_PROJECT", project)
         .env("GENIE_AGENT_ROLE", who.role.as_str())
+        .env("GENIE_AGENT_ROLE_ID", who.role_id)
         .env("GENIE_AGENT_NAME", who.name)
         .env("GENIE_TASK", who.task.unwrap_or_default())
         .env("GENIE_TEAM", who.team.unwrap_or_default())
@@ -495,6 +539,9 @@ pub(crate) fn agent_command(
 /// What a live session runs as.
 pub(crate) struct Spec {
     pub role: Role,
+    pub role_id: String,
+    /// `--exclude-tools` for read-only roles.
+    pub readonly: String,
     pub name: String,
     pub team: Option<String>,
     pub task: Option<String>,
@@ -507,7 +554,14 @@ pub(crate) struct Spec {
 
 impl Spec {
     pub fn identity(&self) -> Identity<'_> {
-        Identity { role: self.role, name: &self.name, team: self.team.as_deref(), task: self.task.as_deref(), job: None }
+        Identity {
+            role: self.role,
+            role_id: &self.role_id,
+            name: &self.name,
+            team: self.team.as_deref(),
+            task: self.task.as_deref(),
+            job: None,
+        }
     }
 }
 
@@ -520,9 +574,13 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
             if project.autonomy == "manual" {
                 return Ok(None);
             }
-            let (model, thinking) = role_model(app, "orchestrator", None, None);
+            let agents = app.agents();
+            let def = orchestrator_role(&agents)?;
+            let (model, thinking) = role_model(app, &def, None, None);
             Ok(Some(Spec {
                 role: Role::Orchestrator,
+                role_id: def.id.clone(),
+                readonly: def.excluded_tools().unwrap_or_default(),
                 name: ORCHESTRATOR.into(),
                 team: None,
                 task: None,
@@ -530,7 +588,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 session_id: format!("{slug}-orchestrator"),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &project, "orchestrator", None, true),
+                prompt: agent_prompt(app, &agents, &project, &def, None, true, Reader::Orchestrator),
             }))
         }
         AgentKey::Member { project: slug, team, member } => {
@@ -539,11 +597,14 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
             if t.state != "active" || m.state != "active" {
                 return Ok(None);
             }
-            let role: Role = m.role.parse().map_err(AppError::Genie)?;
-            let (model, thinking) = role_model(app, &m.role, m.model.clone(), m.thinking.clone());
+            let agents = app.agents();
+            let def = running_role(&agents, &m.role)?;
+            let (model, thinking) = role_model(app, &def, m.model.clone(), m.thinking.clone());
             let cwd = PathBuf::from(&t.cwd);
             Ok(Some(Spec {
-                role,
+                role: def.class,
+                role_id: def.id.clone(),
+                readonly: def.excluded_tools().unwrap_or_default(),
                 name: member.clone(),
                 team: Some(team.clone()),
                 task: Some(t.task.clone()),
@@ -551,7 +612,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &project, &m.role, m.instructions.as_deref(), true),
+                prompt: agent_prompt(app, &agents, &project, &def, m.instructions.as_deref(), true, Reader::Member),
             }))
         }
         AgentKey::Job { .. } => Ok(None),
@@ -659,33 +720,126 @@ fn finish(
 
 // --- prompts -----------------------------------------------------------------
 
-const TOOLS_TABLE: &str = r#"
-Everything goes through the `genie agent` command (already configured for you: project, team, task and your identity come from the environment). Wherever the role guide above mentions a tool, use the command in this table:
+/// Who reads the command table.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    Orchestrator,
+    Member,
+    Job,
+}
 
-| Role guide says | Command |
-|---|---|
-| `genie_task` show | `genie agent show [TASK]` (default: your task) |
-| `genie_task` list / ready queue | `genie agent list [--status s1,s2] [--ready] [--epic ID]` |
-| `genie_task` create | `genie agent create "title" [-d text] [-a criterion]... [--type task|bug|spike|epic] [--parent EPIC]` |
-| `genie_task` update | `genie agent update [--task ID] [--title t] [-d text] [--plan text] [--append-notes text] [-a criterion]... [--dep ID]... [--merge-strategy text]` |
-| `genie_task` status | `genie agent status <status> [--task ID] [--note text]` |
-| `genie_task` comment | `genie agent comment "text" [--task ID] [--kind progress|question|decision|review|handoff|note]` |
-| `genie_task` check | `genie agent check <N> [--task ID] [--undo]` |
-| `genie_task` artifact | `genie agent artifact --kind K --name N (--file PATH | --text TEXT) [--task ID] [--note text]` |
-| `artifact_read` | `genie agent artifact-read <N> [--task ID]` |
-| `genie_task` split | `genie agent split "title 1" "title 2"... [--task ID]` |
-| `genie_task` block / unblock | `genie agent block "reason" [--task ID]` / `genie agent unblock [--task ID]` |
-| `team_send` | `genie agent send <name|orchestrator|all> "text" [--level low|normal|high] [--intent question|blocker|verdict|done|fyi] [--topic T] [--team T]` |
-| `team_status` | `genie agent team [TEAM]` |
-| `team_set_status` | `genie agent set-status "short status line"` |
-| `team_spawn` (orchestrator) | `genie agent spawn <TASK> [--template standard|pair|full|research|spike|abap] [--note text]` |
-| `team_stop` (orchestrator) | `genie agent stop-team <TEAM>` |
-| `docs_search` / `docs_read` / `docs_note` | `genie agent docs search "query"` / `genie agent docs read <path>` / `genie agent docs write <path> --file F` |
-| structured result of a job | `genie agent output '<json>'` |
-"#;
+/// The `genie agent` commands this role may use, as a table keyed by the tool names the role guides mention.
+fn tools_table(role: &RoleDef, reader: Reader) -> String {
+    let orch = reader == Reader::Orchestrator;
+    let can = |c: Capability| orch || role.can(c);
+    let mut rows: Vec<(&str, String)> = vec![
+        ("`genie_task` show", "`genie agent show [TASK]` (default: your task)".into()),
+        ("`genie_task` list / ready queue", "`genie agent list [--status s1,s2] [--ready] [--epic ID]`".into()),
+    ];
+    if can(Capability::TaskCreate) {
+        rows.push((
+            "`genie_task` create",
+            "`genie agent create \"title\" [-d text] [-a criterion]... [--type task|bug|spike|epic] [--parent EPIC]`".into(),
+        ));
+    }
+    let mut update = String::from("`genie agent update [--task ID]");
+    if can(Capability::TaskScope) {
+        update.push_str(" [--title t] [-d text] [-a criterion]... [--dep ID]...");
+    }
+    if can(Capability::TaskPlan) {
+        update.push_str(" [--plan text]");
+    }
+    update.push_str(" [--append-notes text]");
+    if orch {
+        update.push_str(" [--merge-strategy text]");
+    }
+    update.push('`');
+    rows.push(("`genie_task` update", update));
+    let targets: Vec<&str> = if orch {
+        Vec::new()
+    } else {
+        let mut t: Vec<&str> = TEAM_TRANSITIONS.iter().filter(|(_, _, c)| role.can(*c)).map(|(_, to, _)| to.as_str()).collect();
+        t.dedup();
+        t
+    };
+    if orch {
+        rows.push(("`genie_task` status", "`genie agent status <status> [--task ID] [--note text]`".into()));
+    } else if !targets.is_empty() {
+        rows.push((
+            "`genie_task` status",
+            format!("`genie agent status <status> [--task ID] [--note text]` (your role may set: {})", targets.join(", ")),
+        ));
+    }
+    rows.push((
+        "`genie_task` comment",
+        "`genie agent comment \"text\" [--task ID] [--kind progress|question|decision|review|handoff|note]`".into(),
+    ));
+    if can(Capability::TaskCheck) {
+        rows.push(("`genie_task` check", "`genie agent check <N> [--task ID] [--undo]`".into()));
+    }
+    rows.push((
+        "`genie_task` artifact",
+        "`genie agent artifact --kind K --name N (--file PATH | --text TEXT) [--task ID] [--note text]`".into(),
+    ));
+    rows.push(("`artifact_read`", "`genie agent artifact-read <N> [--task ID]`".into()));
+    if orch {
+        rows.push(("`genie_task` split", "`genie agent split \"title 1\" \"title 2\"... [--task ID]`".into()));
+    }
+    if can(Capability::TaskBlock) {
+        rows.push((
+            "`genie_task` block / unblock",
+            "`genie agent block \"reason\" [--task ID]` / `genie agent unblock [--task ID]`".into(),
+        ));
+    }
+    if reader != Reader::Job && (can(Capability::MailTeam) || can(Capability::MailOrchestrator)) {
+        rows.push((
+            "`team_send`",
+            "`genie agent send <name|orchestrator|all> \"text\" [--level low|normal|high] [--intent question|blocker|verdict|done|fyi] [--topic T] [--team T]`"
+                .into(),
+        ));
+    }
+    if reader != Reader::Job {
+        rows.push(("`team_status`", "`genie agent team [TEAM]`".into()));
+    }
+    if reader == Reader::Member {
+        rows.push(("`team_set_status`", "`genie agent set-status \"short status line\"`".into()));
+    }
+    if orch {
+        rows.push((
+            "`team_spawn` (orchestrator)",
+            "`genie agent spawn <TASK> [--template <id>] [--member <role>[:<model>]]... [--note text]`".into(),
+        ));
+        rows.push((
+            "`team_add_member` (orchestrator)",
+            "`genie agent add-member <TEAM> <role> [--name n] [--model m] [--instructions text]`".into(),
+        ));
+        rows.push(("team templates and roles", "`genie agent templates` / `genie agent roles`".into()));
+        rows.push(("`team_stop` (orchestrator)", "`genie agent stop-team <TEAM>`".into()));
+    }
+    let mut docs = Vec::new();
+    if can(Capability::DocsRead) {
+        docs.push("`genie agent docs search \"query\"` / `genie agent docs read <path>`");
+    }
+    if can(Capability::DocsWrite) {
+        docs.push("`genie agent docs write <path> --file F`");
+    }
+    if !docs.is_empty() {
+        rows.push(("`docs_search` / `docs_read` / `docs_note`", docs.join(" / ")));
+    }
+    if reader == Reader::Job {
+        rows.push(("structured result of a job", "`genie agent output '<json>'`".into()));
+    }
+    let mut out = String::from(
+        "\nEverything goes through the `genie agent` command (already configured for you: project, team, task and your identity come from the environment). Wherever the role guide above mentions a tool, use the command in this table:\n\n| Role guide says | Command |\n|---|---|\n",
+    );
+    for (says, cmd) in rows {
+        out.push_str(&format!("| {says} | {cmd} |\n"));
+    }
+    out
+}
 
 /// How the agent acts in genie: the delivery model (live session or turns) and the command table.
-fn tools_section(live: bool, orchestrator: bool, ask_timeout: u64) -> String {
+fn tools_section(live: bool, role: &RoleDef, reader: Reader, ask_timeout: u64) -> String {
     let mut out = String::from("\n## How you act in genie (server runtime)\n\n");
     if live {
         out.push_str(
@@ -696,19 +850,35 @@ fn tools_section(live: bool, orchestrator: bool, ask_timeout: u64) -> String {
             "You run in turns: each turn delivers your new messages; do the work they call for, then end the turn by finishing your reply. Teammates' answers arrive as a new turn — never wait or poll with sleep.\n",
         );
     }
-    out.push_str(TOOLS_TABLE);
+    if reader == Reader::Member {
+        out.push_str("\nYour kickoff says how your team works — who hands work to whom, who reviews it, who reports to the orchestrator. Where it differs from the role guide above, follow the kickoff.\n");
+    }
+    out.push_str(&tools_table(role, reader));
+    let orch = reader == Reader::Orchestrator;
     if live {
+        let mut rows = Vec::new();
+        if orch || role.can(Capability::MailTeam) {
+            rows.push(format!(
+                "| ask and wait for the answer (up to {ask_timeout}s; a late answer arrives as mail) | `genie agent ask <name|orchestrator> \"question\" [--timeout S]` |"
+            ));
+        }
+        rows.push("| answer a message, e.g. a question someone is waiting on | `genie agent reply <id> \"text\"` |".to_string());
+        rows.push("| full text of a clipped message | `genie agent mail <id>` |".to_string());
+        if orch || role.can(Capability::TeamPeek) {
+            rows.push(
+                "| what a teammate is doing now (add `--deep` for its latest conversation) | `genie agent peek <name> [--deep]` |"
+                    .to_string(),
+            );
+        }
+        rows.push(
+            "| replace your earlier update on the same subject instead of adding one | `genie agent send … --topic <subject>` |"
+                .to_string(),
+        );
         out.push_str(&format!(
-            "\nTalking to the team:\n\n\
-             | Need | Command |\n|---|---|\n\
-             | ask and wait for the answer (up to {ask_timeout}s; a late answer arrives as mail) | `genie agent ask <name|orchestrator> \"question\" [--timeout S]` |\n\
-             | answer a message, e.g. a question someone is waiting on | `genie agent reply <id> \"text\"` |\n\
-             | full text of a clipped message | `genie agent mail <id>` |\n\
-             | what a teammate is doing now (add `--deep` for its latest conversation) | `genie agent peek <name> [--deep]` |\n\
-             | replace your earlier update on the same subject instead of adding one | `genie agent send … --topic <subject>` |\n\n\
-             Keep messages short and point to the task, comments and artifacts for details; progress goes into the task, not into mail. Do not send acknowledgements.\n"
+            "\nTalking to the team:\n\n| Need | Command |\n|---|---|\n{}\n\nKeep messages short and point to the task, comments and artifacts for details; progress goes into the task, not into mail. Do not send acknowledgements.\n",
+            rows.join("\n")
         ));
-        if orchestrator {
+        if orch {
             out.push_str(
                 "\nDirecting the team (orchestrator):\n\n| Need | Command |\n|---|---|\n\
                  | every agent's state, current step and waiting mail | `genie agent board` |\n\
@@ -723,10 +893,49 @@ fn tools_section(live: bool, orchestrator: bool, ask_timeout: u64) -> String {
     out
 }
 
-fn agent_prompt(app: &App, project: &Project, role: &str, instructions: Option<&str>, live: bool) -> String {
+/// The orchestrator's view of the configured templates and roles of a project.
+fn catalogue_section(agents: &AgentConfig, project: &Project) -> String {
+    let mut out = String::from(
+        "\n## Team templates and roles\n\nAssemble a team from a template (`genie agent spawn <TASK> --template <id>`) or from roles (`--member <role>`, repeatable); add a member to a running team with `genie agent add-member <TEAM> <role>`. Templates are presets, not rules: pick by the descriptions. `genie agent templates` and `genie agent roles` print the details.\n\nTemplates:\n",
+    );
+    for t in agents.teams.values().filter(|t| t.available_in(&project.slug)) {
+        let roles: Vec<&str> = t.members.iter().map(|m| m.role.as_str()).collect();
+        let stage = match t.stage {
+            Stage::Refinement => "before ready",
+            Stage::Delivery => "ready tasks",
+        };
+        let ws = match t.workspace {
+            Workspace::Worktree => "own worktree",
+            Workspace::Repo => "main working copy",
+            Workspace::Scratch => "empty workspace",
+        };
+        out.push_str(&format!("- `{}` — {} ({stage} · {ws} · {})\n", t.id, t.description, roles.join(", ")));
+    }
+    out.push_str("\nRoles:\n");
+    let mut early = Vec::new();
+    for r in agents.roles.values().filter(|r| r.class != Role::Orchestrator && r.available_in(&project.slug)) {
+        let class = if r.id == r.class.as_str() { String::new() } else { format!(" ({})", r.class) };
+        out.push_str(&format!("- `{}`{class} — {}\n", r.id, r.description));
+        if r.stages.contains(&Stage::Refinement) {
+            early.push(format!("`{}`", r.id));
+        }
+    }
+    out.push_str(&format!("\nBefore a task is `ready`, only these roles may work on it: {}.\n", early.join(", ")));
+    out
+}
+
+fn agent_prompt(
+    app: &App,
+    agents: &AgentConfig,
+    project: &Project,
+    role: &RoleDef,
+    instructions: Option<&str>,
+    live: bool,
+    reader: Reader,
+) -> String {
     let lang = &app.cfg.language;
-    let mut out = config::role_prompt(&app.data, role);
-    out.push_str(&tools_section(live, role == "orchestrator", app.cfg.runtime.ask_timeout_secs));
+    let mut out = role.full_prompt();
+    out.push_str(&tools_section(live, role, reader, app.cfg.runtime.ask_timeout_secs));
     out.push_str(&format!(
         "\n## Project\n\nProject `{}` ({}). {}\n\nLanguage: write tasks, comments, artifacts and team mail in {}; anything addressed to people (questions for the owner, needs_owner notes) in {}.\n",
         project.slug,
@@ -735,8 +944,9 @@ fn agent_prompt(app: &App, project: &Project, role: &str, instructions: Option<&
         lang.internal,
         lang.user,
     ));
-    if role == "orchestrator" {
+    if reader == Reader::Orchestrator {
         out.push_str("\n## Automations\n\nSome work is done by the project's automations (their comments and actions are signed `automation:<id>:<run>`). A task in `refining` with the comment \"Взята в разбор автоматически\" is being triaged by an automation: do not start another analysis for it — you will get a message when the author's answers are in. Automations also update the knowledge base and the changelog when a task is done.\n");
+        out.push_str(&catalogue_section(agents, project));
     }
     if let Some(i) = instructions.filter(|i| !i.trim().is_empty()) {
         out.push_str(&format!("\n## Instructions for you\n\n{i}\n"));
@@ -834,38 +1044,82 @@ pub struct SpawnRequest {
     pub by: Actor,
 }
 
-const REFINEMENT_ROLES: &[&str] = &["analyst", "reviewer", "documenter"];
+/// A free name for a role: from its pool, else numbered.
+fn pick_name(role: &RoleDef, taken: &mut std::collections::HashSet<String>) -> String {
+    team::pick_from(&role.names, taken)
+}
 
-/// Assemble a team for a task: roster from the template, worktree when the
-/// template asks for one and the project has a repository, kickoff mail.
+/// Assemble a team for a task: roster and relations from the template (or from
+/// the roles asked for), a workspace, the snapshot of how the team works, kickoffs.
 pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_core::team::Team> {
     let project = project_of(app, slug)?;
-    let template_name = req.template.clone().unwrap_or_else(|| "standard".into());
-    let template = app.cfg.teams.get(&template_name).cloned();
-    if template.is_none() && req.members.is_empty() {
-        return Err(GenieError::invalid(format!("unknown team template {template_name}")).into());
-    }
+    let agents = app.agents();
     let task = app.with_tracker(slug, |t| t.get(&req.task))?;
-    let specs: Vec<MemberSpec> =
-        if req.members.is_empty() { template.as_ref().map(|t| t.members.clone()).unwrap_or_default() } else { req.members.clone() };
-    if specs.is_empty() {
-        return Err(GenieError::invalid("a team needs at least one member").into());
-    }
-    let limits = &app.cfg.limits;
-    if specs.len() > limits.max_members_per_team {
-        return Err(GenieError::invalid(format!("limit: at most {} members per team", limits.max_members_per_team)).into());
-    }
-    let refinement = matches!(task.status, Status::Inbox | Status::Draft | Status::Refining);
     if task.task_type == genie_core::TaskType::Epic {
         return Err(GenieError::invalid("epics are not handed to teams; split it into tasks").into());
     }
     if CLOSED.contains(&task.status) {
         return Err(GenieError::invalid(format!("{} is {}", task.id, task.status)).into());
     }
-    if refinement && specs.iter().any(|s| !REFINEMENT_ROLES.contains(&s.role.as_str())) {
+    let refinement = matches!(task.status, Status::Inbox | Status::Draft | Status::Refining);
+    let template = match (&req.template, req.members.is_empty()) {
+        (Some(id), _) => Some(agents.team_for(slug, id)?.clone()),
+        (None, true) => Some(agents.team_for(slug, "standard")?.clone()),
+        (None, false) => None,
+    };
+    // The roster: the template's members, or the roles asked for.
+    let asked: Vec<(Option<String>, MemberSpec)> = if req.members.is_empty() {
+        template
+            .as_ref()
+            .map(|t| {
+                t.members
+                    .iter()
+                    .map(|m| {
+                        (
+                            Some(m.key.clone()),
+                            MemberSpec {
+                                role: m.role.clone(),
+                                name: m.name.clone(),
+                                model: m.model.clone(),
+                                thinking: m.thinking.clone(),
+                                instructions: m.instructions.clone(),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        req.members.iter().map(|m| (None, m.clone())).collect()
+    };
+    if asked.is_empty() {
+        return Err(GenieError::invalid("a team needs at least one member").into());
+    }
+    let limits = &app.cfg.limits;
+    if asked.len() > limits.max_members_per_team {
+        return Err(GenieError::invalid(format!("limit: at most {} members per team", limits.max_members_per_team)).into());
+    }
+    let mut roles: Vec<RoleDef> = Vec::new();
+    for (_, m) in &asked {
+        let r = agents.role_for(slug, &m.role)?;
+        if r.class == Role::Orchestrator {
+            return Err(GenieError::invalid("the orchestrator is not a team member").into());
+        }
+        roles.push(r.clone());
+    }
+    if refinement && let Some(r) = roles.iter().find(|r| !r.stages.contains(&Stage::Refinement)) {
+        let early: Vec<&str> = agents
+            .roles
+            .values()
+            .filter(|r| r.stages.contains(&Stage::Refinement) && r.available_in(slug))
+            .map(|r| r.id.as_str())
+            .collect();
         return Err(GenieError::invalid(format!(
-            "{} is not ready ({}); before `ready` only analyst/reviewer/documenter teams (template research) may work on it",
-            task.id, task.status
+            "{} is not ready ({}); role {} works only on ready tasks. Before `ready` only these roles may work on it: {} (e.g. template research)",
+            task.id,
+            task.status,
+            r.id,
+            early.join(", ")
         ))
         .into());
     }
@@ -881,33 +1135,57 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
         );
     }
     let team_id = app.with_tracker(slug, |t| t.bus().free_id(&task.id))?;
-    let wants_worktree = template.as_ref().is_some_and(|t| t.worktree) && !refinement;
-    let worktree = match (&project.repo, wants_worktree) {
-        (Some(repo), true) => Some(create_worktree(app, Path::new(repo), &team_id, &task.id)?),
+    let workspace = template.as_ref().map(|t| t.workspace).unwrap_or(Workspace::Worktree);
+    let worktree = match (&project.repo, workspace) {
+        (Some(repo), Workspace::Worktree) if !refinement => Some(create_worktree(app, Path::new(repo), &team_id, &task.id)?),
         _ => None,
     };
-    let cwd = match (&worktree, &project.repo) {
-        (Some(w), _) => w.path.clone(),
-        (None, Some(repo)) => repo.clone(),
-        (None, None) => project_workspace(app, &project, &team_id).to_string_lossy().into_owned(),
-    };
-    let mut taken = app.with_tracker(slug, |t| t.bus().taken_names())?;
-    let members: Vec<NewMember> = specs
-        .iter()
-        .map(|s| NewMember {
-            name: s.name.clone().unwrap_or_else(|| team::pick_name(&s.role, &mut taken)),
-            role: s.role.clone(),
-            model: s.model.clone(),
-            thinking: s.thinking.clone(),
-            instructions: s.instructions.clone(),
-        })
-        .collect();
-    for m in &members {
-        let role: Role = m.role.parse().map_err(AppError::Genie)?;
-        if !genie_core::is_member_role(role) {
-            return Err(GenieError::invalid(format!("{} is not a team role", m.role)).into());
+    let cwd = match (&worktree, &project.repo, workspace) {
+        (Some(w), _, _) => w.path.clone(),
+        (None, Some(_), Workspace::Scratch) => {
+            let d = app.data.join("workspaces").join(slug).join(&team_id);
+            std::fs::create_dir_all(&d).map_err(|e| AppError::Internal(format!("{}: {e}", d.display())))?;
+            d.to_string_lossy().into_owned()
         }
+        (None, Some(repo), _) => repo.clone(),
+        (None, None, _) => project_workspace(app, &project, &team_id).to_string_lossy().into_owned(),
+    };
+    // Names and keys; the spec keeps the template's relations (or derives them).
+    let mut taken = app.with_tracker(slug, |t| t.bus().taken_names())?;
+    let mut spec_members: Vec<SpecMember> = Vec::new();
+    let mut members: Vec<NewMember> = Vec::new();
+    for ((key, m), role) in asked.iter().zip(&roles) {
+        let name = m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| pick_name(role, &mut taken));
+        taken.insert(name.clone());
+        let key = key.clone().unwrap_or_else(|| crate::agent_config::free_key(&spec_members, &role.id));
+        spec_members.push(SpecMember { key, name: name.clone(), role: role.id.clone() });
+        members.push(NewMember {
+            name,
+            role: role.id.clone(),
+            model: m.model.clone(),
+            thinking: m.thinking.clone(),
+            instructions: m.instructions.clone(),
+        });
     }
+    let classes: Vec<Role> = roles.iter().map(|r| r.class).collect();
+    let spec = match &template {
+        Some(t) if req.members.is_empty() => TeamSpec {
+            template: Some(t.id.clone()),
+            title: Some(t.title.clone()),
+            stage: t.stage,
+            workspace: t.workspace,
+            mail: t.mail,
+            members: spec_members,
+            relations: t.relations.clone(),
+            charter: t.charter.clone(),
+        },
+        _ => TeamSpec {
+            template: template.as_ref().map(|t| t.id.clone()),
+            title: template.as_ref().map(|t| t.title.clone()),
+            workspace,
+            ..TeamSpec::derived(spec_members, &classes, refinement)
+        },
+    };
     let system = Actor::new(req.by.name.clone(), if req.by.role == Role::Human { Role::Human } else { Role::Orchestrator });
     let created = app.with_tracker(slug, |t| {
         let team = t.bus().create(
@@ -916,10 +1194,11 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
             NewTeam {
                 id: team_id.clone(),
                 task: task.id.clone(),
-                template: Some(template_name.clone()),
+                template: spec.template.clone(),
                 cwd: cwd.clone(),
                 worktree: worktree.clone(),
                 members: members.clone(),
+                spec: Some(spec.to_value()),
             },
         )?;
         let wt = worktree.as_ref().map(|w| genie_core::Worktree { path: w.path.clone(), branch: Some(w.branch.clone()) });
@@ -934,14 +1213,24 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
             )?;
         }
         let epic = t.epic_context(&task.id)?.epic;
-        for m in &members {
-            let text = kickoff(&team_id, &task, &cwd, worktree.as_ref(), &members, m, req.note.as_deref(), epic.as_ref());
+        let k = Kickoff {
+            team: &team_id,
+            task: &task,
+            cwd: &cwd,
+            worktree: worktree.as_ref(),
+            spec: &spec,
+            agents: &agents,
+            note: req.note.as_deref(),
+            epic: epic.as_ref(),
+            joining: false,
+        };
+        for m in &spec.members {
             t.bus().send(team::SendMail {
                 team: &team_id,
                 from: ORCHESTRATOR,
                 from_role: "orchestrator",
                 to: &m.name,
-                text: &text,
+                text: &k.text(m),
                 level: Some("normal"),
                 intent: None,
                 kind: "kickoff",
@@ -954,64 +1243,285 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
     Ok(created)
 }
 
-/// The first message of a member. Port of `kickoff()` in `src/team/ops.ts`.
-#[allow(clippy::too_many_arguments)]
-pub fn kickoff(
-    team: &str,
-    task: &Task,
-    cwd: &str,
-    worktree: Option<&TeamWorktree>,
-    all: &[NewMember],
-    me: &NewMember,
-    note: Option<&str>,
-    epic: Option<&Task>,
-) -> String {
-    let has_analyst = all.iter().any(|m| m.role == "analyst");
-    let tester = all.iter().find(|m| m.role == "tester");
-    let notify = format!("message the reviewer{}", tester.map(|t| format!(" and the tester ({})", t.name)).unwrap_or_default());
-    let refinement = !matches!(task.status, Status::Ready | Status::ChangesRequested | Status::InProgress | Status::Review);
-    let first = match me.role.as_str() {
-        "analyst" if refinement => "The task is not ready yet: research it, propose a precise description and verifiable acceptance criteria (genie agent update), write your findings as an `analysis` artifact, then report to the orchestrator.".to_string(),
-        "analyst" => "Start now: analyse the task, save the plan (genie agent update --plan), then hand over to the executor with genie agent send.".to_string(),
-        "executor" if has_analyst => format!("Wait for the analyst's handoff before implementing: set a waiting status (genie agent set-status) and end your turn without messaging anyone. When you start: status in_progress; when you hand over: commit, attach a test-report artifact, status review, then {notify}."),
-        "executor" => format!("Start now: status in_progress, implement, commit, attach a test-report artifact, status review, then {notify}."),
-        "reviewer" if refinement => "Challenge the analyst's findings: when the analyst shares them, check them for gaps and risks and send your feedback directly to the analyst.".to_string(),
-        "reviewer" => "Wait until the executor asks for review: set a waiting status and end your turn without messaging anyone. When reviewing: check each verified criterion, attach one review artifact, set status approved or changes_requested, then message the executor (and the orchestrator on approval).".to_string(),
-        "tester" => "Wait until the executor submits the work for review, then test it against the acceptance criteria, attach a test-report artifact and send the results to the executor and reviewer. If tests fail, set status changes_requested with a note.".to_string(),
-        _ => "Wait until the implementation is approved or the orchestrator asks you, then write/update the documentation, attach a `doc` artifact and tell the orchestrator.".to_string(),
-    };
-    let roster = all.iter().map(|m| format!("{} — {} (`{}`)", team::display_name(&m.name), m.role, m.name)).collect::<Vec<_>>().join(", ");
-    let mut out = vec![
-        format!(
-            "Welcome to team {team}, {}! You are the {}; teammates address you as \"{}\". Task: {} — {} (status {}). Read it with `genie agent show`.",
-            team::display_name(&me.name),
-            me.role,
-            me.name,
-            task.id,
-            task.title,
-            task.status
-        ),
-        match worktree {
-            Some(w) => format!(
-                "Working directory: {cwd} (branch {}, base {}).",
-                w.branch,
-                w.base.as_deref().unwrap_or("").chars().take(10).collect::<String>()
+/// Add a member to a running team: its role from the configuration, relations
+/// derived for it, a kickoff for it and a note for the others.
+pub fn add_member(app: &App, slug: &str, team_id: &str, m: MemberSpec, by: &str) -> AppResult<SpecMember> {
+    let agents = app.agents();
+    let role = agents.role_for(slug, &m.role)?.clone();
+    if role.class == Role::Orchestrator {
+        return Err(GenieError::invalid("the orchestrator is not a team member").into());
+    }
+    let max = app.cfg.limits.max_members_per_team;
+    app.with_tracker(slug, |t| {
+        let team = t.bus().get(team_id)?;
+        if team.state != "active" {
+            return Err(GenieError::invalid(format!("team {team_id} is stopped")));
+        }
+        if team.members.len() >= max {
+            return Err(GenieError::invalid(format!("limit: at most {max} members per team")));
+        }
+        let task = t.get(&team.task)?;
+        let refinement = matches!(task.status, Status::Inbox | Status::Draft | Status::Refining);
+        if refinement && !role.stages.contains(&Stage::Refinement) {
+            return Err(GenieError::invalid(format!(
+                "{} is not ready ({}); role {} works only on ready tasks",
+                task.id, task.status, role.id
+            )));
+        }
+        // Teams assembled before relations were configurable get a derived spec now.
+        let mut spec = team.spec.as_ref().and_then(TeamSpec::from_value).unwrap_or_else(|| {
+            let mut members = Vec::new();
+            let mut classes = Vec::new();
+            for x in &team.members {
+                members.push(SpecMember {
+                    key: crate::agent_config::free_key(&members, &x.role),
+                    name: x.name.clone(),
+                    role: x.role.clone(),
+                });
+                classes.push(agents.roles.get(&x.role).map(|r| r.class).unwrap_or(Role::Analyst));
+            }
+            TeamSpec { template: team.template.clone(), ..TeamSpec::derived(members, &classes, refinement) }
+        });
+        let mut taken = t.bus().taken_names()?;
+        let name = m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| pick_name(&role, &mut taken));
+        let me = SpecMember { key: spec.free_key(&role.id), name: name.clone(), role: role.id.clone() };
+        // Relations the process implies for the newcomer, next to the current ones.
+        let mut keyed: Vec<(String, Role)> =
+            spec.members.iter().map(|x| (x.key.clone(), agents.roles.get(&x.role).map(|r| r.class).unwrap_or(Role::Analyst))).collect();
+        keyed.push((me.key.clone(), role.class));
+        // Only the newcomer's own edges: a relation it merely shares (the executor
+        // handing over to every reviewer) is narrowed to it, so nobody else is told twice.
+        for r in crate::agent_config::default_relations(&keyed, refinement) {
+            let r = if r.from == me.key {
+                r
+            } else if r.to.contains(&me.key) {
+                Relation { to: vec![me.key.clone()], ..r }
+            } else {
+                continue;
+            };
+            if !spec.relations.contains(&r) {
+                spec.relations.push(r);
+            }
+        }
+        spec.members.push(me.clone());
+        let updated = t.bus().add_member(
+            team_id,
+            NewMember {
+                name: name.clone(),
+                role: role.id.clone(),
+                model: m.model.clone(),
+                thinking: m.thinking.clone(),
+                instructions: m.instructions.clone(),
+            },
+        )?;
+        t.bus().set_spec(team_id, &spec.to_value())?;
+        let k = Kickoff {
+            team: team_id,
+            task: &task,
+            cwd: &team.cwd,
+            worktree: team.worktree.as_ref(),
+            spec: &spec,
+            agents: &agents,
+            note: None,
+            epic: None,
+            joining: true,
+        };
+        let bus = t.bus();
+        bus.send(team::SendMail {
+            team: team_id,
+            from: ORCHESTRATOR,
+            from_role: "orchestrator",
+            to: &name,
+            text: &k.text(&me),
+            level: None,
+            intent: None,
+            kind: "kickoff",
+            ..Default::default()
+        })?;
+        let note = format!("{} — {} joined the team (added by {by}).", team::display_name(&name), role.id);
+        for other in updated.members.iter().filter(|x| x.name != name) {
+            bus.send(team::SendMail {
+                team: team_id,
+                from: ORCHESTRATOR,
+                from_role: "orchestrator",
+                to: &other.name,
+                text: &note,
+                level: Some("low"),
+                intent: Some("fyi"),
+                kind: "system",
+                ..Default::default()
+            })?;
+        }
+        Ok(me)
+    })
+}
+
+/// A member's first message, generated from the team's relations.
+pub struct Kickoff<'a> {
+    pub team: &'a str,
+    pub task: &'a Task,
+    pub cwd: &'a str,
+    pub worktree: Option<&'a TeamWorktree>,
+    pub spec: &'a TeamSpec,
+    pub agents: &'a AgentConfig,
+    pub note: Option<&'a str>,
+    pub epic: Option<&'a Task>,
+    /// Joining a running team rather than starting with it.
+    pub joining: bool,
+}
+
+fn and_list(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        n => format!("{} and {}", items[..n - 1].join(", "), items[n - 1]),
+    }
+}
+
+impl Kickoff<'_> {
+    fn who(&self, key: &str) -> String {
+        if key == crate::agent_config::ORCHESTRATOR {
+            return "the orchestrator".into();
+        }
+        self.spec.by_key(key).map(|m| team::display_name(&m.name)).unwrap_or_else(|| key.to_string())
+    }
+
+    fn whom(&self, keys: &[String]) -> String {
+        and_list(&keys.iter().map(|k| self.who(k)).collect::<Vec<_>>())
+    }
+
+    fn role_label(&self, role: &str) -> String {
+        match self.agents.roles.get(role) {
+            Some(r) if r.id != r.class.as_str() => format!("{} ({} class)", r.id, r.class),
+            _ => role.to_string(),
+        }
+    }
+
+    pub fn text(&self, me: &SpecMember) -> String {
+        let task = self.task;
+        let rels = &self.spec.relations;
+        let note = |r: &Relation| r.note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default();
+        let roster = self
+            .spec
+            .members
+            .iter()
+            .map(|m| format!("{} — {} (`{}`)", team::display_name(&m.name), m.role, m.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut out = vec![
+            format!(
+                "{} team {}, {}! You are the {}; teammates address you as \"{}\". Task: {} — {} (status {}). Read it with `genie agent show`.",
+                if self.joining { "You are joining" } else { "Welcome to" },
+                self.team,
+                team::display_name(&me.name),
+                self.role_label(&me.role),
+                me.name,
+                task.id,
+                task.title,
+                task.status
             ),
-            None => format!("Working directory: {cwd}."),
-        },
-        format!("Team: {roster}, plus orchestrator."),
-    ];
-    if let Some(e) = epic {
+            match self.worktree {
+                Some(w) => format!(
+                    "Working directory: {} (branch {}, base {}).",
+                    self.cwd,
+                    w.branch,
+                    w.base.as_deref().unwrap_or("").chars().take(10).collect::<String>()
+                ),
+                None => format!("Working directory: {}.", self.cwd),
+            },
+            format!("Team: {roster}, plus orchestrator."),
+        ];
+        if let Some(e) = self.epic {
+            out.push(format!(
+                "This task is part of epic {} — {}. Read its goal and shared artifacts (`genie agent show {}`) before you start, and attach material useful for the whole epic to the epic itself.",
+                e.id, e.title, e.id
+            ));
+        }
+        if matches!(task.status, Status::Inbox | Status::Draft | Status::Refining) {
+            out.push(format!(
+                "The task is not ready yet (status {}): this team clarifies it — scope, a precise description and verifiable acceptance criteria (`genie agent update`), findings as an `analysis` artifact. Nobody implements.",
+                task.status
+            ));
+        }
+        let mut how = Vec::new();
+        let inbound: Vec<&Relation> = rels.iter().filter(|r| r.kind == RelKind::Handoff && r.to.contains(&me.key)).collect();
+        if inbound.is_empty() {
+            how.push("Start now.".to_string());
+        } else {
+            let from: Vec<String> = inbound.iter().map(|r| format!("{}{}", self.who(&r.from), note(r))).collect();
+            let auto: Vec<String> = inbound.iter().filter_map(|r| r.on.map(|s| s.to_string())).collect();
+            how.push(format!(
+                "You start after {} hand{} over: until then set a waiting status (`genie agent set-status`) and end your turn without messaging anyone.{}",
+                and_list(&from),
+                if from.len() == 1 { "s" } else { "" },
+                if auto.is_empty() { String::new() } else { format!(" genie tells you when the task moves to {}.", and_list(&auto)) }
+            ));
+        }
+        for r in rels.iter().filter(|r| r.from == me.key) {
+            let to = self.whom(&r.to);
+            match (r.kind, r.on) {
+                (RelKind::Handoff, Some(st)) => how.push(format!(
+                    "When your step is done{}, move the task to {st} with a note (`genie agent status {st} --note …`): genie passes it to {to}.",
+                    note(r)
+                )),
+                (RelKind::Handoff, None) => {
+                    how.push(format!("When your step is done{}, hand over to {to} (`genie agent send <name> … --intent done`).", note(r)))
+                }
+                (RelKind::Returns, Some(st)) => how.push(format!(
+                    "If the work does not meet the criteria, return it to {to}: move the task to {st} with a note{}; genie tells them.",
+                    note(r)
+                )),
+                (RelKind::Returns, None) => how.push(format!("If the work does not meet the criteria, send {to} your findings{} directly.", note(r))),
+                (RelKind::Consults, _) => how.push(format!("Ask {to} directly{}: `genie agent ask <name> \"…\"` waits for the answer.", note(r))),
+                (RelKind::Reports, _) => {}
+            }
+        }
+        for r in rels.iter().filter(|r| r.to.contains(&me.key)) {
+            let from = self.who(&r.from);
+            match r.kind {
+                RelKind::Returns => how.push(format!(
+                    "{from} may return the work to you{}{}: fix it and hand over again.",
+                    note(r),
+                    r.on.map(|s| format!("; genie tells you when the task moves to {s}")).unwrap_or_default()
+                )),
+                RelKind::Consults => how.push(format!("{from} may ask you questions{}: answer promptly.", note(r))),
+                _ => {}
+            }
+        }
+        let reporters: Vec<&Relation> = rels.iter().filter(|r| r.kind == RelKind::Reports).collect();
+        let mine: Vec<String> = reporters.iter().filter(|r| r.from == me.key).filter_map(|r| r.note.clone()).collect();
+        if reporters.iter().any(|r| r.from == me.key) {
+            how.push(format!(
+                "You are the team's voice to the orchestrator: report {} (`genie agent send orchestrator … --intent verdict` or `done`).",
+                if mine.is_empty() { "the result".to_string() } else { and_list(&mine) }
+            ));
+        } else if reporters.is_empty() {
+            how.push("Report your result to the orchestrator yourself (`genie agent send orchestrator … --intent done`).".into());
+        } else {
+            let mut voices: Vec<String> = reporters.iter().map(|r| self.who(&r.from)).collect();
+            voices.dedup();
+            how.push(format!(
+                "{} {} the team's voice to the orchestrator; message the orchestrator yourself only with a scope question or a blocker.",
+                and_list(&voices),
+                if voices.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        if self.spec.mail == MailMode::Flow {
+            how.push("Mail follows this flow: write only to the teammates named above.".into());
+        }
         out.push(format!(
-            "This task is part of epic {} — {}. Read its goal and shared artifacts (`genie agent show {}`) before you start, and attach material useful for the whole epic to the epic itself.",
-            e.id, e.title, e.id
+            "How the team works{}:\n{}",
+            self.spec.title.as_deref().map(|t| format!(" (template \"{t}\")")).unwrap_or_default(),
+            how.iter().map(|h| format!("- {h}")).collect::<Vec<_>>().join("\n")
         ));
+        if let Some(c) = self.spec.charter.as_deref().filter(|c| !c.trim().is_empty()) {
+            out.push(format!("Team rules: {}", c.trim()));
+        }
+        if let Some(n) = self.note.filter(|n| !n.trim().is_empty()) {
+            out.push(format!("\nFrom {}: {n}", if self.joining { "whoever added you" } else { "the orchestrator" }));
+        }
+        out.join("\n")
     }
-    out.push(first);
-    if let Some(n) = note.filter(|n| !n.trim().is_empty()) {
-        out.push(format!("\nFrom the orchestrator: {n}"));
-    }
-    out.join("\n")
 }
 
 /// Stop a team: members stop receiving turns, agent tokens are revoked, the task is released.

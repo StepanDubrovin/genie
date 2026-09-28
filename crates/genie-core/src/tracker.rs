@@ -168,6 +168,11 @@ fn require_role(actor: &Actor, what: &str, roles: &[Role]) -> Result<()> {
     if is_privileged(actor.role) || roles.contains(&actor.role) { Ok(()) } else { Err(deny(actor, what)) }
 }
 
+/// A team role needs the permission (people and the orchestrator hold them all).
+fn require_cap(actor: &Actor, what: &str, cap: Capability) -> Result<()> {
+    if actor.can(cap) { Ok(()) } else { Err(deny(actor, what)) }
+}
+
 fn clamp_priority(p: i64) -> i64 {
     p.clamp(0, 4)
 }
@@ -450,6 +455,18 @@ impl Tracker {
         Ok(())
     }
 
+    /// Who moved the task to `review` most recently.
+    fn last_submitter(&self, task: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT actor FROM history WHERE task = ?1 AND event = 'status' AND to_status = 'review' ORDER BY id DESC LIMIT 1",
+                [task],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     fn touch(&self, task: &str) -> Result<()> {
         self.conn().execute("UPDATE tasks SET updated = ?1 WHERE id = ?2", params![now(), task])?;
         Ok(())
@@ -557,7 +574,7 @@ impl Tracker {
     }
 
     pub fn create(&self, actor: &Actor, input: CreateInput) -> Result<Task> {
-        require_role(actor, "create tasks", &[Role::Analyst])?;
+        require_cap(actor, "create tasks", Capability::TaskCreate)?;
         let title = input.title.trim().to_string();
         if title.is_empty() {
             return Err(GenieError::invalid("title is required"));
@@ -627,7 +644,8 @@ impl Tracker {
 
     pub fn update(&self, actor: &Actor, id: &str, input: UpdateInput) -> Result<Task> {
         let r = self.row(id)?;
-        let scope = |fields: &str, roles: &[Role]| require_role(actor, &format!("change {fields}"), roles);
+        let scope = |fields: &str, cap: Capability| require_cap(actor, &format!("change {fields}"), cap);
+        let privileged = |fields: &str| require_role(actor, &format!("change {fields}"), &[]);
         self.db.tx(|| {
             let mut changed: Vec<String> = Vec::new();
             let mut set = |col: &str, value: &dyn rusqlite::ToSql, name: &str| -> Result<()> {
@@ -636,11 +654,11 @@ impl Tracker {
                 Ok(())
             };
             if let Some(title) = &input.title {
-                scope("title", &[Role::Analyst])?;
+                scope("title", Capability::TaskScope)?;
                 set("title", title, "title")?;
             }
             if let Some(t) = input.task_type {
-                scope("type", &[Role::Analyst])?;
+                scope("type", Capability::TaskScope)?;
                 if t == TaskType::Epic && r.parent.is_some() && !matches!(input.parent, Some(None)) {
                     return Err(GenieError::invalid(format!(
                         "{} is inside {}; epics cannot be nested",
@@ -651,19 +669,19 @@ impl Tracker {
                 set("type", &t, "type")?;
             }
             if let Some(d) = &input.description {
-                scope("description", &[Role::Analyst])?;
+                scope("description", Capability::TaskScope)?;
                 set("description", d, "description")?;
             }
             if let Some(p) = input.priority {
-                scope("priority", &[])?;
+                privileged("priority")?;
                 set("priority", &clamp_priority(p), "priority")?;
             }
             if let Some(m) = &input.merge_strategy {
-                scope("merge strategy", &[])?;
+                privileged("merge strategy")?;
                 set("merge_strategy", m, "merge strategy")?;
             }
             if let Some(p) = &input.plan {
-                scope("plan", &[Role::Analyst, Role::Executor])?;
+                scope("plan", Capability::TaskPlan)?;
                 set("plan", p, "plan")?;
             }
             if let Some(n) = &input.notes {
@@ -679,11 +697,11 @@ impl Tracker {
                 set("labels", &serde_json::to_string(labels)?, "labels")?;
             }
             if let Some(assignees) = &input.assignees {
-                scope("assignees", &[])?;
+                privileged("assignees")?;
                 set("assignees", &serde_json::to_string(assignees)?, "assignees")?;
             }
             if !input.add_acceptance.is_empty() {
-                scope("acceptance criteria", &[Role::Analyst])?;
+                scope("acceptance criteria", Capability::TaskScope)?;
                 let first: i64 =
                     self.conn().query_row("SELECT COALESCE(MAX(n), 0) FROM acceptance WHERE task = ?1", [&r.id], |x| x.get::<_, i64>(0))?
                         + 1;
@@ -693,14 +711,14 @@ impl Tracker {
                 changed.push("acceptance".into());
             }
             if !input.remove_acceptance.is_empty() {
-                scope("acceptance criteria", &[Role::Analyst])?;
+                scope("acceptance criteria", Capability::TaskScope)?;
                 for n in &input.remove_acceptance {
                     self.conn().execute("DELETE FROM acceptance WHERE task = ?1 AND n = ?2", params![r.id, n])?;
                 }
                 changed.push("acceptance".into());
             }
             if let Some(parent) = &input.parent {
-                scope("epic", &[Role::Analyst])?;
+                scope("epic", Capability::TaskScope)?;
                 let target = parent.as_deref().map(|p| self.normalize_id(p)).transpose()?;
                 if target != r.parent {
                     if let Some(tg) = &target {
@@ -736,7 +754,7 @@ impl Tracker {
                 }
             }
             if !input.add_deps.is_empty() || !input.remove_deps.is_empty() {
-                scope("dependencies", &[Role::Analyst])?;
+                scope("dependencies", Capability::TaskScope)?;
                 for raw in &input.add_deps {
                     let d = self.normalize_id(raw)?;
                     if !self.exists(&d)? {
@@ -776,7 +794,7 @@ impl Tracker {
         }
         let privileged = is_privileged(actor.role);
         let forced = opts.force && privileged && to != Status::Inbox;
-        if !can_transition(actor.role, from, to) && !forced {
+        if !actor.may_move(from, to) && !forced {
             let hint = if actor.role == Role::Orchestrator {
                 " (review/approved are the team's verdicts; pass force only if the team cannot)"
             } else {
@@ -786,6 +804,10 @@ impl Tracker {
         }
         if opts.force && !privileged {
             return Err(deny(actor, "force status changes"));
+        }
+        // Separation of duties: whoever submitted this round of work does not approve it.
+        if to == Status::Approved && !privileged && self.last_submitter(&task.id)?.as_deref() == Some(actor.name.as_str()) {
+            return Err(deny(actor, &format!("approve {}: they submitted this work for review themselves", task.id)));
         }
         let note = opts.note.as_deref().map(str::trim).filter(|n| !n.is_empty());
         if to == Status::NeedsOwner && note.is_none() {
@@ -903,7 +925,7 @@ impl Tracker {
     }
 
     pub fn check(&self, actor: &Actor, id: &str, criterion: i64, done: bool) -> Result<Task> {
-        require_role(actor, "check acceptance criteria", &[Role::Reviewer])?;
+        require_cap(actor, "check acceptance criteria", Capability::TaskCheck)?;
         let r = self.row(id)?;
         self.db.tx(|| {
             let changes = self.conn().execute(
@@ -1030,6 +1052,7 @@ impl Tracker {
     }
 
     pub fn block(&self, actor: &Actor, id: &str, reason: &str) -> Result<Task> {
+        require_cap(actor, "block tasks", Capability::TaskBlock)?;
         let r = self.row(id)?;
         self.db.tx(|| {
             let blocked = Blocked { reason: reason.to_string(), by: actor.name.clone(), at: now() };
@@ -1042,6 +1065,7 @@ impl Tracker {
     }
 
     pub fn unblock(&self, actor: &Actor, id: &str) -> Result<Task> {
+        require_cap(actor, "unblock tasks", Capability::TaskBlock)?;
         let r = self.row(id)?;
         self.db.tx(|| {
             self.conn().execute("UPDATE tasks SET blocked = NULL WHERE id = ?1", [&r.id])?;

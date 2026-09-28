@@ -8,9 +8,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use genie_core::Role;
-use genie_core::team::{self, NewMember, ORCHESTRATOR, SendMail};
+use genie_core::team::{self, ORCHESTRATOR, SendMail};
 use genie_core::work::NewJob;
+use genie_core::{Capability, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -224,6 +224,7 @@ async fn send(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Jso
     let access = ctx.access(&app, None).await?;
     access.write()?;
     own_team(&access, &id)?;
+    access.can(if b.to == ORCHESTRATOR { Capability::MailOrchestrator } else { Capability::MailTeam })?;
     let (slug, from, role) = (access.project.clone(), access.actor.name.clone(), access.actor.role);
     let level = b.level.or_else(|| b.urgent.then(|| "high".to_string()));
     if level.as_deref() == Some("interrupt") && !matches!(role, Role::Orchestrator | Role::Human) {
@@ -263,71 +264,9 @@ async fn add_member(
         return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) changes a team"));
     }
     let (slug, by) = (access.project.clone(), access.actor.name.clone());
-    let max = app.cfg.limits.max_members_per_team;
-    let added = app
-        .blocking(move |app| {
-            app.with_tracker(&slug, |t| {
-                let team = t.bus().get(&id)?;
-                if team.state != "active" {
-                    return Err(genie_core::GenieError::invalid(format!("team {id} is stopped")));
-                }
-                if team.members.len() >= max {
-                    return Err(genie_core::GenieError::invalid(format!("limit: at most {max} members per team")));
-                }
-                let role: Role = spec.role.parse()?;
-                if !genie_core::is_member_role(role) {
-                    return Err(genie_core::GenieError::invalid(format!("{} is not a team role", spec.role)));
-                }
-                let mut taken = t.bus().taken_names()?;
-                let m = NewMember {
-                    name: spec.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| team::pick_name(&spec.role, &mut taken)),
-                    role: spec.role.clone(),
-                    model: spec.model.clone(),
-                    thinking: spec.thinking.clone(),
-                    instructions: spec.instructions.clone(),
-                };
-                let updated = t.bus().add_member(&id, m.clone())?;
-                let task = t.get(&team.task)?;
-                let all: Vec<NewMember> = updated
-                    .members
-                    .iter()
-                    .map(|x| NewMember { name: x.name.clone(), role: x.role.clone(), ..Default::default() })
-                    .collect();
-                let text = runtime::kickoff(&id, &task, &team.cwd, team.worktree.as_ref(), &all, &m, None, None).replacen(
-                    "Welcome to team",
-                    "You are joining team",
-                    1,
-                );
-                let bus = t.bus();
-                bus.send(SendMail {
-                    team: &id,
-                    from: ORCHESTRATOR,
-                    from_role: "orchestrator",
-                    to: &m.name,
-                    text: &text,
-                    level: None,
-                    intent: None,
-                    kind: "kickoff",
-                    ..Default::default()
-                })?;
-                let note = format!("{} — {} joined the team (added by {by}).", team::display_name(&m.name), m.role);
-                for other in updated.members.iter().filter(|x| x.name != m.name) {
-                    bus.send(SendMail {
-                        team: &id,
-                        from: ORCHESTRATOR,
-                        from_role: "orchestrator",
-                        to: &other.name,
-                        text: &note,
-                        level: Some("low"),
-                        intent: Some("fyi"),
-                        kind: "system",
-                        ..Default::default()
-                    })?;
-                }
-                Ok(json!([{ "name": m.name, "role": m.role, "model": m.model }]))
-            })
-        })
-        .await?;
+    let model = spec.model.clone();
+    let added = app.blocking(move |app| runtime::add_member(app, &slug, &id, spec, &by)).await?;
+    let added = json!([{ "name": added.name, "role": added.role, "key": added.key, "model": model }]);
     changed(&app);
     Ok((StatusCode::CREATED, Json(added)))
 }
@@ -456,6 +395,9 @@ async fn create_job(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<JobBody
     let slug = access.project.clone();
     let job = app
         .blocking(move |app| {
+            if app.agents().role_for(&slug, &b.role)?.class == Role::Orchestrator {
+                return Err(genie_core::GenieError::invalid("the orchestrator does not run one-shot jobs").into());
+            }
             app.with_server(|db| {
                 db.create_job(NewJob {
                     project: slug,

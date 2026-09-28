@@ -9,8 +9,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use genie_core::GenieError;
 use genie_core::vault::{AuthorKind, SearchOptions, Space};
+use genie_core::{Capability, GenieError};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -42,7 +42,7 @@ async fn version(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>
 }
 
 async fn tree(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
-    ctx.access(&app, None).await?;
+    ctx.access(&app, None).await?.can(Capability::DocsRead)?;
     let (sig, pages) = app
         .blocking(|app| {
             app.with_vault(|v| {
@@ -69,6 +69,7 @@ struct SearchQuery {
 
 async fn search(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<SearchQuery>) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
+    access.can(Capability::DocsRead)?;
     let query = q.q.unwrap_or_default();
     if let Some(t) = &q.doc_type
         && !genie_core::vault::DOC_TYPES.contains(&t.as_str())
@@ -111,7 +112,7 @@ struct ReadQuery {
 }
 
 async fn read(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<ReadQuery>) -> ApiResult<Json<Value>> {
-    ctx.access(&app, None).await?;
+    ctx.access(&app, None).await?.can(Capability::DocsRead)?;
     let path = q.path.filter(|p| !p.trim().is_empty()).ok_or_else(|| ApiError::bad("missing docs path"))?;
     let page = app.blocking(move |app| app.with_vault(|v| v.read(&path, q.heading.as_deref(), q.max_chars))).await.map_err(|e| {
         let e: ApiError = e.into();
@@ -143,6 +144,7 @@ fn author_of(access: &Access) -> (String, String, AuthorKind) {
 async fn write(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<WriteBody>) -> ApiResult<impl IntoResponse> {
     let access = ctx.access(&app, None).await?;
     access.write()?;
+    access.can(Capability::DocsWrite)?;
     let content = b.content.or(b.text).ok_or_else(|| ApiError::bad("missing docs content"))?;
     if content.trim().is_empty() {
         return Err(ApiError::bad("docs content must not be empty"));

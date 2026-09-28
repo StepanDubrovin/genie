@@ -192,9 +192,27 @@ pub enum AgentCmd {
         task: String,
         #[arg(long)]
         template: Option<String>,
+        /// A member by role instead of the template's roster, `role` or `role:model` (repeatable).
+        #[arg(long = "member")]
+        members: Vec<String>,
         #[arg(long, allow_hyphen_values = true)]
         note: Option<String>,
     },
+    /// Add a member to a running team (orchestrator).
+    AddMember {
+        team: String,
+        role: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        instructions: Option<String>,
+    },
+    /// Team templates available in this project.
+    Templates,
+    /// Roles available in this project.
+    Roles,
     /// Stop a team (orchestrator).
     StopTeam { team: String },
     /// Let a member in error work again (orchestrator).
@@ -691,8 +709,15 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
             c.call("POST", "/agent/status", Some(json!({ "text": text }))).await?;
             "status set".into()
         }
-        AgentCmd::Spawn { task, template, note } => {
-            let v = c.call("POST", "/teams", Some(json!({ "task": task, "template": template, "note": note }))).await?;
+        AgentCmd::Spawn { task, template, members, note } => {
+            let members: Vec<Value> = members
+                .iter()
+                .map(|m| match m.split_once(':') {
+                    Some((role, model)) => json!({ "role": role, "model": model }),
+                    None => json!({ "role": m }),
+                })
+                .collect();
+            let v = c.call("POST", "/teams", Some(json!({ "task": task, "template": template, "members": members, "note": note }))).await?;
             let members: Vec<String> = v["members"]
                 .as_array()
                 .cloned()
@@ -706,6 +731,77 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
                 v["task"].as_str().unwrap_or_default(),
                 members.join(", ")
             )
+        }
+        AgentCmd::AddMember { team, role, name, model, instructions } => {
+            let v = c
+                .call(
+                    "POST",
+                    &format!("/teams/{}/members", enc(&team)),
+                    Some(json!({ "role": role, "name": name, "model": model, "instructions": instructions })),
+                )
+                .await?;
+            let m = v.as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null);
+            format!("{} ({}) joined team {team}", m["name"].as_str().unwrap_or_default(), m["role"].as_str().unwrap_or_default())
+        }
+        AgentCmd::Templates => {
+            let v = c.call("GET", "/agent-config", None).await?;
+            let mut out = Vec::new();
+            for t in v["teams"].as_array().cloned().unwrap_or_default() {
+                let roles: Vec<&str> =
+                    t["members"].as_array().map(|m| m.iter().filter_map(|x| x["role"].as_str()).collect()).unwrap_or_default();
+                out.push(format!(
+                    "{} — {}
+    {} · {} · {}",
+                    t["id"].as_str().unwrap_or_default(),
+                    t["description"].as_str().unwrap_or_default(),
+                    t["stage"].as_str().unwrap_or_default(),
+                    t["workspace"].as_str().unwrap_or_default(),
+                    roles.join(", ")
+                ));
+                for r in t["relations"].as_array().cloned().unwrap_or_default() {
+                    let to: Vec<&str> = r["to"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                    out.push(format!(
+                        "    {} {} {}{}{}",
+                        r["from"].as_str().unwrap_or_default(),
+                        r["type"].as_str().unwrap_or_default(),
+                        to.join(", "),
+                        r["on"].as_str().map(|s| format!(" on {s}")).unwrap_or_default(),
+                        r["note"].as_str().map(|n| format!(" — {n}")).unwrap_or_default()
+                    ));
+                }
+            }
+            out.join(
+                "
+",
+            )
+        }
+        AgentCmd::Roles => {
+            let v = c.call("GET", "/agent-config", None).await?;
+            v["roles"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter(|r| r["class"] != json!("orchestrator"))
+                .map(|r| {
+                    let class = r["class"].as_str().unwrap_or_default();
+                    let id = r["id"].as_str().unwrap_or_default();
+                    let stages: Vec<&str> =
+                        r["stages"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                    format!(
+                        "{id}{} — {}
+    stages: {} · files: {}",
+                        if class == id { String::new() } else { format!(" ({class})") },
+                        r["description"].as_str().unwrap_or_default(),
+                        stages.join(", "),
+                        r["files"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                )
         }
         AgentCmd::StopTeam { team } => {
             let v = c.call("POST", &format!("/teams/{}/stop", enc(&team)), Some(json!({}))).await?;

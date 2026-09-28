@@ -2,8 +2,8 @@
 //!
 //! Defaults come from the repository's `config/default.json` (embedded at build
 //! time, so the binary is self-contained) and are deep-merged with
-//! `<data>/config.json`. Role prompts are embedded from `agents/*.md` and can be
-//! overridden by `<data>/agents/<role>.md`.
+//! `<data>/config.json`. Roles, team templates, skills and MCP connections live
+//! next to it and are loaded by `agent_config`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,15 +12,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const DEFAULT_JSON: &str = include_str!("../../../config/default.json");
-
-const ROLE_PROMPTS: &[(&str, &str)] = &[
-    ("orchestrator", include_str!("../../../agents/orchestrator.md")),
-    ("analyst", include_str!("../../../agents/analyst.md")),
-    ("executor", include_str!("../../../agents/executor.md")),
-    ("reviewer", include_str!("../../../agents/reviewer.md")),
-    ("tester", include_str!("../../../agents/tester.md")),
-    ("documenter", include_str!("../../../agents/documenter.md")),
-];
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -39,12 +30,11 @@ pub struct MemberSpec {
     pub instructions: Option<String>,
 }
 
+/// Where skills are found besides `<data>/skills` (e.g. a clone of a skills repository).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct TeamTemplate {
-    pub description: String,
-    pub worktree: bool,
-    pub members: Vec<MemberSpec>,
+pub struct SkillsConfig {
+    pub paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -218,7 +208,6 @@ pub struct Config {
     pub public_url: Option<String>,
     pub allow_hosts: Vec<String>,
     pub role_models: BTreeMap<String, RoleModel>,
-    pub teams: BTreeMap<String, TeamTemplate>,
     pub limits: Limits,
     pub worktrees: Worktrees,
     pub language: Language,
@@ -226,6 +215,7 @@ pub struct Config {
     pub telegram: Option<TelegramConfig>,
     pub smtp: Option<SmtpConfig>,
     pub vault: VaultConfig,
+    pub skills: SkillsConfig,
 }
 
 impl Default for Config {
@@ -236,7 +226,6 @@ impl Default for Config {
             public_url: None,
             allow_hosts: Vec::new(),
             role_models: BTreeMap::new(),
-            teams: BTreeMap::new(),
             limits: Limits::default(),
             worktrees: Worktrees::default(),
             language: Language::default(),
@@ -244,6 +233,7 @@ impl Default for Config {
             telegram: None,
             smtp: None,
             vault: VaultConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
 }
@@ -263,9 +253,10 @@ impl Config {
     /// Embedded defaults merged with `<data>/config.json` when present.
     pub fn load(data: &Path) -> Result<Config, String> {
         let mut value: Value = serde_json::from_str(DEFAULT_JSON).map_err(|e| format!("config/default.json: {e}"))?;
-        // Keys of the TypeScript config that the server does not use.
+        // Keys of the TypeScript config that the server does not use (its team
+        // presets are `config/teams/*.json`, see `agent_config`).
         if let Some(obj) = value.as_object_mut() {
-            for k in ["spawn", "orchestrator", "notify", "gates", "docs", "web", "names"] {
+            for k in ["spawn", "orchestrator", "notify", "gates", "docs", "web", "names", "teams"] {
                 obj.remove(k);
             }
         }
@@ -287,37 +278,6 @@ impl Config {
     }
 }
 
-/// Role prompt body (frontmatter stripped): `<data>/agents/<role>.md` or the embedded default.
-pub fn role_prompt(data: &Path, role: &str) -> String {
-    let custom = data.join("agents").join(format!("{role}.md"));
-    let raw = std::fs::read_to_string(&custom)
-        .ok()
-        .or_else(|| ROLE_PROMPTS.iter().find(|(r, _)| *r == role).map(|(_, p)| p.to_string()))
-        .unwrap_or_default();
-    strip_frontmatter(&raw).to_string()
-}
-
-/// Frontmatter `excludeTools` of a role (read-only roles cannot edit files).
-pub fn role_excluded_tools(data: &Path, role: &str) -> Option<String> {
-    let custom = data.join("agents").join(format!("{role}.md"));
-    let raw =
-        std::fs::read_to_string(&custom).ok().or_else(|| ROLE_PROMPTS.iter().find(|(r, _)| *r == role).map(|(_, p)| p.to_string()))?;
-    let fm = raw.strip_prefix("---\n")?.split("\n---").next()?;
-    fm.lines()
-        .find_map(|l| l.strip_prefix("excludeTools:"))
-        .map(|v| v.trim().trim_matches(['[', ']']).replace(' ', ""))
-        .filter(|v| !v.is_empty())
-}
-
-fn strip_frontmatter(raw: &str) -> &str {
-    if let Some(rest) = raw.strip_prefix("---\n")
-        && let Some(end) = rest.find("\n---")
-    {
-        return rest[end + 4..].trim_start_matches('\n');
-    }
-    raw
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,11 +286,8 @@ mod tests {
     fn defaults_come_from_the_repository_config() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::load(dir.path()).unwrap();
-        assert!(cfg.teams.contains_key("research"));
-        assert_eq!(cfg.teams["standard"].members.len(), 3);
         assert_eq!(cfg.limits.max_active_teams, 4);
-        assert!(role_prompt(dir.path(), "executor").contains("executor"));
-        assert!(!role_prompt(dir.path(), "executor").starts_with("---"));
+        assert!(cfg.role_models.contains_key("executor"));
     }
 
     #[test]
@@ -346,16 +303,5 @@ mod tests {
         assert_eq!(cfg.runtime.max_concurrent, 1);
         assert_eq!(cfg.runtime.turn_timeout_secs, 1800, "unset runtime fields keep defaults");
         assert_eq!(cfg.limits.max_members_per_team, 6);
-    }
-
-    #[test]
-    fn read_only_roles_exclude_edit_tools() {
-        let dir = tempfile::tempdir().unwrap();
-        let reviewer = role_excluded_tools(dir.path(), "reviewer");
-        let executor = role_excluded_tools(dir.path(), "executor");
-        assert!(executor.is_none());
-        if let Some(r) = reviewer {
-            assert!(r.contains("edit"));
-        }
     }
 }

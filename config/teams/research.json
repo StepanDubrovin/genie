@@ -1,0 +1,15 @@
+{
+  "title": "Исследование",
+  "description": "Refinement team for an unresearched task: analysts investigate and propose scope + acceptance criteria; a reviewer challenges them. Allowed before the task is ready.",
+  "stage": "refinement",
+  "workspace": "repo",
+  "members": [
+    {"role": "analyst"},
+    {"role": "reviewer"}
+  ],
+  "relations": [
+    {"from": "analyst", "to": "reviewer", "type": "handoff", "note": "the findings, proposed scope and criteria"},
+    {"from": "reviewer", "to": "analyst", "type": "returns", "note": "gaps and risks in the findings"},
+    {"from": "analyst", "to": "orchestrator", "type": "reports", "note": "the findings, scope and acceptance criteria"}
+  ]
+}

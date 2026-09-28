@@ -34,7 +34,6 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::config;
 use crate::runtime::{self, AgentKey};
 use crate::state::{App, AppError, AppResult};
 
@@ -348,13 +347,16 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
     let extension = write_extension(app).map_err(|e| AppError::Internal(e.to_string()))?;
     let sessions = app.data.join("sessions").join(key.project());
     tokio::fs::create_dir_all(&sessions).await.map_err(|e| AppError::Internal(e.to_string()))?;
-    let (slug, role, name, team) = (key.project().to_string(), spec.role, spec.name.clone(), spec.team.clone());
+    let (slug, role, role_id, name, team) =
+        (key.project().to_string(), spec.role, spec.role_id.clone(), spec.name.clone(), spec.team.clone());
     let token = app
         .blocking(move |app| {
-            app.with_server(|db| db.create_agent_token(&slug, role, &name, team.as_deref(), None, chrono::Duration::days(30)))
+            app.with_server(|db| {
+                db.create_role_token(&slug, role, Some(&role_id), &name, team.as_deref(), None, chrono::Duration::days(30))
+            })
         })
         .await?;
-    let readonly = config::role_excluded_tools(&app.data, spec.role.as_str()).unwrap_or_default();
+    let readonly = spec.readonly.clone();
     let vars: HashMap<&str, String> = HashMap::from([
         ("sessionDir", sessions.to_string_lossy().into_owned()),
         ("sessionId", spec.session_id.clone()),

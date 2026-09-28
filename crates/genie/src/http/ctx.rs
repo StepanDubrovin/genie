@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, COOKIE};
 use axum::http::request::Parts;
 use genie_core::server_db::{Principal, ProjectRole, User};
-use genie_core::{Actor, Role};
+use genie_core::{Actor, Capability, Role};
 
 use super::ApiError;
 use crate::state::App;
@@ -31,7 +31,10 @@ pub enum Who {
     },
     Agent {
         project: String,
+        /// The class of the agent's role.
         role: Role,
+        /// The configured role it acts in (tokens issued before roles were configurable have none).
+        role_id: Option<String>,
         name: String,
         team: Option<String>,
         job: Option<i64>,
@@ -60,6 +63,8 @@ pub struct Access {
     pub agent_team: Option<String>,
     /// Job of a one-shot agent.
     pub agent_job: Option<i64>,
+    /// The configured role of an agent.
+    pub agent_role_id: Option<String>,
 }
 
 impl Access {
@@ -75,6 +80,15 @@ impl Access {
     }
     pub fn is_human(&self) -> bool {
         self.actor.role == Role::Human
+    }
+    /// An agent needs the permission in its role; people and the orchestrator hold them all.
+    pub fn can(&self, cap: Capability) -> Result<(), ApiError> {
+        if !self.agent || self.actor.can(cap) {
+            Ok(())
+        } else {
+            let role = self.agent_role_id.clone().unwrap_or_else(|| self.actor.role.to_string());
+            Err(ApiError::new(StatusCode::FORBIDDEN, format!("role {role} does not have the permission {cap}")))
+        }
     }
 }
 
@@ -119,7 +133,9 @@ impl FromRequestParts<Arc<App>> for Ctx {
                     if let Some(token) = bearer2 {
                         return Ok(match db.resolve_token(&token)? {
                             Some(Principal::User { user }) => Who::User { user, local: false },
-                            Some(Principal::Agent { project, role, name, team, job }) => Who::Agent { project, role, name, team, job },
+                            Some(Principal::Agent { project, role, role_id, name, team, job }) => {
+                                Who::Agent { project, role, role_id, name, team, job }
+                            }
                             None => Who::Anonymous,
                         });
                     }
@@ -172,20 +188,28 @@ impl Ctx {
         let wanted = explicit.map(str::to_string).or_else(|| self.project_hint.clone());
         match &self.who {
             Who::Anonymous => Err(ApiError::unauthorized()),
-            Who::Agent { project, role, name, team, job } => {
+            Who::Agent { project, role, role_id, name, team, job } => {
                 if let Some(w) = &wanted
                     && w != project
                 {
                     return Err(ApiError::new(StatusCode::FORBIDDEN, format!("this agent token is bound to project {project}")));
                 }
+                // The role's permissions come from the configuration at the time of the
+                // request, so a revoked permission stops working at once.
+                let caps = role_id.as_deref().and_then(|id| app.agents().roles.get(id).map(|r| r.capabilities.clone()));
+                let actor = match caps {
+                    Some(caps) if *role != Role::Orchestrator => Actor::with_caps(name.clone(), *role, caps),
+                    _ => Actor::new(name.clone(), *role),
+                };
                 Ok(Access {
                     project: project.clone(),
-                    actor: Actor::new(name.clone(), *role),
+                    actor,
                     role: ProjectRole::Member,
                     user: None,
                     agent: true,
                     agent_team: team.clone(),
                     agent_job: *job,
+                    agent_role_id: role_id.clone(),
                 })
             }
             Who::User { user, .. } => {
@@ -208,6 +232,7 @@ impl Ctx {
                                     agent: false,
                                     agent_team: None,
                                     agent_job: None,
+                                    agent_role_id: None,
                                 }));
                             }
                         }

@@ -7,6 +7,7 @@
 //! (cross-site forms cannot send it), no CORS.
 
 pub mod account;
+pub mod agent_config;
 pub mod agents;
 pub mod automations;
 pub mod ctx;
@@ -83,6 +84,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(agents::routes())
         .merge(docs::routes())
         .merge(automations::routes())
+        .merge(agent_config::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
     let index = app.web_root.join("index.html");

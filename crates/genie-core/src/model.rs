@@ -112,6 +112,29 @@ str_enum!(
     }
 );
 
+str_enum!(
+    /// What a team role may do. Each role gets its class's set (`class_capabilities`),
+    /// adjusted by the role's `allow` and `deny` in the server configuration.
+    Capability("permission") {
+        StatusRefine => "status.refine",         // draft → refining
+        StatusStart => "status.start",           // ready → in_progress
+        StatusRework => "status.rework",         // changes_requested → in_progress
+        StatusSubmit => "status.submit",         // in_progress → review
+        StatusApprove => "status.approve",       // review → approved
+        StatusReturn => "status.return",         // review → changes_requested
+        TaskScope => "task.scope",               // title, type, description, criteria, deps, epic
+        TaskPlan => "task.plan",
+        TaskCheck => "task.check",               // tick acceptance criteria
+        TaskCreate => "task.create",             // subtasks of the own task
+        TaskBlock => "task.block",
+        DocsRead => "docs.read",
+        DocsWrite => "docs.write",               // the section policy still applies
+        MailTeam => "mail.team",                 // send / ask teammates
+        MailOrchestrator => "mail.orchestrator", // write to the orchestrator directly
+        TeamPeek => "team.peek",                 // see what a teammate is doing
+    }
+);
+
 pub const CLOSED: &[Status] = &[Status::Done, Status::Cancelled];
 
 /// Statuses that mean a team is actually working on a task (they start its epic).
@@ -125,21 +148,45 @@ pub const ORCHESTRATOR_ONLY: &[Status] = &[Status::Draft, Status::Ready, Status:
 /// Team verdicts the orchestrator must not fake: it needs `force` to set them itself.
 pub const TEAM_ONLY: &[Status] = &[Status::Review, Status::Approved];
 
-struct TransitionRule {
-    from: Status,
-    to: Status,
-    roles: &'static [Role],
+/// The transitions a team member may make and the permission each one needs.
+/// "human" may do anything; "orchestrator" anything except the team's verdicts (see `Actor::may_move`).
+pub const TEAM_TRANSITIONS: &[(Status, Status, Capability)] = &[
+    (Status::Draft, Status::Refining, Capability::StatusRefine),
+    (Status::Ready, Status::InProgress, Capability::StatusStart),
+    (Status::ChangesRequested, Status::InProgress, Capability::StatusRework),
+    (Status::InProgress, Status::Review, Capability::StatusSubmit),
+    (Status::Review, Status::ChangesRequested, Capability::StatusReturn),
+    (Status::Review, Status::Approved, Capability::StatusApprove),
+];
+
+/// Permissions every team class has.
+pub const COMMON_CAPABILITIES: &[Capability] = &[
+    Capability::TaskBlock,
+    Capability::DocsRead,
+    Capability::DocsWrite,
+    Capability::MailTeam,
+    Capability::MailOrchestrator,
+    Capability::TeamPeek,
+];
+
+/// The permissions of a role class: exactly the built-in process rules.
+pub fn class_capabilities(role: Role) -> Vec<Capability> {
+    use Capability::*;
+    let own: &[Capability] = match role {
+        Role::Human | Role::Orchestrator => return Capability::ALL.to_vec(),
+        Role::Analyst => &[StatusRefine, StatusStart, TaskScope, TaskPlan, TaskCreate],
+        Role::Executor => &[StatusStart, StatusRework, StatusSubmit, TaskPlan],
+        Role::Reviewer => &[StatusApprove, StatusReturn, TaskCheck],
+        Role::Tester => &[StatusReturn],
+        Role::Documenter => &[],
+    };
+    Capability::ALL.iter().copied().filter(|c| own.contains(c) || COMMON_CAPABILITIES.contains(c)).collect()
 }
 
-// "human" may do anything; "orchestrator" anything except the team's verdicts (see can_transition).
-const TRANSITIONS: &[TransitionRule] = &[
-    TransitionRule { from: Status::Draft, to: Status::Refining, roles: &[Role::Analyst] },
-    TransitionRule { from: Status::Ready, to: Status::InProgress, roles: &[Role::Executor, Role::Analyst] },
-    TransitionRule { from: Status::ChangesRequested, to: Status::InProgress, roles: &[Role::Executor] },
-    TransitionRule { from: Status::InProgress, to: Status::Review, roles: &[Role::Executor] },
-    TransitionRule { from: Status::Review, to: Status::ChangesRequested, roles: &[Role::Reviewer, Role::Tester] },
-    TransitionRule { from: Status::Review, to: Status::Approved, roles: &[Role::Reviewer] },
-];
+/// A class's permissions with a role's `allow` and `deny` applied, in catalogue order.
+pub fn adjust_capabilities(base: &[Capability], allow: &[Capability], deny: &[Capability]) -> Vec<Capability> {
+    Capability::ALL.iter().copied().filter(|c| (base.contains(c) || allow.contains(c)) && !deny.contains(c)).collect()
+}
 
 pub fn is_privileged(role: Role) -> bool {
     matches!(role, Role::Human | Role::Orchestrator)
@@ -150,22 +197,7 @@ pub fn is_member_role(role: Role) -> bool {
 }
 
 pub fn can_transition(role: Role, from: Status, to: Status) -> bool {
-    if from == to {
-        return false;
-    }
-    if role == Role::Human {
-        return true;
-    }
-    if to == Status::Inbox {
-        return false;
-    }
-    if role == Role::Orchestrator {
-        return !TEAM_ONLY.contains(&to);
-    }
-    if ORCHESTRATOR_ONLY.contains(&to) {
-        return false;
-    }
-    TRANSITIONS.iter().any(|t| t.from == from && t.to == to && t.roles.contains(&role))
+    Actor::new("", role).may_move(from, to)
 }
 
 pub fn allowed_transitions(role: Role, from: Status) -> Vec<Status> {
@@ -175,12 +207,52 @@ pub fn allowed_transitions(role: Role, from: Status) -> Vec<Status> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Actor {
     pub name: String,
+    /// The class: what the history shows and what the workflow rules key on.
     pub role: Role,
+    /// Permissions of a configured team role; `None` means the class's set.
+    #[serde(skip)]
+    pub caps: Option<Vec<Capability>>,
 }
 
 impl Actor {
     pub fn new(name: impl Into<String>, role: Role) -> Self {
-        Actor { name: name.into(), role }
+        Actor { name: name.into(), role, caps: None }
+    }
+
+    /// An agent acting in a configured role: its class plus the role's own permissions.
+    pub fn with_caps(name: impl Into<String>, role: Role, caps: Vec<Capability>) -> Self {
+        Actor { name: name.into(), role, caps: Some(caps) }
+    }
+
+    /// People and the orchestrator hold every permission; team roles hold theirs.
+    pub fn can(&self, cap: Capability) -> bool {
+        if is_privileged(self.role) {
+            return true;
+        }
+        match &self.caps {
+            Some(caps) => caps.contains(&cap),
+            None => class_capabilities(self.role).contains(&cap),
+        }
+    }
+
+    /// Whether this actor may move a task from `from` to `to` (without `force`).
+    pub fn may_move(&self, from: Status, to: Status) -> bool {
+        if from == to {
+            return false;
+        }
+        if self.role == Role::Human {
+            return true;
+        }
+        if to == Status::Inbox {
+            return false;
+        }
+        if self.role == Role::Orchestrator {
+            return !TEAM_ONLY.contains(&to);
+        }
+        if ORCHESTRATOR_ONLY.contains(&to) {
+            return false;
+        }
+        TEAM_TRANSITIONS.iter().any(|(f, t, cap)| *f == from && *t == to && self.can(*cap))
     }
 }
 
@@ -394,6 +466,49 @@ mod tests {
         assert!(!can_transition(Role::Executor, Status::Review, Status::Approved));
         assert!(!can_transition(Role::Orchestrator, Status::Draft, Status::Inbox));
         assert!(can_transition(Role::Human, Status::Draft, Status::Inbox));
+    }
+
+    #[test]
+    fn class_permissions_reproduce_the_old_transition_table() {
+        // The table before permissions were configurable: (from, to, roles).
+        let old: &[(Status, Status, &[Role])] = &[
+            (Status::Draft, Status::Refining, &[Role::Analyst]),
+            (Status::Ready, Status::InProgress, &[Role::Executor, Role::Analyst]),
+            (Status::ChangesRequested, Status::InProgress, &[Role::Executor]),
+            (Status::InProgress, Status::Review, &[Role::Executor]),
+            (Status::Review, Status::ChangesRequested, &[Role::Reviewer, Role::Tester]),
+            (Status::Review, Status::Approved, &[Role::Reviewer]),
+        ];
+        for role in MEMBER_ROLES {
+            for from in Status::ALL {
+                for to in Status::ALL {
+                    let expected = from != to
+                        && !ORCHESTRATOR_ONLY.contains(to)
+                        && *to != Status::Inbox
+                        && old.iter().any(|(f, t, r)| f == from && t == to && r.contains(role));
+                    assert_eq!(can_transition(*role, *from, *to), expected, "{role}: {from} → {to}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_permissions_adjust_the_class() {
+        let tester = class_capabilities(Role::Tester);
+        let qa =
+            Actor::with_caps("murphy", Role::Tester, adjust_capabilities(&tester, &[Capability::TaskCheck], &[Capability::StatusReturn]));
+        assert!(qa.can(Capability::TaskCheck));
+        assert!(!qa.may_move(Status::Review, Status::ChangesRequested), "denied by the role");
+        let researcher = Actor::with_caps(
+            "poirot",
+            Role::Analyst,
+            adjust_capabilities(&class_capabilities(Role::Analyst), &[Capability::StatusSubmit], &[]),
+        );
+        assert!(researcher.may_move(Status::InProgress, Status::Review));
+        assert!(!researcher.may_move(Status::Review, Status::Done), "orchestrator-only statuses stay out of reach");
+        assert!(Actor::with_caps("o", Role::Orchestrator, vec![]).can(Capability::TaskCheck), "the orchestrator is not limited by caps");
+        assert_eq!("status.approve".parse::<Capability>().unwrap(), Capability::StatusApprove);
+        assert_eq!("fly".parse::<Capability>().unwrap_err().to_string(), "unknown permission fly");
     }
 
     #[test]

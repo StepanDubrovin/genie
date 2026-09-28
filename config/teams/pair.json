@@ -1,0 +1,15 @@
+{
+  "title": "Пара",
+  "description": "Executor + reviewer for small, already well-specified tasks.",
+  "stage": "delivery",
+  "workspace": "worktree",
+  "members": [
+    {"role": "executor"},
+    {"role": "reviewer"}
+  ],
+  "relations": [
+    {"from": "executor", "to": "reviewer", "type": "handoff", "on": "review", "note": "the work is submitted for review"},
+    {"from": "reviewer", "to": "executor", "type": "returns", "on": "changes_requested", "note": "review findings"},
+    {"from": "reviewer", "to": "orchestrator", "type": "reports", "note": "the verdict"}
+  ]
+}

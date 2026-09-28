@@ -87,6 +87,55 @@ genie user token anna                    # личный токен для `genie
 
 Автономность проекта: `autonomous` (оркестратор работает сам), `assisted`, `manual` (серверный оркестратор не запускается — например, если оркестратором работает ваша сессия pi). Меняется в API `PATCH /api/projects/<slug>` (`{"autonomy": "manual"}`). `genie serve --no-agents` запускает сервер без агентов.
 
+## Роли и шаблоны команд
+
+genie поставляется со встроенными ролями (`analyst`, `executor`, `reviewer`, `tester`, `documenter`, `researcher`, `orchestrator`) и пресетами команд (`standard`, `pair`, `full`, `abap`, `spike`, `research`). Администратор сервера настраивает их под свой контекст файлами в каталоге данных; сервер подхватывает изменения без перезапуска. Устройство и решения — [[platform/agent-roles-and-teams]].
+
+```
+<data>/agents/<id>.md        роль: настройки во frontmatter, промпт в теле
+<data>/teams/<id>.json       шаблон команды
+<data>/skills/<имя>/SKILL.md навык
+<data>/mcp.json              MCP-подключения (формат mcpServers)
+```
+
+Новая роль берёт за основу класс процесса (`base`) и меняет его разрешения:
+
+```markdown
+---
+title: QA
+description: Tests the change and ticks the acceptance criteria it verified.
+base: tester
+allow: [task.check]
+projects: [shop]
+---
+You are the QA engineer of a focus team…
+```
+
+Файл с идентификатором встроенной роли её переопределяет: незаданные поля и промпт (при пустом теле) остаются встроенными. Например, `<data>/agents/executor.md` из одного frontmatter с `model: …` и `instructions: …` меняет исполнителю модель и дописывает правила.
+
+Шаблон — участники и связи между ними: `handoff` (передаёт работу), `returns` (возвращает на доработку), `reports` (докладывает оркестратору), `consults` (можно спрашивать). Связь с `on: <статус>` исполняет сам genie: когда задача входит в статус, адресат получает письмо.
+
+```json
+{
+  "title": "QA pair",
+  "description": "An executor and a QA engineer for small changes.",
+  "stage": "delivery",
+  "workspace": "worktree",
+  "members": [{ "role": "executor" }, { "role": "qa" }],
+  "relations": [
+    { "from": "executor", "to": "qa", "type": "handoff", "on": "review", "note": "ready to test" },
+    { "from": "qa", "to": "executor", "type": "returns", "on": "changes_requested" },
+    { "from": "qa", "to": "orchestrator", "type": "reports", "note": "the test verdict" }
+  ]
+}
+```
+
+- Проверка: `genie agents check` печатает ошибки и предупреждения (код выхода 1 при ошибках), `genie agents ls` — роли и шаблоны, как их видит сервер. Сломанный файл не останавливает работу: действует его последняя валидная версия.
+- Разрешения ролей проверяет сервер: `status.refine`, `status.start`, `status.rework`, `status.submit`, `status.approve`, `status.return`, `task.scope`, `task.plan`, `task.check`, `task.create`, `task.block`, `docs.read`, `docs.write`, `mail.team`, `mail.orchestrator`, `team.peek`. Отзыв разрешения действует сразу; промпт и модель — со следующего старта сессии агента.
+- `files: read` убирает у роли инструменты записи. Навыки (`skills`), MCP (`mcp`) и `denyCommands` сервер уже читает и проверяет, но харнессу пока не передаёт: это следующий этап.
+- API: `GET /api/agent-config` — каталог проекта; `GET/PUT/DELETE /api/roles/<id>`, `/api/templates/<id>`, `/api/skills/<имя>`, `GET/PUT /api/mcp`; `POST /api/templates/<id>/preview` — что получит каждый участник; `GET /api/agent-config/history` — журнал правок. Менять может только администратор сервера; сохранение проверяет файл и сверяет `baseHash` с версией, с которой начиналась правка.
+- Оркестратор видит каталог в своём промпте и собирает команды через `genie agent spawn <задача> --template <id>` или `--member <роль>[:<модель>]`, добавляет участника — `genie agent add-member <команда> <роль>`, список — `genie agent templates` и `genie agent roles`. Автоматизации принимают любую роль (`agent.role`) и шаблон (`team.template`).
+
 ## Telegram и почта
 
 ```json
