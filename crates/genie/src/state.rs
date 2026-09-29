@@ -163,6 +163,20 @@ impl App {
         tracker_dir: Option<&str>,
         prefix: Option<&str>,
     ) -> AppResult<Project> {
+        // Checked before anything is created on disk: the slug names a directory.
+        let slug = slug.trim().to_lowercase();
+        let slug = slug.as_str();
+        if !genie_core::server_db::valid_slug(slug) {
+            return Err(GenieError::invalid("project slug must be lowercase latin letters, digits and dashes").into());
+        }
+        if self.with_server(|db| db.project_opt(slug))?.is_some() {
+            return Err(GenieError::invalid(format!("project {slug} already exists")).into());
+        }
+        if let Some(r) = repo
+            && !Path::new(r).is_dir()
+        {
+            return Err(GenieError::invalid(format!("repository {r}: no such directory on the server")).into());
+        }
         let dir = match tracker_dir {
             Some(d) => PathBuf::from(d),
             None => self.data.join("projects").join(slug),

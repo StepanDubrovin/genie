@@ -1,0 +1,60 @@
+/* The project's page and the server's page: settings, people, invitations. */
+
+.settings h2 .n { font-weight: 400; color: var(--muted); margin-left: 4px; }
+.settings .pj-sub { margin: 12px 0 0; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+
+.pj-facts { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 8px 14px; margin: 0; font-size: 12.5px; width: 100%; }
+.pj-facts dt { color: var(--muted); }
+.pj-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.pj-facts .mono { font: 12px var(--mono); }
+
+.pj-form { display: flex; flex-direction: column; gap: 14px; width: min(560px, 100%); margin-top: 6px; }
+.pj-form > .btn { align-self: flex-start; }
+.pj-form .field input:disabled, .pj-form .field textarea:disabled { opacity: 0.7; }
+.pj-form .mono { font-family: var(--mono); font-size: 12px; }
+.pj-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.pj-hint { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+
+.pj-choice { border: 0; padding: 0; margin: 6px 0 0; display: flex; flex-direction: column; gap: 6px; width: min(560px, 100%); }
+.pj-choice legend { font-size: 12.5px; color: var(--text-2); margin-bottom: 8px; padding: 0; }
+.pj-option { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; }
+.pj-option.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.pj-option input { margin-top: 2px; accent-color: var(--accent); }
+.pj-option > span { display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; line-height: 1.45; }
+.pj-choice:disabled .pj-option { cursor: default; }
+
+.pj-people { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; }
+.pj-people li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.pj-people li:last-child { border-bottom: 0; }
+.pj-people li.off { opacity: 0.55; }
+.pj-people .who { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; font-size: 13px; }
+.pj-people .who .muted { font-size: 12px; overflow-wrap: anywhere; }
+.pj-people select { height: 30px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-panel); color: var(--text); padding: 0 8px; font-size: 12.5px; }
+.pj-role { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.pj-mark { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; background: var(--bg-card); color: var(--text-2); flex: none; }
+.pj-check { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); white-space: nowrap; }
+.pj-check input { accent-color: var(--accent); }
+
+.pj-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; width: 100%; }
+.pj-row select, .pj-row input { height: 32px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg-panel); color: var(--text); padding: 0 10px; font-size: 12.5px; outline: 0; min-width: 0; }
+.pj-row input { flex: 1 1 200px; }
+.pj-row select:focus, .pj-row input:focus { border-color: var(--accent); }
+
+.auth-card.pj-first { width: min(520px, 100%); }
+.pj-first .pj-form { width: 100%; }
+
+.pj-link { display: flex; gap: 8px; align-items: center; width: 100%; }
+.pj-link .secret { flex: 1; min-width: 0; }
+
+.pj-roles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; margin: 4px 0 0; font-size: 12px; width: 100%; }
+.pj-roles > div { display: flex; gap: 6px; }
+.pj-roles dt { color: var(--text-2); white-space: nowrap; }
+.pj-roles dt::after { content: " —"; }
+.pj-roles dd { margin: 0; color: var(--muted); }
+
+@media (max-width: 900px) {
+  .pj-pair, .pj-roles { grid-template-columns: minmax(0, 1fr); }
+  .pj-people li { flex-wrap: wrap; }
+  .pj-people .who { flex-basis: calc(100% - 50px); }
+  .pj-link { flex-direction: column; align-items: stretch; }
+}

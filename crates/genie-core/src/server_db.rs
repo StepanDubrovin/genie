@@ -434,7 +434,8 @@ pub fn time_in(duration: ChronoDuration) -> String {
     (Utc::now() + duration).to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn valid_slug(s: &str) -> bool {
+/// A project slug: lowercase latin letters, digits and dashes (it names directories).
+pub fn valid_slug(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !s.starts_with('-')
 }
 

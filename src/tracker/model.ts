@@ -108,6 +108,8 @@ export interface Task {
   deps: string[];
   labels: string[];
   assignees: string[];
+  /** The person responsible for the task (a login), besides the team working on it. */
+  assignee?: string;
   team?: string;
   worktree?: { path: string; branch?: string };
   blocked?: { reason: string; by: string; at: string };
@@ -129,6 +131,8 @@ export interface TaskSummary {
   parent?: string;
   labels: string[];
   team?: string;
+  /** The person responsible (a login). */
+  assignee?: string;
   blocked?: { reason: string; by: string; at: string };
   needsOwner?: NeedsOwner;
   acceptanceDone: number;

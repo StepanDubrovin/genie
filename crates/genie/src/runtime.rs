@@ -1103,7 +1103,7 @@ fn tools_table(role: &RoleDef, reader: Reader) -> String {
     }
     update.push_str(" [--append-notes text]");
     if orch {
-        update.push_str(" [--merge-strategy text]");
+        update.push_str(" [--merge-strategy text] [--assignee login|none]");
     }
     update.push('`');
     rows.push(("`genie_task` update", update));
@@ -1297,7 +1297,20 @@ fn agent_prompt(
         lang.internal,
         lang.user,
     ));
+    out.push_str("\nTo reach a person, mention them as `@login` in a task comment: they get a notification (in the web, Telegram or e-mail). A task's person responsible (`assignee`) is the one to ask about it.\n");
     if reader == Reader::Orchestrator {
+        let people: Vec<String> = app
+            .with_server(|db| db.members_of(&project.slug))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(u, _)| !u.disabled)
+            .map(|(u, r)| {
+                format!("@{} ({}{})", u.login, r.as_str(), if u.name.is_empty() { String::new() } else { format!(", {}", u.name) })
+            })
+            .collect();
+        if !people.is_empty() {
+            out.push_str(&format!("\nPeople of the project: {}. Set a task's person responsible with `genie agent update --assignee login` when someone owns the decision or the review.\n", people.join(", ")));
+        }
         if project.autonomy == "assisted" {
             out.push_str("\n## Autonomy: assisted\n\nPeople close tasks in this project. Take tasks into work and see them through as usual, but do not move a task to `done` or `cancelled` yourself (the server refuses): when it meets its Definition of Done, move it to `needs_owner` with a short summary of the result and what to check. A person closes it.\n");
         }

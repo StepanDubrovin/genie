@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   blocked TEXT,
   needs_owner TEXT,
   merge_strategy TEXT NOT NULL DEFAULT '',
+  assignee TEXT NOT NULL DEFAULT '',
   created TEXT NOT NULL,
   updated TEXT NOT NULL
 );
@@ -184,6 +185,8 @@ const COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
     ("mail", "superseded_by", "ALTER TABLE mail ADD COLUMN superseded_by INTEGER"),
     // Configurable roles and templates: the template snapshot a team was assembled from.
     ("teams", "spec", "ALTER TABLE teams ADD COLUMN spec TEXT"),
+    // The person responsible for a task (a login of the server), next to the team working on it.
+    ("tasks", "assignee", "ALTER TABLE tasks ADD COLUMN assignee TEXT NOT NULL DEFAULT ''"),
 ];
 
 /// Current time in the format the TypeScript tracker writes (`Date#toISOString`).

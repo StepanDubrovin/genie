@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { DocFileIcon, DocStatusBadge, snippetParts, useDebounced, useDocSearch } from "@/entities/doc";
+import { useSession } from "@/entities/session";
 import { StatusIcon, type ViewId, VIEWS, useTasks } from "@/entities/task";
 import { useTeams } from "@/entities/team";
 import { Icon, Modal } from "@/shared/ui";
@@ -34,6 +35,8 @@ const GROUP_ORDER: Record<Item["group"], number> = { ЗАДАЧИ: 0, ДОКУМ
 export function CommandPalette({ onClose, actions }: { onClose: () => void; actions: PaletteActions }) {
   const tasks = useTasks().data ?? [];
   const teams = useTeams().data ?? [];
+  // "My tasks" needs users: in the local mode nobody is responsible for anything.
+  const mine = useSession().data?.mode === "users";
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
   const [docsOnly, setDocsOnly] = useState(false);
@@ -46,7 +49,9 @@ export function CommandPalette({ onClose, actions }: { onClose: () => void; acti
       { key: "new", icon: <Icon.plus />, label: "Новая задача", hint: "C", group: "ДЕЙСТВИЯ", run: actions.newTask },
       { key: "list", icon: <Icon.list />, label: "Показать списком", group: "ДЕЙСТВИЯ", run: () => actions.layout("list") },
       { key: "board", icon: <Icon.board />, label: "Показать доской", hint: "B", group: "ДЕЙСТВИЯ", run: () => actions.layout("board") },
-      ...(Object.keys(VIEWS) as ViewId[]).map((v) => ({ key: `v-${v}`, icon: <Icon.chevron />, label: `Перейти: ${VIEWS[v].name}`, group: "ПЕРЕЙТИ" as const, run: () => actions.go(v) })),
+      ...(Object.keys(VIEWS) as ViewId[])
+        .filter((v) => mine || !VIEWS[v].mine)
+        .map((v) => ({ key: `v-${v}`, icon: <Icon.chevron />, label: `Перейти: ${VIEWS[v].name}`, group: "ПЕРЕЙТИ" as const, run: () => actions.go(v) })),
       { key: "docs", icon: <DocFileIcon />, label: "Документация", hint: "docs/", group: "ПЕРЕЙТИ", run: actions.openDocs },
       ...teams.filter((t) => t.state === "active").map((t) => ({ key: `t-${t.id}`, icon: <span className="spin" />, label: `Команда ${t.id}`, hint: t.taskInfo?.title, group: "КОМАНДЫ" as const, run: () => actions.openTeam(t.id) })),
       ...tasks.map((t) => ({ key: t.id, icon: <StatusIcon status={t.status} />, label: `${t.id}  ${t.title}`, hint: t.labels.join(", "), group: "ЗАДАЧИ" as const, run: () => actions.openTask(t.id) })),
@@ -103,7 +108,7 @@ export function CommandPalette({ onClose, actions }: { onClose: () => void; acti
     const matched = s ? all.filter((i) => isDocItem(i) || `${i.label} ${i.hint ?? ""}`.toLowerCase().includes(s)) : all;
     const scoped = docsOnly ? matched.filter(isDocItem) : matched;
     return scoped.sort((a, b) => GROUP_ORDER[a.group] - GROUP_ORDER[b.group]).slice(0, 60);
-  }, [query, tasks, teams, actions, docs.data, docsOnly]);
+  }, [query, tasks, teams, actions, docs.data, docsOnly, mine]);
 
   useEffect(() => setIdx(0), [q, docsOnly]);
 

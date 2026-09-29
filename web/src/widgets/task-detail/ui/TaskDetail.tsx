@@ -27,6 +27,8 @@ import {
   useTasks,
 } from "@/entities/task";
 import { useAgentConfig } from "@/entities/agent-config";
+import { PersonAvatar, responsibleChoices, useMembers } from "@/entities/project";
+import { useSession } from "@/entities/session";
 import type { Team } from "@/entities/team";
 import { SpawnTeamDialog } from "@/features/spawn-team";
 import { plural, timeAgo, useTick } from "@/shared/lib";
@@ -50,6 +52,9 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const epics = useEpicMap();
   const impactEnabled = q.data?.status === "review" || q.data?.status === "done";
   const impact = useDocsImpact(id, impactEnabled);
+  const session = useSession().data;
+  const me = session?.mode === "users" ? session.user.login : undefined;
+  const members = useMembers(me ? session?.project : undefined).data;
 
   useEffect(() => {
     setAnswer("");
@@ -67,6 +72,13 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const canSpawn = agents.isSuccess && !isEpic && team?.state !== "active" && !["done", "cancelled"].includes(t.status);
   const epic = t.parent ? epics.get(t.parent) : undefined;
   const epicChoices = [...epics.values()].filter((e) => e.id === t.parent || (e.status !== "done" && e.status !== "cancelled"));
+  const people = responsibleChoices(members ?? [], t.assignee);
+  const responsibleName = members?.find((m) => m.user.login === t.assignee)?.user.name;
+  const assign = (login: string) =>
+    patch.mutate(
+      { id: t.id, patch: { assignee: login || null } },
+      { onSuccess: () => toast(login ? `Ответственный за ${t.id}: @${login}` : `У ${t.id} больше нет ответственного`), onError: fail },
+    );
 
   const setStatus = (status: Status, note?: string) =>
     move.mutate({ id: t.id, status, note }, { onSuccess: () => toast(`${t.id} → ${STATUS_NAME[status]} · оркестратор уведомлён`), onError: fail });
@@ -164,6 +176,24 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
               ))}
             </select>
           </span>
+          {people.length > 0 && (
+            <>
+              <span className="k">Ответственный</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                {t.assignee && <PersonAvatar login={t.assignee} name={responsibleName} prefix="" />}
+                <select aria-label="Ответственный" value={t.assignee ?? ""} onChange={(e) => assign(e.target.value)} title="Человек, который отвечает за задачу: ему приходят вопросы агентов">
+                  <option value="">Не назначен</option>
+                  {people.map((p) => (
+                    <option key={p.login} value={p.login}>
+                      {p.login === me ? `${p.label} — я` : p.label}
+                    </option>
+                  ))}
+                </select>
+              </span>
+            </>
+          )}
+          <span className="k">Метки</span>
+          <span className={people.length > 0 ? undefined : "wide"}>{t.labels.length ? <Labels labels={t.labels} /> : <span className="muted">нет</span>}</span>
           <span className="k">Команда</span>
           <span className="wide team-cell">
             {team ? (
@@ -185,7 +215,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
           {!isEpic && (
             <>
               <span className="k">Эпик</span>
-              <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+              <span className="wide" style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
                 <EpicIcon size={13} empty={!epic} />
                 <select
                   aria-label="Эпик"
@@ -207,8 +237,6 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
               </span>
             </>
           )}
-          <span className="k">Метки</span>
-          <span className={isEpic ? "wide" : undefined}>{t.labels.length ? <Labels labels={t.labels} /> : <span className="muted">нет</span>}</span>
           <span className="k">Интеграция</span>
           <span className="wide">
             <input
