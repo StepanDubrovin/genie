@@ -77,6 +77,7 @@ pub fn run(data: &Path, cfg: &Config, agents: &AgentConfig, web: &Path) -> Vec<C
         ),
     }
     git(&mut out, &repos);
+    vault(&mut out, data, cfg);
     channels(&mut out, cfg);
     network(&mut out, cfg);
     out.0
@@ -373,6 +374,66 @@ fn git(out: &mut Out, repos: &[(String, PathBuf)]) {
                 "agents commit as <name>@genie.local; set git config --global user.name/user.email for the server user to commit as the team",
             );
         }
+    }
+}
+
+fn vault(out: &mut Out, data: &Path, cfg: &Config) {
+    let root = cfg.vault_path(data);
+    if !root.join(".git").exists() {
+        out.warn(
+            "vault",
+            format!("the vault {} is not a git repository: no history, no sync", root.display()),
+            "leave vault.commit on (the default) and restart the server",
+        );
+        return;
+    }
+    let Some(remote) = cfg.vault.remote.as_deref().filter(|r| !r.trim().is_empty()) else {
+        out.warn(
+            "vault",
+            format!("the vault lives only on this server ({})", root.display()),
+            "set vault.remote in config.json to a git repository: people open it in Obsidian, and it is one more copy",
+        );
+        return;
+    };
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(&root).args(["ls-remote", "--heads", remote]).env("GIT_TERMINAL_PROMPT", "0");
+    let Ok(mut child) = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn() else {
+        return;
+    };
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if start.elapsed() > Duration::from_secs(20) => {
+                let _ = child.kill();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => break None,
+        }
+    };
+    let mut err = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut e, &mut err);
+    }
+    match status {
+        Some(s) if s.success() => {
+            let last = crate::vault_sync::state().and_then(|st| st.error);
+            match last {
+                Some(e) => out.warn(
+                    "vault",
+                    format!("syncs with {remote}, the last sync failed: {e}"),
+                    "the server retries; the admins got a notification",
+                ),
+                None => out.ok("vault", format!("syncs with {remote} every {} s", cfg.vault.sync_secs.unwrap_or(120))),
+            }
+        }
+        Some(_) => out.fail(
+            "vault",
+            format!("the vault's remote {remote} does not answer: {}", err.lines().last().unwrap_or("git ls-remote failed")),
+            "check the address and the access of the server user (an SSH key in ~/.ssh or a token in the URL)",
+        ),
+        None => out.fail("vault", format!("the vault's remote {remote} did not answer in 20 s"), "check the network and the address"),
     }
 }
 

@@ -15,6 +15,8 @@ import {
   useCreateUser,
   useDoctor,
   usePatchUser,
+  useSyncVaultNow,
+  useVaultSync,
   useProjects,
   useUsers,
 } from "@/entities/project";
@@ -40,6 +42,7 @@ export function ServerPage() {
         ) : (
           <>
             <Health />
+            <Knowledge />
             <Projects current={session?.project} />
             {!local && <Accounts me={session?.user.login} />}
           </>
@@ -93,6 +96,71 @@ function Health() {
           )}
           <p className="muted">
             То же в терминале: <code>genie doctor</code>.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** The vault's git remote: where people open it in Obsidian, and how the last sync went. */
+function Knowledge() {
+  const sync = useVaultSync(true);
+  const now = useSyncVaultNow();
+  const act = useAct();
+  const s = sync.data;
+  const last = s?.last;
+  return (
+    <section>
+      <h2>База знаний</h2>
+      {!s ? (
+        <p className="muted">{sync.isPending ? "Загрузка…" : sync.error?.message}</p>
+      ) : !s.remote ? (
+        <p className="muted">
+          База знаний хранится только на этом сервере. Чтобы открыть её в Obsidian (и держать ещё одну копию), укажите git-репозиторий в <code>vault.remote</code> в
+          config.json: сервер будет забирать и отправлять правки каждые {s.every} с.
+        </p>
+      ) : (
+        <>
+          <dl className="pj-facts">
+            <dt>Репозиторий</dt>
+            <dd className="mono">
+              {s.remote}
+              {last?.branch ? ` · ${last.branch}` : ""}
+            </dd>
+            <dt>Синхронизация</dt>
+            <dd>
+              {!last?.at ? (
+                <span className="muted">ещё не было</span>
+              ) : last.ok ? (
+                <>
+                  {new Date(last.at).toLocaleString("ru-RU")}: получено коммитов — {last.pulled}, отправлено — {last.pushed}
+                </>
+              ) : (
+                <span className="pj-bad">
+                  {new Date(last.at).toLocaleString("ru-RU")}: {last.error}
+                </span>
+              )}
+            </dd>
+            {last && last.conflicts.length > 0 && (
+              <>
+                <dt>Пересечения</dt>
+                <dd>
+                  {last.conflicts.map((c) => (
+                    <div key={c}>{c}</div>
+                  ))}
+                </dd>
+              </>
+            )}
+          </dl>
+          <button type="button" className="btn" disabled={now.isPending} onClick={() => void act(() => now.mutateAsync(), "База знаний синхронизирована")}>
+            <Icon.restart size={12} />
+            Синхронизировать сейчас
+          </button>
+          <p className="muted">
+            Склонируйте репозиторий и откройте папку как хранилище Obsidian; правки отправляйте в git (например, плагином Obsidian Git). Правки разных строк
+            сливаются сами; если одни и те же строки изменили и там, и на сервере, на странице остаётся версия сервера, а версия из репозитория ложится рядом
+            копией <code>.conflict</code> — ничего не теряется.
           </p>
         </>
       )}

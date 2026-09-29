@@ -113,6 +113,8 @@ enum VaultCmd {
     },
     /// Rebuild the search index from the files.
     Reindex,
+    /// Sync the vault with its git remote (vault.remote) once: fetch, merge, push. The running server does it by itself.
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -319,6 +321,19 @@ pub async fn run() -> Result<(), String> {
                         .output();
                     v.refresh().map_err(|e| e.to_string())?;
                     println!("{copied} page(s) imported into {}/{space}", vault_dir.display());
+                }
+                VaultCmd::Sync => {
+                    let app = App::open(&data, cfg.clone(), PathBuf::new()).map_err(|e| e.to_string())?;
+                    match crate::vault_sync::sync(&app).map_err(|e| e.to_string())? {
+                        None => return Err("vault.remote is not set in config.json".into()),
+                        Some(st) if !st.ok => return Err(st.error.unwrap_or_default()),
+                        Some(st) => {
+                            println!("vault synced with {} ({}): {} commit(s) in, {} out", st.remote, st.branch, st.pulled, st.pushed);
+                            if !st.both.is_empty() {
+                                println!("changed on both sides (the server's lines kept where they overlap): {}", st.both.join(", "));
+                            }
+                        }
+                    }
                 }
                 VaultCmd::Reindex => {
                     let _ = std::fs::remove_file(&index);

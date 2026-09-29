@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { keys, request, useInvalidating } from "@/shared/api";
-import type { DoctorCheck, Meta, Membership, Person, ProjectInfo, ProjectRole } from "./model.ts";
+import type { DoctorCheck, Meta, Membership, Person, ProjectInfo, ProjectRole, VaultSync } from "./model.ts";
 
 export const useMeta = () => useQuery({ queryKey: keys.meta, queryFn: () => request<Meta>("GET", "/api/meta") });
 
@@ -42,3 +42,8 @@ export const usePatchUser = () =>
 /** The server's preflight, for its admins (runs pi and git on the server: a second or so). */
 export const useDoctor = (enabled: boolean) =>
   useQuery({ queryKey: ["doctor"], queryFn: () => request<{ checks: DoctorCheck[] }>("GET", "/api/doctor"), enabled, staleTime: 60_000 });
+
+export const useVaultSync = (enabled: boolean) =>
+  useQuery({ queryKey: ["vault-sync"], queryFn: () => request<VaultSync>("GET", "/api/vault/sync"), enabled, refetchInterval: 30_000 });
+
+export const useSyncVaultNow = () => useInvalidating(() => request<Pick<VaultSync, "last">>("POST", "/api/vault/sync"));

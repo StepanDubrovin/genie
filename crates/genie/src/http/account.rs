@@ -32,6 +32,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/projects/{slug}/members/{user}", put(set_member).delete(remove_member))
         .route("/projects/{slug}/invites", post(create_invite))
         .route("/doctor", get(doctor))
+        .route("/vault/sync", get(vault_sync).post(vault_sync_now))
 }
 
 fn cookie_header(name: &str, value: &str, max_age_secs: i64) -> HeaderValue {
@@ -364,4 +365,18 @@ async fn doctor(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>>
     ctx.server_admin()?;
     let checks = app.blocking(|app| Ok(crate::doctor::run(&app.data, &app.cfg, &app.agents(), &app.web_root))).await?;
     Ok(Json(json!({ "checks": checks })))
+}
+
+/// How the vault syncs with its git remote (`vault.remote`).
+async fn vault_sync(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let remote = app.cfg.vault.remote.clone().filter(|r| !r.trim().is_empty());
+    Ok(Json(json!({ "remote": remote, "every": app.cfg.vault.sync_secs.unwrap_or(120), "last": crate::vault_sync::state() })))
+}
+
+/// Sync the vault now.
+async fn vault_sync_now(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let st = app.blocking(crate::vault_sync::sync).await?.ok_or_else(|| ApiError::bad("vault.remote is not set in config.json"))?;
+    Ok(Json(json!({ "last": st })))
 }

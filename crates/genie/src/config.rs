@@ -299,6 +299,13 @@ pub struct VaultConfig {
     pub path: Option<PathBuf>,
     /// Commit writes when the vault is a git repository (default true).
     pub commit: Option<bool>,
+    /// A git remote to keep the vault in sync with — a remote's name or a URL — so
+    /// people can work on it in Obsidian: fetched, merged and pushed every `syncSecs`.
+    pub remote: Option<String>,
+    /// The branch to sync (default: the vault's current branch).
+    pub branch: Option<String>,
+    /// Seconds between syncs (default 120).
+    pub sync_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

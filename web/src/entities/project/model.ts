@@ -101,7 +101,26 @@ export const DOCTOR_AREA: Record<string, string> = {
   git: "git",
   channels: "Каналы",
   network: "Сеть",
+  vault: "База знаний",
 };
+
+/** How the vault syncs with its git remote. */
+export interface VaultSync {
+  remote?: string;
+  every: number;
+  last?: {
+    remote: string;
+    branch: string;
+    at?: string;
+    ok: boolean;
+    error?: string;
+    pulled: number;
+    pushed: number;
+    both: string[];
+    /** Edits that overlapped, and where the other version went. */
+    conflicts: string[];
+  } | null;
+}
 
 /** The preflight in one line: what is broken first. */
 export function doctorSummary(checks: DoctorCheck[]): { level: DoctorCheck["level"]; text: string } {

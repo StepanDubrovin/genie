@@ -72,3 +72,4 @@
 .pj-checks .area { color: var(--muted); }
 .pj-checks .txt { min-width: 0; overflow-wrap: anywhere; }
 .pj-checks .hint { display: block; color: var(--muted); font-size: 12px; }
+.pj-bad { color: var(--red); }

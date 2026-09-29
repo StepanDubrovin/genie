@@ -73,6 +73,7 @@ fn with_state<T>(f: impl FnOnce(&mut SchedState) -> T) -> T {
 /// Start background workers: crash recovery, then the scheduler.
 pub fn start(app: &Arc<App>) {
     crate::knowledge::start_watcher(app);
+    crate::vault_sync::start(app);
     crate::agent_config::start_watcher(app);
     crate::engine::start(app);
     crate::channels::start(app);
