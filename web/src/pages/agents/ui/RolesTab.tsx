@@ -129,7 +129,7 @@ function RolePane({ id, cfg }: { id: string; cfg: Catalogue }) {
           <Permissions detail={d} cfg={cfg} />
         )}
         <div className="ag-cards">
-          <Workplace role={r} onEdit={admin ? () => setDialog("settings") : undefined} />
+          <Workplace role={r} sandbox={cfg.sandbox} onEdit={admin ? () => setDialog("settings") : undefined} />
           <SkillsCard role={r} cfg={cfg} onEdit={admin ? () => setDialog("skills") : undefined} />
           <McpCard role={r} cfg={cfg} onEdit={admin && cfg.mcp.length > 0 ? () => setDialog("mcp") : undefined} />
         </div>
@@ -399,7 +399,7 @@ function Card({ title, onEdit, children }: { title: string; onEdit?: () => void;
 
 const SOFT = "Соблюдает харнесс агента: через shell агент может обойти это ограничение, пока агенты не работают в контейнерах";
 
-function Workplace({ role: r, onEdit }: { role: RoleDef; onEdit?: () => void }) {
+function Workplace({ role: r, sandbox, onEdit }: { role: RoleDef; sandbox?: Catalogue["sandbox"]; onEdit?: () => void }) {
   const soft = (
     <span className="ag-soft" title={SOFT}>
       мягко
@@ -422,6 +422,18 @@ function Workplace({ role: r, onEdit }: { role: RoleDef; onEdit?: () => void }) 
             </>
           ) : (
             "без запретов"
+          )}
+        </dd>
+        <dt>Изоляция</dt>
+        <dd>
+          {sandbox?.active ? (
+            <span title="Агент работает в песочнице bubblewrap: пишет только в свой рабочий каталог, не видит данные сервера, другие проекты и секреты">
+              песочница
+            </span>
+          ) : (
+            <span className="ag-soft" title={sandbox?.note}>
+              нет песочницы
+            </span>
           )}
         </dd>
         <dt>Стадии</dt>

@@ -125,6 +125,54 @@ pub struct RuntimeConfig {
     pub mcp_gateway: bool,
     /// Disable to run the server without starting any agent (UI-only mode).
     pub enabled: bool,
+    /// How agent processes are isolated from the server's data and the machine.
+    pub sandbox: SandboxConfig,
+}
+
+/// `runtime.sandbox`: an object, or just its mode (`"sandbox": "off"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxConfig {
+    /// `auto` — bubblewrap when it works on this machine, otherwise none (with a
+    /// warning); `bwrap` — required: agents do not start without it; `off`.
+    pub mode: String,
+    /// More paths agents may write, besides their working directory, its git
+    /// repository, their session files, pi's directory and the tool caches.
+    pub writable: Vec<String>,
+    /// More paths agents must not see. `~/` is the server user's home.
+    pub hidden: Vec<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        SandboxConfig { mode: "auto".into(), writable: Vec::new(), hidden: Vec::new() }
+    }
+}
+
+impl<'de> Deserialize<'de> for SandboxConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", default)]
+        struct Full {
+            mode: String,
+            writable: Vec<String>,
+            hidden: Vec<String>,
+        }
+        impl Default for Full {
+            fn default() -> Self {
+                Full { mode: "auto".into(), writable: Vec::new(), hidden: Vec::new() }
+            }
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Setting {
+            Mode(String),
+            Full(Full),
+        }
+        Ok(match Setting::deserialize(d)? {
+            Setting::Mode(mode) => SandboxConfig { mode, ..Default::default() },
+            Setting::Full(f) => SandboxConfig { mode: f.mode, writable: f.writable, hidden: f.hidden },
+        })
+    }
 }
 
 impl RuntimeConfig {
@@ -213,6 +261,7 @@ impl Default for RuntimeConfig {
             mcp_adapter: None,
             mcp_gateway: true,
             enabled: true,
+            sandbox: SandboxConfig::default(),
         }
     }
 }
@@ -356,6 +405,17 @@ mod tests {
         assert_eq!(cfg.runtime.max_concurrent, 1);
         assert_eq!(cfg.runtime.turn_timeout_secs, 1800, "unset runtime fields keep defaults");
         assert_eq!(cfg.limits.max_members_per_team, 6);
+    }
+
+    #[test]
+    fn the_sandbox_is_its_mode_or_an_object() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Config::load(dir.path()).unwrap().runtime.sandbox, SandboxConfig::default());
+        std::fs::write(dir.path().join("config.json"), r#"{"runtime": {"sandbox": "off"}}"#).unwrap();
+        assert_eq!(Config::load(dir.path()).unwrap().runtime.sandbox.mode, "off");
+        std::fs::write(dir.path().join("config.json"), r#"{"runtime": {"sandbox": {"writable": ["~/.m2"]}}}"#).unwrap();
+        let s = Config::load(dir.path()).unwrap().runtime.sandbox;
+        assert_eq!((s.mode.as_str(), s.writable), ("auto", vec!["~/.m2".to_string()]));
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod mcp_gateway;
 pub mod notify;
 pub mod questions;
 pub mod runtime;
+pub mod sandbox;
 pub mod sessions;
 pub mod state;
 

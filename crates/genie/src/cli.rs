@@ -309,6 +309,10 @@ pub async fn run() -> Result<(), String> {
                             with_mcp.join(", ")
                         );
                     }
+                    match crate::sandbox::status(&cfg.runtime.sandbox) {
+                        (true, note) => println!("sandbox: {note}"),
+                        (false, note) => println!("warning: {note}"),
+                    }
                     let errors = agents.errors().count();
                     if errors > 0 {
                         return Err(format!("{errors} error(s) in the agent configuration of {}", data.display()));

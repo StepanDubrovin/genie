@@ -31,6 +31,8 @@ impl Harness {
     pub fn with_config(f: impl FnOnce(&mut Config)) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::load(dir.path()).unwrap();
+        // Test files live in the data directory, which a sandboxed agent does not see.
+        cfg.runtime.sandbox.mode = "off".into();
         cfg.runtime.enabled = false;
         f(&mut cfg);
         let app = App::open(dir.path(), cfg, PathBuf::from("/nonexistent-web")).unwrap();

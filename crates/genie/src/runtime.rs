@@ -30,6 +30,7 @@ use tokio::sync::Semaphore;
 
 use crate::agent_config::{AgentConfig, FileAccess, MailMode, RelKind, Relation, RoleDef, SpecMember, Stage, TeamSpec, Workspace};
 use crate::config::MemberSpec;
+use crate::sandbox;
 use crate::state::{App, AppError, AppResult};
 
 /// Which agent a turn is for.
@@ -541,9 +542,9 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
     ]);
     let lists = p.kit.placeholders(&files, &mut vars);
     let argv = build_command(&app.cfg.runtime.command, &vars, &lists);
-    let Some((program, args)) = argv.split_first() else { return Err("runtime.command is empty".into()) };
+    let Some(program) = argv.first() else { return Err("runtime.command is empty".into()) };
     let who = Identity { role: p.role, role_id: &p.role_id, name: &p.name, team: p.team.as_deref(), task: p.task.as_deref(), job: p.job };
-    let mut cmd = agent_command(app, program, args, &p.cwd, key.project(), &who, &token);
+    let mut cmd = agent_command(app, &argv, &p.cwd, &dir, key.project(), &who, &token)?;
     kit_env(&mut cmd, &files, &argv);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
@@ -595,18 +596,25 @@ pub(crate) struct Identity<'a> {
     pub job: Option<i64>,
 }
 
-/// The harness command with the agent's environment (`GENIE_URL`, `GENIE_TOKEN`…).
+/// The harness command with the agent's environment (`GENIE_URL`, `GENIE_TOKEN`…),
+/// in the agent's sandbox when agents run in one. `dir` is the agent's runtime
+/// directory (its prompt, rules and MCP config).
 pub(crate) fn agent_command(
     app: &App,
-    program: &str,
-    args: &[String],
+    argv: &[String],
     cwd: &Path,
+    dir: &Path,
     project: &str,
     who: &Identity<'_>,
     token: &str,
-) -> tokio::process::Command {
+) -> Result<tokio::process::Command, String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let exe_dir = app.exe.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    let (program, args) = argv.split_first().ok_or("the agent command is empty")?;
+    let (program, args) = match sandbox_plan(app, project, cwd, dir)? {
+        Some(plan) => plan.wrap(program, args),
+        None => (program.to_string(), args.to_vec()),
+    };
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
@@ -633,7 +641,77 @@ pub(crate) fn agent_command(
         cmd.env(k, v);
     }
     app.mcp.place(&crate::mcp_gateway::agent_key(project, who.team, who.name), cwd);
-    cmd
+    Ok(cmd)
+}
+
+/// The sandbox of an agent working in `cwd` (`dir`: its runtime directory), or
+/// `None` when agents run without one ([`crate::sandbox`]).
+fn sandbox_plan(app: &App, project: &str, cwd: &Path, dir: &Path) -> Result<Option<sandbox::Plan>, String> {
+    use sandbox::Access::{Hidden, ReadOnly, Writable};
+    let cfg = &app.cfg.runtime.sandbox;
+    if !sandbox::enabled(cfg)? {
+        if cfg.mode == "auto" {
+            warn_once(
+                "genie runtime: agents run without a sandbox: bubblewrap does not work on this machine (apt install bubblewrap); set runtime.sandbox to \"off\" to run without one on purpose",
+            );
+        }
+        return Ok(None);
+    }
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    let mut plan = sandbox::Plan::new(cwd);
+    // The server's data: only the agent's own files show through.
+    plan.set(&app.data, Hidden);
+    for f in ["genie-bus.ts", "genie-guard.ts"] {
+        plan.set(&app.data.join("runtime").join(f), ReadOnly);
+    }
+    plan.set(dir, ReadOnly);
+    plan.set(&app.data.join("skills"), ReadOnly);
+    let sessions = app.data.join("sessions").join(project);
+    let tmp = dir.join("tmp");
+    for d in [&sessions, &tmp] {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    plan.set(&sessions, Writable);
+    plan.tmp(&tmp);
+    // The trackers (agents reach tasks through the API) and the other projects.
+    for p in app.projects().map_err(|e| e.to_string())? {
+        plan.set(Path::new(&p.tracker_dir), Hidden);
+        if p.slug == project {
+            continue;
+        }
+        if let Some(repo) = &p.repo {
+            let repo = Path::new(repo);
+            plan.set(repo, Hidden);
+            if let Some(worktrees) = worktree_place(app, repo, "_", "_").0.parent() {
+                plan.set(worktrees, Hidden);
+            }
+        }
+    }
+    // `genie agent …` is the server's own binary.
+    if let Some(bin) = app.exe.parent() {
+        plan.set(bin, ReadOnly);
+    }
+    // Where the agent works, and the git repository behind a worktree (its commits go there).
+    plan.set(cwd, Writable);
+    if let Some(git) = git_common_dir(cwd) {
+        plan.set(&git, Writable);
+    }
+    let pi_dir = app.cfg.runtime.env.get("PI_CODING_AGENT_DIR").cloned().or_else(|| std::env::var("PI_CODING_AGENT_DIR").ok());
+    sandbox::defaults(&mut plan, cfg, &home, pi_dir.map(|d| sandbox::expand(&d, &home)).as_deref());
+    Ok(Some(plan))
+}
+
+/// The repository's git directory (shared by its worktrees), when `cwd` is in one.
+fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    (out.status.success() && path.is_dir()).then_some(path)
 }
 
 // --- what the harness gets from the role ------------------------------------------

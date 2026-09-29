@@ -20,6 +20,8 @@ async fn live(env: &[(&str, &str)]) -> Live {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let mut cfg = Config::load(dir.path()).unwrap();
+    // Test files live in the data directory, which a sandboxed agent does not see.
+    cfg.runtime.sandbox.mode = "off".into();
     cfg.port = port;
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agent.sh");
     cfg.runtime.command = vec![vec!["bash".into(), script.to_string_lossy().into_owned()], vec!["{message}".into()]];
@@ -127,6 +129,8 @@ async fn a_crashed_turn_gives_its_mail_back_and_is_retried() {
 fn recovery_stops_only_verified_stray_agent_processes() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = Config::load(dir.path()).unwrap();
+    // Test files live in the data directory, which a sandboxed agent does not see.
+    cfg.runtime.sandbox.mode = "off".into();
     cfg.runtime.enabled = false;
     let app = App::open(dir.path(), cfg, PathBuf::from("/nonexistent")).unwrap();
     app.create_project("shop", "", None, None, None).unwrap();

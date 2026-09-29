@@ -137,6 +137,8 @@ export interface Catalogue {
   mcpAdapter: boolean;
   /** Agents reach MCP connections through the genie gateway (`runtime.mcpGateway`). */
   mcpGateway: boolean;
+  /** Whether agents run in the bubblewrap sandbox (`runtime.sandbox`), and why not. */
+  sandbox?: { active: boolean; note: string };
   /** How many automations name each template and role. */
   automations?: { templates: Record<string, number>; roles: Record<string, number> };
   roles: RoleDef[];
