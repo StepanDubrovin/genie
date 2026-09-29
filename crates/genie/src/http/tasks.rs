@@ -30,6 +30,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/tasks/{id}/artifacts/{n}", get(read_artifact))
         .route("/tasks/{id}/split", post(split))
         .route("/tasks/{id}/block", post(block).delete(unblock))
+        .route("/tasks/{id}/docs-impact", get(docs_impact))
         .route("/journal", get(journal))
 }
 
@@ -555,4 +556,11 @@ async fn journal(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<JournalQ
     let (after, limit) = (q.after.unwrap_or(0), q.limit.unwrap_or(100).min(1000));
     let (events, last) = tracker(&app, &access, move |t| Ok((t.events_after(after, limit)?, t.last_event_id()?))).await?;
     Ok(Json(json!({ "events": events, "last": last })))
+}
+
+/// Pages of the project's knowledge the task may have made stale (a hint for review).
+async fn docs_impact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let project = access.project.clone();
+    Ok(Json(app.blocking(move |app| crate::knowledge::docs_impact(app, &project, &id)).await?))
 }
