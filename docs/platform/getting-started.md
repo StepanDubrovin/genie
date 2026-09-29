@@ -222,11 +222,41 @@ You are the QA engineer of a focus team…
 
 ## Надёжность
 
-- **Резервная копия** на ходу: `genie backup /backups` — консистентные снимки всех баз (`VACUUM INTO`) и `git bundle` хранилища. Для регулярных копий — cron/systemd timer.
+- **Резервная копия** на ходу: `genie backup /backups --keep 14` — консистентные снимки всех баз (`VACUUM INTO`), `git bundle` хранилища и конфигурация сервера (`config.json` с секретами каналов, роли, шаблоны, навыки, `mcp.json`) в `/backups/genie-<время>/` с правами 0700; `--keep` оставляет столько последних копий. Ежедневно — `genie-backup.timer` (ниже).
+- **Восстановление**: остановите сервер; `server.db` и `projects/<slug>.db` из копии положите на место (трекер проекта — `genie.db` в его каталоге: `genie project list` покажет путь), vault — `git clone vault.bundle vault`, конфигурацию — из `config/`; запустите сервер и `genie doctor`.
 - **Рестарт** безопасен: прерванные ходы агентов возвращают свои письма и повторяются, запущенные задания возвращаются в очередь, шаги автоматизаций продолжаются с места остановки, события журнала обрабатываются ровно один раз на правило.
 - **Сбой агента**: прогон повторяется с нарастающей паузой, упавшая сессия перезапускается с тем же разговором; после `maxAttempts` подряд участник переходит в `error`, оркестратор получает письмо, письма участника сохраняются до `genie agent restart`. Зависший шаг прерывается, о возможном цикле сообщается оркестратору.
 - **Индекс знаний** — кэш: `genie vault reindex`.
 - Журналы: ходы — `<data>/runtime/<project>/<agent>/turn-<id>.log`, сессии — журнал действий в истории ходов и `stderr.log` рядом; `genie agent board` и `GET /api/agents` — состояние всех агентов и задержки доставки; в вебе — история запусков автоматизаций по шагам.
+
+## Готовность сервера: `genie doctor`
+
+`genie doctor` (запускайте от пользователя сервера, с теми же `GENIE_DATA` и `PATH`) проверяет всё, без чего пилот не пойдёт, и называет, что сделать:
+
+- каталог данных (запись, свободное место), собранный веб (`--web`);
+- люди (есть ли администратор) и проекты (трекер открывается, репозиторий на месте);
+- агенты: ошибки конфигурации ролей, `pi` в `PATH`, **модели ролей доступны pi** (по `pi --list-models`: нет входа у провайдера или опечатка в id — ошибка), pi-mcp-adapter для прямых MCP-подключений;
+- песочница bubblewrap, git и имя для коммитов (без него агенты коммитят как `<имя>@genie.local`);
+- Telegram и почта (сервер SMTP отвечает), `bind`, `allowHosts` и `publicUrl` (ссылки в сообщениях открываются).
+
+Код выхода ненулевой, если есть проблемы. Та же проверка — на странице «Сервер» в вебе («Готовность»).
+
+## Как служба (systemd)
+
+```bash
+cargo build --release -p genie && npm ci && npm run build:web
+sudo deploy/install.sh        # /opt/genie/bin/genie, /opt/genie/web, пользователь genie, /var/lib/genie, /var/backups/genie
+sudo -iu genie npm install -g --prefix ~/.local @earendil-works/pi-coding-agent
+sudo -iu genie pi             # /login у провайдеров моделей ролей
+sudo cp deploy/systemd/genie.service deploy/systemd/genie-backup.service deploy/systemd/genie-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now genie genie-backup.timer
+sudo -iu genie env GENIE_DATA=/var/lib/genie /opt/genie/bin/genie doctor --web /opt/genie/web
+```
+
+- `genie.service` — сервер от пользователя `genie` (`HOME` — там логины pi), данные в `/var/lib/genie`, перезапуск при сбое; агенты — процессы службы и останавливаются вместе с ней, после перезапуска работа продолжается.
+- Секреты MCP-подключений (`${env:NAME}` в `mcp.json`) — в `/etc/genie/secrets.env`: они остаются у сервера и не попадают агентам.
+- `genie-backup.timer` — копия каждый день в 03:30 в `/var/backups/genie`, 14 последних. Копируйте этот каталог и на другую машину.
+- Журнал сервера — `journalctl -u genie -f`.
 
 ## Проверки
 

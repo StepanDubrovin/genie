@@ -31,6 +31,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/projects/{slug}/members", get(list_members))
         .route("/projects/{slug}/members/{user}", put(set_member).delete(remove_member))
         .route("/projects/{slug}/invites", post(create_invite))
+        .route("/doctor", get(doctor))
 }
 
 fn cookie_header(name: &str, value: &str, max_age_secs: i64) -> HeaderValue {
@@ -356,4 +357,11 @@ async fn create_invite(
     let secret = app.blocking(move |app| app.with_server(|db| db.create_invite(by, Some(&project), role, b.email.as_deref()))).await?;
     let url = format!("{}/invite?token={secret}", app.cfg.public_url());
     Ok((StatusCode::CREATED, Json(json!({ "token": secret, "url": url }))))
+}
+
+/// The server's preflight (`genie doctor`) for its admins.
+async fn doctor(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let checks = app.blocking(|app| Ok(crate::doctor::run(&app.data, &app.cfg, &app.agents(), &app.web_root))).await?;
+    Ok(Json(json!({ "checks": checks })))
 }

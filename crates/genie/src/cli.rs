@@ -50,8 +50,19 @@ enum Command {
         #[arg(long)]
         email: Option<String>,
     },
-    /// Consistent snapshot of every database and the vault into a directory.
-    Backup { dir: PathBuf },
+    /// Consistent snapshot of every database, the vault and the server's configuration into a directory.
+    Backup {
+        dir: PathBuf,
+        /// Keep only this many most recent backups in the directory (older `genie-*` are removed).
+        #[arg(long)]
+        keep: Option<usize>,
+    },
+    /// Check that the server is ready: data, web UI, people, projects, pi and the models, sandbox, git, channels, network.
+    Doctor {
+        /// Built web UI the server serves.
+        #[arg(long, default_value = "web/dist")]
+        web: PathBuf,
+    },
     /// Knowledge vault maintenance.
     #[command(subcommand)]
     Vault(VaultCmd),
@@ -183,7 +194,14 @@ pub async fn run() -> Result<(), String> {
         }
         Command::Project(ProjectCmd::List) => {
             for p in server_db()?.projects().map_err(|e| e.to_string())? {
-                println!("{:<16} {:<24} {:<10} {}", p.slug, p.name, p.autonomy, p.repo.unwrap_or_else(|| "(no code)".into()));
+                println!(
+                    "{:<16} {:<24} {:<10} {}  tracker {}",
+                    p.slug,
+                    p.name,
+                    p.autonomy,
+                    p.repo.unwrap_or_else(|| "(no code)".into()),
+                    p.tracker_dir
+                );
             }
         }
         Command::User(UserCmd::Add { login, name, email, admin, password_stdin }) => {
@@ -233,10 +251,24 @@ pub async fn run() -> Result<(), String> {
             println!("{}/invite?token={token}", cfg.public_url());
         }
         Command::Agent(cmd) => crate::agent_cli::run(cmd).await?,
-        Command::Backup { dir } => {
+        Command::Backup { dir, keep } => {
             let cfg = Config::load(&data)?;
             let report = backup(&data, &cfg, &dir)?;
             println!("{report}");
+            if let Some(keep) = keep {
+                for old in prune_backups(&dir, keep)? {
+                    println!("removed {}", old.display());
+                }
+            }
+        }
+        Command::Doctor { web } => {
+            let cfg = Config::load(&data)?;
+            let agents = crate::agent_config::AgentConfig::load(&data, &cfg, None);
+            let (report, failed) = crate::doctor::print(&crate::doctor::run(&data, &cfg, &agents, &web));
+            println!("{report}");
+            if failed > 0 {
+                return Err(format!("{failed} check(s) failed"));
+            }
         }
         Command::Vault(cmd) => {
             let cfg = Config::load(&data)?;
@@ -355,11 +387,18 @@ pub async fn run() -> Result<(), String> {
 }
 
 /// `VACUUM INTO` gives a consistent copy of a live SQLite database (WAL included)
-/// without stopping the server; the vault is bundled with git (or copied).
+/// without stopping the server; the vault is bundled with git. The server's
+/// configuration (`config.json` with the channel secrets, roles, templates,
+/// skills, `mcp.json`) is copied too: the backup directory is private (0700).
 pub fn backup(data: &std::path::Path, cfg: &Config, dir: &std::path::Path) -> Result<String, String> {
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let out = dir.join(format!("genie-{stamp}"));
     std::fs::create_dir_all(out.join("projects")).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    }
     let snapshot = |src: &std::path::Path, dst: &std::path::Path| -> Result<(), String> {
         let conn = rusqlite::Connection::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(30)).map_err(|e| e.to_string())?;
@@ -391,5 +430,54 @@ pub fn backup(data: &std::path::Path, cfg: &Config, dir: &std::path::Path) -> Re
         }
         lines.push("vault.bundle (restore: git clone vault.bundle vault)".into());
     }
+    let mut config = Vec::new();
+    for item in ["config.json", "mcp.json", "agents", "teams", "skills"] {
+        let src = data.join(item);
+        if src.exists() {
+            copy_tree(&src, &out.join("config").join(item))?;
+            config.push(item);
+        }
+    }
+    if !config.is_empty() {
+        lines.push(format!("config/: {}", config.join(", ")));
+    }
     Ok(format!("backup in {}:\n  {}", out.display(), lines.join("\n  ")))
+}
+
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        for e in std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))?.flatten() {
+            copy_tree(&e.path(), &dst.join(e.file_name()))?;
+        }
+        Ok(())
+    } else {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(src, dst).map(|_| ()).map_err(|e| format!("{}: {e}", src.display()))
+    }
+}
+
+/// Remove all but the `keep` most recent backups (`genie-<stamp>` directories) in `dir`.
+pub fn prune_backups(dir: &std::path::Path, keep: usize) -> Result<Vec<PathBuf>, String> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("genie-") && n[6..].chars().all(|c| c.is_ascii_digit() || c == '-'))
+        })
+        .collect();
+    // The stamps sort by time.
+    found.sort();
+    let old = found.len().saturating_sub(keep.max(1));
+    let removed: Vec<PathBuf> = found.into_iter().take(old).collect();
+    for p in &removed {
+        std::fs::remove_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(removed)
 }

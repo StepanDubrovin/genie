@@ -58,3 +58,17 @@
   .pj-people .who { flex-basis: calc(100% - 50px); }
   .pj-link { flex-direction: column; align-items: stretch; }
 }
+
+.pj-health { display: flex; align-items: center; gap: 12px; font-weight: 600; }
+.pj-health.ok { color: var(--green, #4cb782); }
+.pj-health.warn { color: var(--amber, #f0a04b); }
+.pj-health.fail { color: var(--red, #eb5757); }
+.pj-health .btn { font-weight: 400; }
+.pj-checks { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; gap: 2px; }
+.pj-checks li { display: grid; grid-template-columns: 10px 84px minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 6px 0; font-size: 12.5px; line-height: 1.5; }
+.pj-checks .lv { width: 8px; height: 8px; border-radius: 50%; background: var(--green, #4cb782); transform: translateY(-1px); }
+.pj-checks li.warn .lv { background: var(--amber, #f0a04b); }
+.pj-checks li.fail .lv { background: var(--red, #eb5757); }
+.pj-checks .area { color: var(--muted); }
+.pj-checks .txt { min-width: 0; overflow-wrap: anywhere; }
+.pj-checks .hint { display: block; color: var(--muted); font-size: 12px; }

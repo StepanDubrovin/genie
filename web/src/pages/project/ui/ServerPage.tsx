@@ -3,7 +3,21 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { AUTONOMY, PersonAvatar, personName, PROJECT_ROLE_NAME, useCreateProject, useCreateUser, usePatchUser, useProjects, useUsers } from "@/entities/project";
+import {
+  AUTONOMY,
+  DOCTOR_AREA,
+  type DoctorCheck,
+  doctorSummary,
+  PersonAvatar,
+  personName,
+  PROJECT_ROLE_NAME,
+  useCreateProject,
+  useCreateUser,
+  useDoctor,
+  usePatchUser,
+  useProjects,
+  useUsers,
+} from "@/entities/project";
 import { useSession } from "@/entities/session";
 import { request } from "@/shared/api";
 import { Icon } from "@/shared/ui";
@@ -25,12 +39,64 @@ export function ServerPage() {
           <div className="empty">Эта страница — для администраторов сервера.</div>
         ) : (
           <>
+            <Health />
             <Projects current={session?.project} />
             {!local && <Accounts me={session?.user.login} />}
           </>
         )}
       </div>
     </main>
+  );
+}
+
+/** The preflight of `genie doctor`: what is broken first, what works folded. */
+function Health() {
+  const doctor = useDoctor(true);
+  const [all, setAll] = useState(false);
+  const checks = doctor.data?.checks ?? [];
+  const summary = doctorSummary(checks);
+  const order: Record<DoctorCheck["level"], number> = { fail: 0, warn: 1, ok: 2 };
+  const shown = [...checks].sort((a, b) => order[a.level] - order[b.level]).filter((c) => all || c.level !== "ok");
+  const fine = checks.filter((c) => c.level === "ok").length;
+  return (
+    <section>
+      <h2>Готовность</h2>
+      {doctor.isPending ? (
+        <p className="muted">Проверяем сервер…</p>
+      ) : doctor.isError ? (
+        <p className="muted">Проверка не удалась: {doctor.error.message}</p>
+      ) : (
+        <>
+          <p className={`pj-health ${summary.level}`}>
+            {summary.text}
+            <button type="button" className="btn ghost" disabled={doctor.isFetching} onClick={() => void doctor.refetch()}>
+              <Icon.restart size={12} />
+              Проверить снова
+            </button>
+          </p>
+          <ul className="pj-checks">
+            {shown.map((c, i) => (
+              <li key={i} className={c.level}>
+                <span className="lv" aria-label={c.level === "ok" ? "в порядке" : c.level === "warn" ? "предупреждение" : "проблема"} />
+                <span className="area">{DOCTOR_AREA[c.area] ?? c.area}</span>
+                <span className="txt">
+                  {c.text}
+                  {c.hint && c.level !== "ok" && <span className="hint">{c.hint}</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {fine > 0 && (
+            <button type="button" className="btn ghost" onClick={() => setAll(!all)}>
+              {all ? "Скрыть то, что в порядке" : `Показать всё (в порядке: ${fine})`}
+            </button>
+          )}
+          <p className="muted">
+            То же в терминале: <code>genie doctor</code>.
+          </p>
+        </>
+      )}
+    </section>
   );
 }
 

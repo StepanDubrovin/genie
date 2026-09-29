@@ -80,3 +80,34 @@ export function responsibleChoices(members: Membership[], current?: string): { l
   if (current && !out.some((o) => o.login === current)) out.unshift({ login: current, label: `@${current}` });
   return out;
 }
+
+/** One line of the server's preflight (`genie doctor`). */
+export interface DoctorCheck {
+  area: string;
+  level: "ok" | "warn" | "fail";
+  text: string;
+  hint?: string;
+}
+
+export const DOCTOR_AREA: Record<string, string> = {
+  data: "Данные",
+  web: "Веб",
+  people: "Люди",
+  projects: "Проекты",
+  agents: "Агенты",
+  pi: "pi",
+  models: "Модели",
+  sandbox: "Песочница",
+  git: "git",
+  channels: "Каналы",
+  network: "Сеть",
+};
+
+/** The preflight in one line: what is broken first. */
+export function doctorSummary(checks: DoctorCheck[]): { level: DoctorCheck["level"]; text: string } {
+  const fail = checks.filter((c) => c.level === "fail").length;
+  const warn = checks.filter((c) => c.level === "warn").length;
+  if (fail) return { level: "fail", text: `Нужно исправить: ${fail}${warn ? `, предупреждений: ${warn}` : ""}` };
+  if (warn) return { level: "warn", text: `Готов к работе, предупреждений: ${warn}` };
+  return { level: "ok", text: "Всё готово" };
+}

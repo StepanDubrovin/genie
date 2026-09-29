@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { keys, request, useInvalidating } from "@/shared/api";
-import type { Meta, Membership, Person, ProjectInfo, ProjectRole } from "./model.ts";
+import type { DoctorCheck, Meta, Membership, Person, ProjectInfo, ProjectRole } from "./model.ts";
 
 export const useMeta = () => useQuery({ queryKey: keys.meta, queryFn: () => request<Meta>("GET", "/api/meta") });
 
@@ -38,3 +38,7 @@ export const usePatchUser = () =>
   useInvalidating(({ id, patch }: { id: number; patch: Partial<Pick<Person, "name" | "isAdmin" | "disabled">> & { email?: string | null } }) =>
     request<Person>("PATCH", `/api/users/${id}`, patch),
   );
+
+/** The server's preflight, for its admins (runs pi and git on the server: a second or so). */
+export const useDoctor = (enabled: boolean) =>
+  useQuery({ queryKey: ["doctor"], queryFn: () => request<{ checks: DoctorCheck[] }>("GET", "/api/doctor"), enabled, staleTime: 60_000 });

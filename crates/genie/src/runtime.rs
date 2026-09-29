@@ -637,6 +637,14 @@ pub(crate) fn agent_command(
             cmd.env_remove(var);
         }
     }
+    // Commits need an identity: when the server user has none, agents commit under their own names.
+    if !git_identity(cwd) {
+        let (name, email) = (format!("{} ({})", who.name, who.role_id), format!("{}@genie.local", who.name));
+        cmd.env("GIT_AUTHOR_NAME", &name)
+            .env("GIT_AUTHOR_EMAIL", &email)
+            .env("GIT_COMMITTER_NAME", &name)
+            .env("GIT_COMMITTER_EMAIL", &email);
+    }
     for (k, v) in &app.cfg.runtime.env {
         cmd.env(k, v);
     }
@@ -712,6 +720,17 @@ fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
         .ok()?;
     let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
     (out.status.success() && path.is_dir()).then_some(path)
+}
+
+/// Whether git has an identity for commits made in `cwd` (the repository's, the user's or the system's).
+fn git_identity(cwd: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["config", "user.email"])
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
 }
 
 // --- what the harness gets from the role ------------------------------------------
