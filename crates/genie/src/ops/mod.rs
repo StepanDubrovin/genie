@@ -440,31 +440,13 @@ pub fn pairs(items: &[String], what: &str) -> Result<serde_json::Map<String, Val
     Ok(out)
 }
 
-/// The tool names the role guides use (those of the pi extension) where they differ from `genie_<group>` `<action>`.
-fn guide_name(e: &Entry) -> Option<&'static str> {
-    Some(match (e.group, e.name) {
-        ("task", "artifact-read") => "artifact_read",
-        ("mail", "send") => "team_send",
-        ("team", "show") => "team_status",
-        ("team", "set-status") => "team_set_status",
-        ("team", "spawn") => "team_spawn",
-        ("team", "add-member") => "team_add_member",
-        ("team", "remove-member") => "team_remove_member",
-        ("team", "stop") => "team_stop",
-        ("team", "restart") => "team_recover",
-        ("docs", "search") => "docs_search",
-        ("docs", "read") => "docs_read",
-        ("docs", "note") => "docs_note",
-        _ => return None,
-    })
-}
-
-/// The command table of an agent's prompt: every operation its role uses, the
-/// tool name its role guide mentions, the command, what it does.
+/// The command table of an agent's prompt: every operation its role uses, its
+/// name as the role guides and the MCP server give it (`genie_task` action
+/// `show`), the command, what it does.
 pub fn command_table(kind: AgentKind, can: &dyn Fn(Capability) -> bool) -> String {
     let mut out = String::from("| Tool | Command | What it does |\n|---|---|---|\n");
     for e in catalog().iter().filter(|e| e.listed_for(kind, can)) {
-        let tool = guide_name(e).map_or_else(|| format!("`genie_{}` {}", e.group, e.name), |g| format!("`{g}`"));
+        let tool = format!("`genie_{}` {}", e.group, e.name);
         let note = e.note_for(kind, can).map(|n| format!(" ({n})")).unwrap_or_default();
         out.push_str(&format!("| {tool} | `{}`{note} | {} |\n", e.usage_for(kind, can), e.summary()));
     }
@@ -510,7 +492,7 @@ mod tests {
     fn command_tables_follow_the_role() {
         use genie_core::Role;
         let orch = command_table(AgentKind::Orchestrator, &|_| true);
-        assert!(orch.contains("| `team_spawn` | `genie team spawn <TASK> [--template …] [--member …]... [--note …]` |"), "{orch}");
+        assert!(orch.contains("| `genie_team` spawn | `genie team spawn <TASK> [--template …] [--member …]... [--note …]` |"), "{orch}");
         assert!(orch.contains("`genie task status <STATUS> [--task …] [--note …] [--force]` (review and approved are the team's verdicts"));
         assert!(
             orch.contains("--merge-strategy") && orch.contains("| `genie_task` split |") && orch.contains("| `genie_team` templates |")
@@ -522,7 +504,10 @@ mod tests {
             reviewer.contains("`genie task status <STATUS> [--task …] [--note …]` (your role may set: changes_requested, approved)"),
             "{reviewer}"
         );
-        assert!(reviewer.contains("| `genie_task` check |") && reviewer.contains("| `team_set_status` | `genie team set-status <TEXT>` |"));
+        assert!(
+            reviewer.contains("| `genie_task` check |")
+                && reviewer.contains("| `genie_team` set-status | `genie team set-status <TEXT>` |")
+        );
         assert!(reviewer.contains(
             "`genie mail send <TO> <TEXT> [--level low|normal|high|interrupt] [--intent question|blocker|verdict|done|fyi] [--topic …]`"
         ));

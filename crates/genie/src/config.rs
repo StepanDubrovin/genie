@@ -362,13 +362,6 @@ impl Config {
     /// Embedded defaults merged with `<data>/config.json` when present.
     pub fn load(data: &Path) -> Result<Config, String> {
         let mut value: Value = serde_json::from_str(DEFAULT_JSON).map_err(|e| format!("config/default.json: {e}"))?;
-        // Keys of the TypeScript config that the server does not use (its team
-        // presets are `config/teams/*.json`, see `agent_config`).
-        if let Some(obj) = value.as_object_mut() {
-            for k in ["spawn", "orchestrator", "notify", "gates", "docs", "web", "names", "teams"] {
-                obj.remove(k);
-            }
-        }
         let file = data.join("config.json");
         if file.exists() {
             let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;

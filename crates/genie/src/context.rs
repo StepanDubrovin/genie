@@ -11,7 +11,7 @@
 //!   clipped at section boundaries, with a marker.
 //!
 //! Budgets are estimator units (about four Latin or two Cyrillic characters),
-//! not tokens. Ported from `src/docs/context.ts`, whose tests are the spec.
+//! not tokens. Ported from the TypeScript version with its tests.
 
 use std::collections::HashSet;
 

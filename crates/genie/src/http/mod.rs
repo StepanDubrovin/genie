@@ -1,7 +1,7 @@
 //! HTTP API and web UI.
 //!
-//! Routes of the TypeScript server (`src/web/server.ts`) keep their paths and JSON
-//! so the SPA works unchanged; project scope comes from the project cookie,
+//! Routes keep the paths and JSON of the TypeScript version's server, which the
+//! SPA was written against; project scope comes from the project cookie,
 //! `X-Genie-Project` or `?project=`. Protections: loopback bind by default,
 //! Host allowlist (DNS rebinding), `X-Genie: 1` on cookie-authenticated writes
 //! (cross-site forms cannot send it), no CORS.

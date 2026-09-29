@@ -1,5 +1,5 @@
-//! Answers of the API as plain text for people and language models. Ports the
-//! essentials of `src/tracker/render.ts` and of the TypeScript command line.
+//! Answers of the API as plain text for people and language models, as the
+//! command line of the TypeScript version printed them.
 
 use serde_json::{Value, json};
 

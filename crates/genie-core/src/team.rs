@@ -1,5 +1,5 @@
 //! Teams, members and peer-to-peer mail, stored in the project's tracker
-//! database. Port of `src/team/bus.ts` and `src/team/digest.ts`, extended for
+//! database. Ported from the TypeScript version's team bus, extended for
 //! live agent sessions:
 //!
 //! - a live session (a long-running `pi --mode rpc`) takes its mail in

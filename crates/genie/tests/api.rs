@@ -455,3 +455,23 @@ async fn images_come_from_the_repository_or_the_teams_worktree_and_nowhere_else(
     let (s, _, _) = call(&h.remote, "GET", "/api/images?path=docs%2Fshot.png&project=shop").bearer(&agent).no_csrf().send_raw().await;
     assert_ne!(s, StatusCode::OK);
 }
+
+/// Moving from the pi extension: the repository's `.genie/` — here the one the
+/// TypeScript CLI wrote — joins the server in place, with its tasks and ids.
+#[tokio::test]
+async fn a_repository_tracker_from_the_pi_extension_joins_with_its_tasks() {
+    let h = Harness::new();
+    let repo = h.dir.path().join("my-repo");
+    std::fs::create_dir_all(repo.join(".genie")).unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../genie-core/tests/fixtures/ts-tracker.db");
+    std::fs::copy(fixture, repo.join(".genie/genie.db")).unwrap();
+    let r = &h.router;
+    let (s, p, _) = call(r, "POST", "/api/projects").json(json!({ "slug": "shop", "repo": repo.to_string_lossy() })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{p}");
+    assert_eq!(p["trackerDir"], repo.join(".genie").canonicalize().unwrap().to_string_lossy().as_ref(), "registered in place");
+    let (s, task, _) = call(r, "GET", "/api/tasks/TS-1").header("x-genie-project", "shop").send().await;
+    assert_eq!(s, StatusCode::OK, "{task}");
+    assert_eq!((task["title"].as_str(), task["status"].as_str()), (Some("Export"), Some("needs_owner")));
+    let (s, next, _) = call(r, "POST", "/api/tasks").header("x-genie-project", "shop").json(json!({ "title": "Next" })).send().await;
+    assert_eq!((s, next["id"].as_str()), (StatusCode::CREATED, Some("TS-2")), "{next}");
+}

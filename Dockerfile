@@ -21,9 +21,7 @@ WORKDIR /src
 COPY package.json package-lock.json tsconfig.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --ignore-scripts --no-audit --no-fund
-# The UI imports shared types and helpers from src/.
 COPY web ./web
-COPY src ./src
 RUN npm run build:web
 
 # ---- server -------------------------------------------------------------------------------------

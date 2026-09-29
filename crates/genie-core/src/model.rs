@@ -1,6 +1,6 @@
 //! Task model and workflow rules shared by the server, the CLI and agent tools.
-//! Port of `src/tracker/model.ts`; the transition table and the DoR/DoD checks
-//! must stay identical to it until the TypeScript core is removed.
+//! Ported from the TypeScript tracker, whose transition table and DoR/DoD
+//! checks it keeps.
 
 use std::collections::HashSet;
 use std::fmt;

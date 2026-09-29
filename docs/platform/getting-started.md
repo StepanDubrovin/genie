@@ -52,7 +52,7 @@ cargo build --release -p genie          # бинарь target/release/genie
 
 Веб встраивается, если `web/dist` собран до `cargo build`; `GENIE_WEB_DIST=web/dist cargo build --release -p genie` требует его и пересобирает бинарь с ним. Бинарь без встроенного веба раздаёт `web/dist` из текущего каталога, `serve --web <каталог>` — веб из каталога (свежая сборка без пересборки бинаря).
 
-Пока на сервере нет пользователей, веб открыт без входа — но только с этой машины (loopback). Репозиторий, где уже есть `.genie/`, подключается со всеми задачами на месте: TS-инструменты продолжают работать с тем же файлом.
+Пока на сервере нет пользователей, веб открыт без входа — но только с этой машины (loopback). Репозиторий, где уже есть `.genie/` (от расширения pi), подключается со всеми задачами на месте — [[#Переход с расширения pi]].
 
 Всё это можно сделать и в вебе: сервер без проектов предлагает создать первый, а на странице «Проект и люди» в локальном режиме — учётную запись администратора (после неё вход обязателен для всех).
 
@@ -338,6 +338,26 @@ sudo -iu genie env GENIE_DATA=/var/lib/genie /opt/genie/bin/genie doctor
 - Секреты MCP-подключений (`${env:NAME}` в `mcp.json`) — в `/etc/genie/secrets.env`: они остаются у сервера и не попадают агентам.
 - `genie-backup.timer` — копия каждый день в 03:30 в `/var/backups/genie`, 14 последних. Копируйте этот каталог и на другую машину.
 - Журнал сервера — `journalctl -u genie -f`.
+
+## Переход с расширения pi
+
+Первая версия genie — расширение pi с локальным трекером (`pi install …/genie`, `/genie` в pi, `genie web`, CLI `bin/genie`) — удалена: genie теперь сервер. Задачи, история, артефакты и переписка лежат в `.genie/genie.db` репозитория и переезжают на месте.
+
+1. Соберите и запустите сервер ([[#Сборка и первый запуск]]) и подключите репозиторий: `genie project add shop --name "Магазин" --repo ~/projects/my-repo`. Сервер находит в репозитории `.genie/` и регистрирует трекер на месте: задачи с прежними номерами (`TS-1` остаётся `TS-1`, следующая — `TS-2`).
+2. Уберите пакет из pi — `pi remove <путь, с которым ставили>` (например `pi remove ~/projects/personal/genie`) — и ссылку на старый CLI (`rm ~/.local/bin/genie`); на её место — бинарь сервера `target/release/genie`.
+3. Оркестратор в своей сессии pi — `genie orchestrate --project shop` ([[#Оркестратор — ваша сессия pi]]); пока вы не держите пульт, оркестратор — агент сервера.
+4. Свой агент (Claude Code, pi, Codex) получает инструменты genie через MCP-сервер ([[#Свой агент: MCP-сервер genie]]).
+5. Настройки расширения (`~/.pi/agent/genie/config.json`, `<.genie>/config.json`, `/genie settings`) сервер не читает: модели ролей — `roleModels` в `config.json` каталога данных или страница «Агенты» в вебе, свои роли и шаблоны команд — в `<data>/agents/` и `<data>/teams/` ([[#Роли и шаблоны команд]]).
+
+| Было | Стало |
+|---|---|
+| `/genie`, `genie board` | веб или `genie task board` |
+| `genie new "…"`, `genie epic "…"` | `genie task create "…"` (`--type epic`, `--epic G-3`) |
+| `genie show G-7`, `genie artifact-show G-7 2` | `genie task show G-7`, `genie task artifact-read 2 --task G-7` |
+| `genie send G-7 <кому> "…"` | `genie mail send <кому> "…" --team <команда>` |
+| `/genie team G-7 add/remove/stop`, `/genie recover` | `genie team add-member`, `remove-member`, `stop`, `restart` (и экран команды в вебе) |
+| `genie web [--tailscale]` | `genie serve`; доступ из сети — `bind`, `allowHosts`, `publicUrl` |
+| инструменты `genie_task`, `team_send`, `artifact_read`… | MCP-сервер genie: `genie_task`, `genie_mail`, `genie_team`, `genie_docs` с `action` |
 
 ## Проверки
 

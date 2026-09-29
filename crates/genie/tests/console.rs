@@ -43,7 +43,7 @@ async fn a_project_admin_takes_the_console_and_only_its_session_takes_the_orches
     let token = v["token"].as_str().unwrap().to_string();
     let prompt = v["prompt"].as_str().unwrap();
     assert!(prompt.contains("## The console") && prompt.contains("@anna"), "{prompt}");
-    assert!(prompt.contains("| `team_spawn` |"), "the orchestrator's own command table");
+    assert!(prompt.contains("| `genie_team` spawn |"), "the orchestrator's own command table");
     assert_eq!(v["console"]["user"], "anna");
     let (s, _) = api(&h, "POST", "/api/orchestrator/console", &token, Some(json!({}))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "an agent does not take the console");

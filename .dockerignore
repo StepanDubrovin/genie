@@ -1,6 +1,6 @@
 # Build context for `docker build .`: only what the image needs.
 # The Rust stage needs Cargo.*, crates/, config/ and agents/ (embedded into the binary);
-# the web stage needs package*.json, tsconfig.json, web/ and src/ (the UI imports shared types from it).
+# the web stage needs package*.json, tsconfig.json and web/.
 
 .git
 .github
@@ -22,9 +22,6 @@ web/dist
 
 docs
 test
-scripts
-skills
-bin
 crates/*/tests
 README.md
 CHANGELOG.md

@@ -20,7 +20,6 @@ on:
       - config/**
       - agents/**
       - web/**
-      - src/**
       - package.json
       - package-lock.json
       - tsconfig.json
