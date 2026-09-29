@@ -46,6 +46,23 @@ echo 'пароль-не-короче-8' | docker compose exec -T genie genie use
 
 `docker compose exec genie genie …` запускает CLI от пользователя сервера (обёртка `/usr/local/bin/genie`): файлы в `/data` не станут принадлежать root. Любая другая команда через `docker exec` стартует от root — добавляйте `-u genie`.
 
+## Готовый образ из GitHub Container Registry
+
+Workflow `.github/workflows/docker.yml` собирает образ, прогоняет `docker/smoke-test.sh` (старт, здоровье, веб, пользователь, права, остановка по SIGINT) и публикует его как `ghcr.io/<владелец>/<репозиторий>`: при пуше в `main` — теги `latest`, `main`, `sha-…`, при теге `vX.Y.Z` — `X.Y.Z` и `X.Y`. На pull request образ только собирается и проверяется. Собирается `linux/amd64`.
+
+Пакет, опубликованный из приватного репозитория, приватный: скачать его без токена нельзя. На сервере:
+
+1. Создайте personal access token (classic) со скоупом `read:packages` (у GHCR нет fine-grained токенов для пакетов). Лучше отдельным служебным аккаунтом или токеном с коротким сроком.
+2. Войдите и запускайте готовый образ:
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-логин> --password-stdin
+echo 'GENIE_IMAGE=ghcr.io/<владелец>/<репозиторий>:latest' >> .env
+docker compose pull && docker compose up -d
+```
+
+Для воспроизводимости на сервере фиксируйте тег (`:1.2.3` или `:sha-abc1234`), а не `latest`. Обновление — `docker compose pull && docker compose up -d`. Права пакета (кто может его читать, доступ других репозиториев) настраиваются на странице пакета: Settings → Package settings. Хранение и трафик приватных пакетов учитываются по тарифу аккаунта; Actions-минуты на сборку тоже.
+
 ## Настройка
 
 Все переменные — в `.env.example`. Главное:

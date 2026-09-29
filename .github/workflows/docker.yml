@@ -1,0 +1,92 @@
+name: Docker image
+
+# Builds the server image and smoke-tests it on every change that can affect it. On main and on version
+# tags (v*) the image is also published to the GitHub Container Registry as ghcr.io/<owner>/<repo>.
+# A package published from a private repository is private too.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker/**
+      - docker-compose*.yml
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - config/**
+      - agents/**
+      - web/**
+      - src/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - .github/workflows/docker.yml
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  image:
+    name: Build, test, publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (single platform, loaded for the smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: genie:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: docker/smoke-test.sh genie:ci
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        if: github.event_name != 'pull_request'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=genie
+
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

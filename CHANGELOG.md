@@ -10,6 +10,7 @@
 - `Dockerfile` (сборка веба, Rust-сервера и рантайма с pi, git, ssh и ripgrep) и `docker-compose.yml` с томами `/data` и `/workspace`, проверкой здоровья, ротацией логов и урезанными правами контейнера.
 - Точка входа: сервер и агенты работают не от root, `GENIE_UID`/`GENIE_GID` подгоняют владельца под смонтированные репозитории, переменные окружения (`GENIE_PUBLIC_URL`, `GENIE_ALLOW_HOSTS`, `GENIE_BIND`) применяются к `config.json`, `pi-mcp-adapter` подключается сам, `GITHUB_TOKEN` работает как git-пароль без записи на диск.
 - Корректная остановка: tini как PID 1 от имени пользователя сервера (после стартового этапа от root), `STOPSIGNAL SIGINT`.
+- Публикация образа в GitHub Container Registry (`.github/workflows/docker.yml`) и smoke-тест `docker/smoke-test.sh`.
 - Секреты из файлов: `NAME_FILE` для `*_API_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET` (Docker secrets, `docker-compose.secrets.yml`); пример настройки LiteLLM (`docker/examples/litellm/`).
 - `genie` внутри контейнера понижает права до пользователя сервера, поэтому `docker exec … genie user add` не портит владельца `server.db`.
 
