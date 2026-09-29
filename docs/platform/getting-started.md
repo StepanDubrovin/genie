@@ -13,6 +13,8 @@ verified: 2026-09-28
 
 Архитектура и решения — [[platform/vision]], [[platform/backend]]; автоматизации — [[platform/automations]]; знания — [[platform/knowledge-vault]].
 
+Запуск в контейнере — [[platform/docker]].
+
 ## Что это
 
 Один процесс `genie serve` на машине команды:

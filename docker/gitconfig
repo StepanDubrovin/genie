@@ -1,0 +1,27 @@
+# System-wide git settings of the genie image (/etc/gitconfig).
+# Every layer above can override them: ~/.gitconfig, a repository's config, GIT_* variables.
+
+[safe]
+	# Repositories are bind-mounted and often owned by another uid; agents must still be able to use them.
+	directory = *
+
+[init]
+	defaultBranch = main
+
+[user]
+	# Fallback author for commits by agents and the vault. Override with GIT_AUTHOR_NAME/EMAIL
+	# and GIT_COMMITTER_NAME/EMAIL (or a ~/.gitconfig in the data volume).
+	name = genie
+	email = genie@genie.local
+
+[pull]
+	ff = only
+
+[advice]
+	detachedHead = false
+
+[credential "https://github.com"]
+	# HTTPS access with a token from the container's environment (GITHUB_TOKEN, GH_TOKEN or GENIE_GIT_TOKEN).
+	# Read at use time, never written to disk; silent when no token is set. Works for agents and for
+	# people in `docker exec` shells alike.
+	helper = "!f() { test \"$1\" = get || exit 0; t=\"${GITHUB_TOKEN:-${GH_TOKEN:-${GENIE_GIT_TOKEN:-}}}\"; test -n \"$t\" || exit 0; echo username=x-access-token; echo password=$t; }; f"

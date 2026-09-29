@@ -78,3 +78,12 @@ cargo build --release -p genie && npm install && npm run build:web
 echo 'пароль' | ./target/release/genie user add anna --admin --password-stdin   # когда нужен вход и коллеги
 cargo test                                                            # в том числе оба сценария владельца end-to-end
 ```
+
+**В Docker** (сервер, один образ: genie + веб + pi + git):
+
+```bash
+cp .env.example .env && docker compose up -d --build
+echo 'пароль' | docker compose exec -T genie genie user add admin --admin --password-stdin
+```
+
+Тома, репозитории, ключи моделей, git-доступ, прокси и бэкапы — [docs/platform/docker.md](docs/platform/docker.md).
