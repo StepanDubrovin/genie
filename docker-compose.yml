@@ -34,6 +34,10 @@ services:
       GENIE_ALLOW_HOSTS: ${GENIE_ALLOW_HOSTS:-}
       TZ: ${TZ:-UTC}
 
+    # A LiteLLM (or any service) running on the Docker host is reachable as host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     volumes:
       - genie-data:/data
       - genie-workspace:/workspace

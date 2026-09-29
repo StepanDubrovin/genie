@@ -97,6 +97,37 @@ docker compose exec -u genie genie chmod 600 /data/home/.pi/agent/models.json
 
 Доверие к проектным ресурсам pi (`defaultProjectTrust`) остаётся по умолчанию: не интерактивный запуск не загружает расширения из `.pi/` репозитория. Навыки роли genie передаёт агенту явно.
 
+## LiteLLM и секреты
+
+Готовая конфигурация под LiteLLM — в `docker/examples/litellm/`:
+
+- `models.json` — провайдер `litellm` для pi; ключ берётся из переменной окружения (`"apiKey": "$LITELLM_API_KEY"`), в файле его нет. Адрес `baseUrl` замените на свой: LiteLLM на самом хосте доступен из контейнера как `host.docker.internal` (в `docker-compose.yml` он уже прописан), `localhost` внутри контейнера — это сам контейнер.
+- `config.json` — `roleModels` для всех ролей на `litellm/…`. Встроенные значения по умолчанию ссылаются ещё и на `openai-codex/…` и `litellm/claude-opus-5-5`, поэтому набор моделей нужно задать явно. В примере аналитик, ревьюер, оркестратор и исследователь — `gpt-6-sol`, исполнитель, тестер и документатор — `gpt-6-luna`; подставьте свои.
+
+```bash
+docker compose cp docker/examples/litellm/models.json genie:/data/home/.pi/agent/models.json
+docker compose exec -u genie genie sh -c 'chmod 600 ~/.pi/agent/models.json'
+# roleModels: добавьте содержимое config.json в /data/config.json и перезапустите
+docker compose restart genie
+```
+
+Ключ передаётся серверу, агенты pi наследуют его:
+
+```bash
+# вариант 1: переменная окружения (.env)
+LITELLM_API_KEY=sk-…
+
+# вариант 2: Docker secret (файл), ключ не попадает в .env и в `docker inspect`
+mkdir -p secrets && chmod 700 secrets && printf '%s' 'sk-…' > secrets/litellm_api_key && chmod 600 secrets/litellm_api_key
+docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
+```
+
+Для любой переменной вида `*_API_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET` работает суффикс `_FILE`: `GITHUB_TOKEN_FILE=/run/secrets/github` превращается в `GITHUB_TOKEN`, прочитанный из файла (пробельный хвост отбрасывается). Явно заданная переменная приоритетнее файла. Файл читается на старте от root, поэтому права `0400` не мешают. Так же передаются секреты MCP-серверов из `mcp.json` (`${env:JIRA_API_TOKEN}` → `JIRA_API_TOKEN_FILE`): сервер держит их у себя, а агентам не отдаёт, если подключение идёт через шлюз (см. [[platform/getting-started]]).
+
+Проверено сквозным тестом с поддельным LiteLLM на хосте: оркестратор стартует на `litellm/gpt-6-sol`, запрос уходит на `host.docker.internal` с `Authorization: Bearer <ключ из файла>`, ответ доходит до сессии.
+
+Локальную обёртку с Bitwarden Secrets Manager в образ переносить не нужно: `secret-tool` и keyring в контейнере нет. Секрет достаёт инфраструктура (Docker secret, оркестратор, `bws run -- docker compose up`), а контейнер получает готовое значение.
+
 ## Репозитории проектов
 
 Два способа.
