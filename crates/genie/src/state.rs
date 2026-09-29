@@ -75,14 +75,6 @@ impl App {
             vault.ensure_space(&p.slug, p.repo.as_deref().map(Path::new))?;
         }
         let agents = AgentConfig::load(data, &cfg, None);
-        for p in agents.errors() {
-            eprintln!(
-                "genie: agent configuration: {}{}: {}",
-                p.item,
-                p.path.as_deref().map(|x| format!(" ({x})")).unwrap_or_default(),
-                p.message
-            );
-        }
         Ok(Arc::new(App {
             data: data.to_path_buf(),
             cfg,
@@ -98,6 +90,18 @@ impl App {
             agents: RwLock::new(Arc::new(agents)),
             mcp: Default::default(),
         }))
+    }
+
+    /// Print the errors of the agent configuration (when the server starts).
+    pub fn print_agent_errors(&self) {
+        for p in self.agents().errors() {
+            eprintln!(
+                "genie: agent configuration: {}{}: {}",
+                p.item,
+                p.path.as_deref().map(|x| format!(" ({x})")).unwrap_or_default(),
+                p.message
+            );
+        }
     }
 
     /// The current agent configuration (a snapshot: cheap to clone, never torn).

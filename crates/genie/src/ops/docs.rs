@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::{Cx, Entry, Need, Op, Out, enc, register, render};
 
 pub fn register(all: &mut Vec<Entry>) {
-    register!(all, Search, Read, Tree, Write, Note, Impact);
+    register!(all, Search, Read, Tree, Write, Note, Impact, Proposals, Proposal, Approve, Reject, Spaces, Space, Changelog, Release);
 }
 
 /// Full-text search over the project's pages; deprecated pages only when --status asks for them.
@@ -211,5 +211,232 @@ impl Op for Impact {
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v: Value = cx.call("GET", &format!("/tasks/{}/docs-impact", enc(&cx.task(self.task)?)), None).await?;
         Ok(Out::new(render::impact(&v), v))
+    }
+}
+
+fn st<'a>(v: &'a Value, k: &str) -> &'a str {
+    v[k].as_str().unwrap_or_default()
+}
+
+fn proposal_line(p: &Value) -> String {
+    format!(
+        "#{:<4} {:<9} {}  by {} ({}){}{}",
+        p["id"].to_string(),
+        st(p, "status"),
+        st(p, "path"),
+        st(p, "author"),
+        st(p, "authorKind"),
+        p["task"].as_str().map(|t| format!(" for {t}")).unwrap_or_default(),
+        if st(p, "note").is_empty() { String::new() } else { format!(" — {}", st(p, "note")) }
+    )
+}
+
+/// Proposed changes to pages waiting for their owners (--status open, approved, rejected, superseded or all).
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct Proposals {
+    #[arg(long, default_value = "open")]
+    #[serde(default = "open")]
+    pub status: String,
+}
+
+fn open() -> String {
+    "open".into()
+}
+
+impl Op for Proposals {
+    const GROUP: &'static str = "docs";
+    const NAME: &'static str = "proposals";
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let v = cx.call("GET", &format!("/docs/proposals?status={}", enc(&self.status)), None).await?;
+        let rows = v.as_array().cloned().unwrap_or_default();
+        let text = if rows.is_empty() {
+            format!("no {} proposals", self.status)
+        } else {
+            rows.iter().map(proposal_line).collect::<Vec<_>>().join("\n")
+        };
+        Ok(Out::new(text, v))
+    }
+}
+
+/// A proposal: the proposed page next to the current one, and who decides.
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct Proposal {
+    pub id: i64,
+}
+
+impl Op for Proposal {
+    const GROUP: &'static str = "docs";
+    const NAME: &'static str = "proposal";
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let v = cx.call("GET", &format!("/docs/proposals/{}", self.id), None).await?;
+        let p = &v["proposal"];
+        let owners: Vec<&str> = v["owners"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+        let mut out = vec![proposal_line(p)];
+        out.push(format!("decides: {}", if owners.is_empty() { "the project's admins".to_string() } else { owners.join(", ") }));
+        if let Some(by) = p["decidedBy"].as_str() {
+            out.push(format!("decided by {by}{}", p["decisionNote"].as_str().map(|n| format!(": {n}")).unwrap_or_default()));
+        }
+        out.push(String::new());
+        out.push("## Proposed".into());
+        out.push(st(p, "content").to_string());
+        out.push(String::new());
+        out.push("## Current".into());
+        out.push(v["current"].as_str().unwrap_or("(the page does not exist yet)").to_string());
+        Ok(Out::new(out.join("\n"), v))
+    }
+}
+
+/// Apply a proposal to its page (the section's owners and the project's admins).
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct Approve {
+    pub id: i64,
+    #[arg(long, allow_hyphen_values = true)]
+    pub note: Option<String>,
+    /// Apply it even though the page changed since it was proposed.
+    #[arg(long)]
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl Op for Approve {
+    const GROUP: &'static str = "docs";
+    const NAME: &'static str = "approve";
+    const NEED: Need = Need::Admin;
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let v = cx
+            .call("POST", &format!("/docs/proposals/{}/approve", self.id), Some(json!({ "note": self.note, "force": self.force })))
+            .await?;
+        Ok(Out::new(format!("proposal #{} approved: {} changed", self.id, st(&v, "path")), v))
+    }
+}
+
+/// Turn a proposal down (the section's owners and the project's admins).
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct Reject {
+    pub id: i64,
+    /// Why, for its author.
+    #[arg(long, allow_hyphen_values = true)]
+    pub note: Option<String>,
+}
+
+impl Op for Reject {
+    const GROUP: &'static str = "docs";
+    const NAME: &'static str = "reject";
+    const NEED: Need = Need::Admin;
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let v = cx.call("POST", &format!("/docs/proposals/{}/reject", self.id), Some(json!({ "note": self.note }))).await?;
+        Ok(Out::new(format!("proposal #{} rejected", self.id), v))
+    }
+}
+
+fn policy(p: &Value) -> String {
+    if p.is_null() { "default".into() } else { format!("people {}, agents {}", st(p, "humans"), st(p, "agents")) }
+}
+
+fn space_line(name: &str, sp: &Value) -> String {
+    let owners: Vec<&str> = sp["owners"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    format!(
+        "{name}/  project {} · owners {} · {}",
+        sp["project"].as_str().unwrap_or("—"),
+        if owners.is_empty() { "—".into() } else { owners.join(", ") },
+        policy(&sp["policy"])
+    )
+}
+
+/// Spaces of the vault (top-level folders): their project, owners and who publishes directly.
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct Spaces {}
+
+impl Op for Spaces {
+    const GROUP: &'static str = "docs";
+    const NAME: &'static str = "spaces";
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let v = cx.call("GET", "/docs/spaces", None).await?;
+        let mut out = Vec::new();
+        for (name, sp) in v["spaces"].as_object().cloned().unwrap_or_default() {
+            out.push(space_line(&name, &sp));
+            for (sec, cfg) in sp["sections"].as_object().cloned().unwrap_or_default() {
+                out.push(format!("  {name}/{sec}/  {}", policy(&cfg["policy"])));
+            }
+        }
+        out.push(format!("outside the spaces: {}", policy(&v["policy"])));
+        Ok(Out::new(out.join("\n"), v))
+    }
+}
+
+/// Set up a space: its project, owners and who publishes directly (direct, review or locked); sections stay (server admins and the project's admins).
+#[derive(clap::Args, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Space {
+    pub name: String,
+    /// The project whose code its pages describe.
+    #[arg(long = "of")]
+    pub of: Option<String>,
+    /// An owner's login; repeat for more. Owners decide on proposals.
+    #[arg(long = "owner")]
+    pub owners: Option<Vec<String>>,
+    /// How people publish: direct, review or locked.
+    #[arg(long)]
+    pub humans: Option<String>,
+    /// How agents publish: direct, review or locked.
+    #[arg(long)]
+    pub agents: Option<String>,
+}
+
+impl Op for Space {
+    const GROUP: &'static str = "docs";
+    const NAME: &'static str = "space";
+    const NEED: Need = Need::Admin;
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let all = cx.call("GET", "/docs/spaces", None).await?;
+        let mut sp = all["spaces"][&self.name].clone();
+        if sp.is_null() {
+            sp = json!({ "project": null, "owners": [], "policy": null, "sections": {} });
+        }
+        if let Some(p) = self.of {
+            sp["project"] = if p.is_empty() { Value::Null } else { json!(p) };
+        }
+        if let Some(o) = self.owners {
+            sp["owners"] = json!(o);
+        }
+        if self.humans.is_some() || self.agents.is_some() {
+            let cur = sp["policy"].clone();
+            let pick =
+                |given: Option<String>, k: &str, default: &str| given.unwrap_or_else(|| cur[k].as_str().unwrap_or(default).to_string());
+            sp["policy"] = json!({ "humans": pick(self.humans, "humans", "direct"), "agents": pick(self.agents, "agents", "review") });
+        }
+        let v = cx.call("PUT", &format!("/docs/spaces/{}", enc(&self.name)), Some(sp)).await?;
+        Ok(Out::new(space_line(&self.name, &v["spaces"][&self.name]), v))
+    }
+}
+
+/// The project's changelog page.
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct Changelog {}
+
+impl Op for Changelog {
+    const GROUP: &'static str = "docs";
+    const NAME: &'static str = "changelog";
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let v = cx.call("GET", "/docs/changelog", None).await?;
+        Ok(Out::new(format!("{}\n\n{}", st(&v, "path"), st(&v, "content")), v))
+    }
+}
+
+/// Release the changelog's unreleased entries as a version (project admins).
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct Release {
+    /// A single word such as 1.2.0.
+    pub version: String,
+}
+
+impl Op for Release {
+    const GROUP: &'static str = "docs";
+    const NAME: &'static str = "release";
+    const NEED: Need = Need::Admin;
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let v = cx.call("POST", "/docs/changelog/release", Some(json!({ "version": self.version }))).await?;
+        let notes = v["notes"].as_str().map(str::to_string).unwrap_or_else(|| v["notes"].to_string());
+        Ok(Out::new(format!("released {}\n\n{notes}", self.version), v))
     }
 }

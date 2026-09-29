@@ -18,6 +18,7 @@ pub fn register(all: &mut Vec<Entry>) {
         ProjectMember,
         ProjectRemoveMember,
         ProjectInvite,
+        ProjectEvents,
         UserList,
         UserAdd,
         UserUpdate,
@@ -250,6 +251,59 @@ impl Op for ProjectInvite {
     }
 }
 
+/// What happened in the project, event by event: the most recent ones, or those after --after (oldest first).
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct ProjectEvents {
+    /// Events after this one (the last id printed before).
+    #[arg(long)]
+    pub after: Option<i64>,
+    #[arg(long, default_value_t = 30)]
+    #[serde(default = "thirty")]
+    pub limit: i64,
+}
+
+fn thirty() -> i64 {
+    30
+}
+
+impl Op for ProjectEvents {
+    const GROUP: &'static str = "project";
+    const NAME: &'static str = "events";
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let limit = self.limit.clamp(1, 1000);
+        let after = match self.after {
+            Some(a) => a,
+            None => (cx.call("GET", "/journal?limit=0", None).await?["last"].as_i64().unwrap_or(0) - limit).max(0),
+        };
+        let v = cx.call("GET", &format!("/journal?after={after}&limit={limit}"), None).await?;
+        let mut out = Vec::new();
+        for e in v["events"].as_array().cloned().unwrap_or_default() {
+            let payload = match &e["payload"] {
+                Value::Object(o) if o.is_empty() => String::new(),
+                Value::Null => String::new(),
+                p => {
+                    let text = p.to_string();
+                    if text.chars().count() > 160 {
+                        format!(" {}…", text.chars().take(160).collect::<String>())
+                    } else {
+                        format!(" {text}")
+                    }
+                }
+            };
+            out.push(format!(
+                "#{:<6} {} {:<22} {}{} ({}){payload}",
+                e["id"].to_string(),
+                s(&e, "at"),
+                s(&e, "type"),
+                e["subject"].as_str().map(|x| format!("{x} ")).unwrap_or_default(),
+                s(&e, "actor"),
+                s(&e, "actorRole")
+            ));
+        }
+        Ok(Out::new(if out.is_empty() { "nothing yet".into() } else { out.join("\n") }, v))
+    }
+}
+
 /// People with access to the server.
 #[derive(clap::Args, Deserialize, JsonSchema)]
 pub struct UserList {}
@@ -435,13 +489,14 @@ impl Op for Doctor {
             }
         }
         let count = |l: &str| checks.iter().filter(|c| c["level"] == json!(l)).count();
+        let failed = count("fail");
         lines.push(String::new());
-        lines.push(match (count("fail"), count("warn")) {
+        lines.push(match (failed, count("warn")) {
             (0, 0) => "everything is ready".to_string(),
             (0, w) => format!("ready, {w} warning(s)"),
             (f, _) => format!("{f} problem(s) to fix before people and agents can work"),
         });
-        Ok(Out::new(lines.join("\n"), v))
+        Ok(Out::new(lines.join("\n"), v).failing_if(failed > 0, format!("{failed} check(s) failed")))
     }
 }
 

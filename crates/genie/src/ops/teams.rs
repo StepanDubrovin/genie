@@ -1,4 +1,4 @@
-//! Teams of agents, and the result of a one-shot job.
+//! Teams of agents and one-shot jobs.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -25,7 +25,11 @@ pub fn register(all: &mut Vec<Entry>) {
         SetStatus,
         Templates,
         Roles,
-        Output
+        Turns,
+        Output,
+        JobList,
+        JobShow,
+        JobStart
     );
 }
 
@@ -435,17 +439,9 @@ impl Op for Roles {
 pub struct Output {
     /// The result: a JSON object (its text on the command line, `-` reads stdin).
     #[arg(allow_hyphen_values = true, value_name = "JSON")]
-    #[serde(deserialize_with = "json_text")]
+    #[serde(deserialize_with = "super::json_text")]
     #[schemars(with = "serde_json::Map<String, Value>")]
     pub result: String,
-}
-
-/// JSON given as text (the command line) or as itself (MCP).
-fn json_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    Ok(match Value::deserialize(d)? {
-        Value::String(s) => s,
-        v => v.to_string(),
-    })
 }
 
 impl Op for Output {
@@ -458,5 +454,173 @@ impl Op for Output {
         let v: Value = serde_json::from_str(&text).map_err(|e| format!("the output must be JSON: {e}"))?;
         let r = cx.call("POST", "/agent/output", Some(json!({ "output": v }))).await?;
         Ok(Out::new("result recorded", r))
+    }
+}
+
+/// Recent turns of the project's agents: when each ran, how it ended, why it failed.
+#[derive(clap::Args, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Turns {
+    /// One agent only: `orchestrator`, `<team>/<member>` or `job-<id>`.
+    #[arg(long)]
+    pub agent: Option<String>,
+    #[arg(long, default_value_t = 20)]
+    #[serde(default = "twenty")]
+    pub limit: usize,
+    /// Print each turn's log too.
+    #[arg(long)]
+    #[serde(default)]
+    pub log: bool,
+}
+
+fn twenty() -> usize {
+    20
+}
+
+impl Op for Turns {
+    const GROUP: &'static str = "team";
+    const NAME: &'static str = "turns";
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let agent = self.agent.as_deref().map(|a| format!("&agent={}", enc(a))).unwrap_or_default();
+        let v = cx.call("GET", &format!("/turns?limit={}{agent}", self.limit), None).await?;
+        let mut out = Vec::new();
+        for t in v.as_array().cloned().unwrap_or_default() {
+            out.push(format!(
+                "#{:<5} {:<24} {:<9} {} → {}{}",
+                t["id"].to_string(),
+                t["agent"].as_str().unwrap_or_default(),
+                t["status"].as_str().unwrap_or_default(),
+                t["started"].as_str().unwrap_or_default(),
+                t["finished"].as_str().unwrap_or("…"),
+                t["exitCode"].as_i64().map(|c| format!(" exit {c}")).unwrap_or_default()
+            ));
+            if let Some(e) = t["error"].as_str() {
+                out.push(format!("       error: {e}"));
+            }
+            if self.log
+                && let Some(log) = t["log"].as_str().filter(|l| !l.trim().is_empty())
+            {
+                out.extend(log.lines().map(|l| format!("       | {l}")));
+            }
+        }
+        Ok(Out::new(if out.is_empty() { "no turns".into() } else { out.join("\n") }, v))
+    }
+}
+
+fn job_line(j: &Value) -> String {
+    let goal = j["goal"].as_str().unwrap_or_default().lines().next().unwrap_or_default();
+    let goal: String =
+        if goal.chars().count() > 80 { format!("{}…", goal.chars().take(80).collect::<String>()) } else { goal.to_string() };
+    format!(
+        "#{:<5} {:<10} {:<14} {}{}",
+        j["id"].to_string(),
+        j["status"].as_str().unwrap_or_default(),
+        j["role"].as_str().unwrap_or_default(),
+        j["task"].as_str().map(|t| format!("for {t}: ")).unwrap_or_default(),
+        goal
+    )
+}
+
+/// One-shot jobs of the project, newest first.
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct JobList {}
+
+impl Op for JobList {
+    const GROUP: &'static str = "job";
+    const NAME: &'static str = "list";
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let v = cx.call("GET", "/jobs", None).await?;
+        let rows = v.as_array().cloned().unwrap_or_default();
+        Ok(Out::new(if rows.is_empty() { "no jobs".into() } else { rows.iter().map(job_line).collect::<Vec<_>>().join("\n") }, v))
+    }
+}
+
+/// A one-shot job: its goal, inputs, and the result or the error.
+#[derive(clap::Args, Deserialize, JsonSchema)]
+pub struct JobShow {
+    pub id: i64,
+}
+
+impl Op for JobShow {
+    const GROUP: &'static str = "job";
+    const NAME: &'static str = "show";
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let j = cx.call("GET", &format!("/jobs/{}", self.id), None).await?;
+        let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
+        let mut out = vec![
+            job_line(&j),
+            format!(
+                "workspace {} · model {} · attempts {} · created {}{}",
+                j["workspace"].as_str().unwrap_or_default(),
+                j["model"].as_str().unwrap_or("default"),
+                j["attempts"],
+                j["created"].as_str().unwrap_or_default(),
+                j["finished"].as_str().map(|f| format!(" · finished {f}")).unwrap_or_default()
+            ),
+            String::new(),
+            j["goal"].as_str().unwrap_or_default().to_string(),
+        ];
+        if j["inputs"].as_object().is_some_and(|o| !o.is_empty()) {
+            out.push(format!("\ninputs: {}", pretty(&j["inputs"])));
+        }
+        if !j["output"].is_null() {
+            out.push(format!("\noutput: {}", pretty(&j["output"])));
+        }
+        if let Some(e) = j["error"].as_str() {
+            out.push(format!("\nerror: {e}"));
+        }
+        Ok(Out::new(out.join("\n"), j))
+    }
+}
+
+/// Start a one-shot job: an agent of a role does one thing and reports a result (orchestrator and people).
+#[derive(clap::Args, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JobStart {
+    /// A role that is not the orchestrator (`genie team roles`).
+    #[arg(long)]
+    pub role: String,
+    /// What to do.
+    #[arg(allow_hyphen_values = true)]
+    pub goal: String,
+    /// The task it works for.
+    #[arg(long)]
+    pub task: Option<String>,
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Inputs as key=value; repeat for more.
+    #[arg(long = "input")]
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    /// JSON schema the result must follow.
+    #[arg(long, allow_hyphen_values = true, value_name = "JSON")]
+    #[serde(default, deserialize_with = "super::opt_json_text")]
+    #[schemars(with = "Option<serde_json::Map<String, Value>>")]
+    pub output_schema: Option<String>,
+    /// Where it works: none, read-only (the project's code) or worktree.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+impl Op for JobStart {
+    const GROUP: &'static str = "job";
+    const NAME: &'static str = "start";
+    const NEED: Need = Need::Orchestrator;
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let schema: Option<Value> = match cx.text(self.output_schema, None)? {
+            Some(t) => Some(serde_json::from_str(&t).map_err(|e| format!("the output schema must be JSON: {e}"))?),
+            None => None,
+        };
+        let body = json!({
+            "role": self.role,
+            "goal": self.goal,
+            "task": self.task,
+            "model": self.model,
+            "inputs": super::pairs(&self.inputs, "--input")?,
+            "outputSchema": schema,
+            "workspace": self.workspace,
+        });
+        let j = cx.call("POST", "/jobs", Some(body)).await?;
+        Ok(Out::new(format!("started {}; see `genie job show {}`", job_line(&j), j["id"]), j))
     }
 }

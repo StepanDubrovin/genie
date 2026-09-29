@@ -16,18 +16,22 @@ use std::sync::OnceLock;
 use clap::{ArgMatches, Command};
 use futures_util::future::BoxFuture;
 use schemars::JsonSchema;
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 mod admin;
+mod agents;
 pub mod api;
+mod automations;
 mod docs;
 mod mail;
+mod me;
 pub mod render;
 mod tasks;
 mod teams;
 
-pub use api::{Api, Auth, InProcess, Remote};
+pub use api::{Api, Auth, InProcess, Payload, Remote};
 
 /// Who an operation is for. The API decides every call; this only keeps an
 /// operation out of the lists of those who cannot use it.
@@ -43,6 +47,8 @@ pub enum Need {
     Member,
     /// A one-shot job of an automation.
     Job,
+    /// People of the project, whatever their role; never agents.
+    Person,
     /// People who administer the server or a project; never agents.
     Admin,
 }
@@ -52,11 +58,21 @@ pub enum Need {
 pub struct Out {
     pub text: String,
     pub data: Value,
+    /// A report that found problems: shown in full, then the command fails with this.
+    pub failed: Option<String>,
 }
 
 impl Out {
     pub fn new(text: impl Into<String>, data: Value) -> Out {
-        Out { text: text.into(), data }
+        Out { text: text.into(), data, failed: None }
+    }
+
+    /// Fail after showing the report when `problem` holds.
+    pub fn failing_if(mut self, problem: bool, why: impl Into<String>) -> Out {
+        if problem {
+            self.failed = Some(why.into());
+        }
+        self
     }
 }
 
@@ -75,6 +91,11 @@ pub struct Cx {
 impl Cx {
     pub async fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
         self.api.call(method, path, body).await
+    }
+
+    /// A request whose body is a file's bytes.
+    pub async fn upload(&self, method: &str, path: &str, bytes: Vec<u8>) -> Result<Value, String> {
+        self.api.request(method, path, Payload::Bytes(bytes)).await
     }
 
     /// The task an operation is about: the given one, else the caller's own.
@@ -176,9 +197,13 @@ impl Entry {
         self.about.lines().next().unwrap_or_default()
     }
 
-    /// Its command line: `name` with its arguments.
+    /// Its command line: `name` with its arguments (`list` answers to `ls` too).
     pub fn command(&self, name: &str) -> Command {
-        (self.augment)(Command::new(name.to_string()).about(self.summary().to_string()).long_about(self.about.clone()))
+        let mut c = Command::new(name.to_string()).about(self.summary().to_string()).long_about(self.about.clone());
+        if name == "list" {
+            c = c.alias("ls");
+        }
+        (self.augment)(c)
     }
 
     pub fn run_cli<'a>(&self, m: &'a ArgMatches, cx: &'a Cx) -> BoxFuture<'a, Result<Out, String>> {
@@ -196,9 +221,12 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("team", "Teams of agents: assemble, look at, steer and stop them"),
     ("mail", "Mail between the members of a team, the orchestrator and people"),
     ("docs", "The project's knowledge base: search, read, write pages"),
-    ("job", "One-shot jobs of automations"),
-    ("project", "Projects of the server: add, settings, people and invitations"),
+    ("job", "One-shot jobs: start one, see what it did"),
+    ("automation", "Automations: rules that act on events, schedules and webhooks, and their runs"),
+    ("agents", "Roles, team templates, skills and MCP connections of the server"),
+    ("project", "Projects of the server: add, settings, people, invitations, what happened"),
     ("user", "People with access to the server"),
+    ("me", "You: who you are, your notifications and the questions agents asked you"),
     ("server", "The running server: readiness, what happened, knowledge sync"),
 ];
 
@@ -211,7 +239,10 @@ pub fn catalog() -> &'static [Entry] {
         teams::register(&mut all);
         mail::register(&mut all);
         docs::register(&mut all);
+        automations::register(&mut all);
+        agents::register(&mut all);
         admin::register(&mut all);
+        me::register(&mut all);
         all
     })
 }
@@ -268,6 +299,33 @@ pub fn chosen(m: &ArgMatches) -> Option<(&'static Entry, &ArgMatches)> {
     find(group, name).map(|e| (e, am))
 }
 
+/// JSON given as text (the command line) or as itself (MCP).
+pub fn json_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(s) => s,
+        v => v.to_string(),
+    })
+}
+
+/// [`json_text`] for an argument that may be left out (with `#[serde(default)]`).
+pub fn opt_json_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::Null => None,
+        Value::String(s) => Some(s),
+        v => Some(v.to_string()),
+    })
+}
+
+/// `key=value` pairs as a JSON object.
+pub fn pairs(items: &[String], what: &str) -> Result<serde_json::Map<String, Value>, String> {
+    let mut out = serde_json::Map::new();
+    for kv in items {
+        let (k, v) = kv.split_once('=').ok_or(format!("{what} {kv}: expected key=value"))?;
+        out.insert(k.trim().to_string(), Value::String(v.to_string()));
+    }
+    Ok(out)
+}
+
 /// URL-encode one path segment or query value.
 pub fn enc(s: &str) -> String {
     s.chars()
@@ -296,6 +354,13 @@ mod tests {
             e.command(e.name).debug_assert();
         }
         commands(Command::new("genie")).debug_assert();
+    }
+
+    #[test]
+    fn lists_answer_to_ls() {
+        let m = commands(Command::new("genie")).try_get_matches_from(["genie", "task", "ls", "--status", "ready"]).unwrap();
+        let (e, _) = chosen(&m).unwrap();
+        assert_eq!((e.group, e.name), ("task", "list"));
     }
 
     #[test]

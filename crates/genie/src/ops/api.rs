@@ -17,12 +17,32 @@ use tower::ServiceExt;
 /// With the project header: that project or an error, never another project of the caller.
 pub const STRICT: &str = "x-genie-project-strict";
 
+/// The body of a request.
+pub enum Payload {
+    None,
+    Json(Value),
+    /// A file's bytes as they are (the files of a skill).
+    Bytes(Vec<u8>),
+}
+
 /// A request as the handlers of the server see it; the answer is its JSON, a
 /// failure the server's error message.
 pub trait Api: Send + Sync {
-    fn call<'a>(&'a self, method: &'a str, path: &'a str, body: Option<Value>) -> BoxFuture<'a, Result<Value, String>>;
+    fn request<'a>(&'a self, method: &'a str, path: &'a str, body: Payload) -> BoxFuture<'a, Result<Value, String>>;
     /// Where the calls go, for messages.
     fn place(&self) -> String;
+
+    fn call<'a>(&'a self, method: &'a str, path: &'a str, body: Option<Value>) -> BoxFuture<'a, Result<Value, String>> {
+        self.request(method, path, body.map_or(Payload::None, Payload::Json))
+    }
+}
+
+/// The answer's JSON, or the server's error message.
+fn answer(status: axum::http::StatusCode, v: Value) -> Result<Value, String> {
+    if !status.is_success() {
+        return Err(v["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("HTTP {status}")));
+    }
+    Ok(v)
 }
 
 /// The server over HTTP with a bearer token.
@@ -41,7 +61,7 @@ impl Remote {
 }
 
 impl Api for Remote {
-    fn call<'a>(&'a self, method: &'a str, path: &'a str, body: Option<Value>) -> BoxFuture<'a, Result<Value, String>> {
+    fn request<'a>(&'a self, method: &'a str, path: &'a str, body: Payload) -> BoxFuture<'a, Result<Value, String>> {
         Box::pin(async move {
             let url = format!("{}/api{path}", self.base);
             let host = self.base.split("://").nth(1).unwrap_or("127.0.0.1:7420").split('/').next().unwrap_or_default().to_string();
@@ -54,16 +74,14 @@ impl Api for Remote {
             if let Some(p) = &self.project {
                 req = req.header("x-genie-project", p).header(STRICT, "1");
             }
-            if let Some(b) = body {
-                req = req.json(&b);
-            }
+            req = match body {
+                Payload::None => req,
+                Payload::Json(b) => req.json(&b),
+                Payload::Bytes(b) => req.header(header::CONTENT_TYPE, "application/octet-stream").body(b),
+            };
             let res = req.send().await.map_err(|e| format!("cannot reach genie at {}: {e}", self.base))?;
             let status = res.status();
-            let v: Value = res.json().await.unwrap_or(Value::Null);
-            if !status.is_success() {
-                return Err(v["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("HTTP {status}")));
-            }
-            Ok(v)
+            answer(status, res.json().await.unwrap_or(Value::Null))
         })
     }
 
@@ -102,7 +120,7 @@ impl InProcess {
 }
 
 impl Api for InProcess {
-    fn call<'a>(&'a self, method: &'a str, path: &'a str, body: Option<Value>) -> BoxFuture<'a, Result<Value, String>> {
+    fn request<'a>(&'a self, method: &'a str, path: &'a str, body: Payload) -> BoxFuture<'a, Result<Value, String>> {
         Box::pin(async move {
             let mut req = Request::builder()
                 .method(method)
@@ -116,8 +134,9 @@ impl Api for InProcess {
                 req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
             }
             let mut req = match body {
-                Some(b) => req.header(header::CONTENT_TYPE, "application/json").body(Body::from(b.to_string())),
-                None => req.body(Body::empty()),
+                Payload::None => req.body(Body::empty()),
+                Payload::Json(b) => req.header(header::CONTENT_TYPE, "application/json").body(Body::from(b.to_string())),
+                Payload::Bytes(b) => req.header(header::CONTENT_TYPE, "application/octet-stream").body(Body::from(b)),
             }
             .map_err(|e| e.to_string())?;
             req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
@@ -127,11 +146,7 @@ impl Api for InProcess {
             let res = self.router.clone().oneshot(req).await.map_err(|e| e.to_string())?;
             let status = res.status();
             let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024 * 1024).await.map_err(|e| e.to_string())?;
-            let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            if !status.is_success() {
-                return Err(v["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("HTTP {status}")));
-            }
-            Ok(v)
+            answer(status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
         })
     }
 
