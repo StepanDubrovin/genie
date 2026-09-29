@@ -562,5 +562,5 @@ async fn journal(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<JournalQ
 async fn docs_impact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     let project = access.project.clone();
-    Ok(Json(app.blocking(move |app| crate::knowledge::docs_impact(app, &project, &id)).await?))
+    Ok(Json(json!(app.blocking(move |app| crate::knowledge::docs_impact(app, &project, &id)).await?)))
 }

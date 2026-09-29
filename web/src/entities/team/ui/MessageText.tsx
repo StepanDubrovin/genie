@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { imageRefSrc, parseImageRefs, type ImageRef } from "../../../../../src/web/images.ts";
+import { imageRefSrc, parseImageRefs, type ImageRef } from "@/shared/lib";
 import { ImagePreview } from "@/shared/ui";
 
 /**

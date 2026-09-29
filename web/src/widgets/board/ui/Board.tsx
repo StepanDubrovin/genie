@@ -149,7 +149,7 @@ function Peek({ t, team, onClose, onOpen, onMove }: { t: TaskSummary; team?: Tea
             <span key={m.name} className="member-line">
               <Avatar role={m.role} name={m.name} activity={m.activity} state={m.state} size="solo" />
               {memberLabel(m.name, m.role)}
-              <span className="st">{m.activity === "working" ? "работает" : m.activity === "error" ? "ошибка" : m.state === "lost" ? "нет связи" : m.state === "stopped" ? "остановлен" : "ждёт"}</span>
+              <span className="st">{m.activity === "working" ? "работает" : m.activity === "error" || m.state === "error" ? "ошибка" : m.state === "stopped" ? "остановлен" : "ждёт"}</span>
             </span>
           ))
         ) : (

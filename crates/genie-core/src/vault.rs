@@ -55,15 +55,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
 
 // --- configuration -----------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum Publish {
     Direct,
     Review,
     Locked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Policy {
     pub humans: Publish,
     pub agents: Publish,
@@ -428,14 +430,19 @@ fn sha(s: &[u8]) -> String {
 
 // --- index -------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DocPage {
     pub root_id: String,
     pub path: String,
     pub title: String,
+    /// One of `DOC_TYPES`.
     #[serde(rename = "type")]
+    #[ts(type = r#""guide" | "reference" | "decision" | "glossary" | "runbook" | "note" | null"#)]
     pub doc_type: Option<String>,
+    /// One of `DOC_STATUSES`.
+    #[ts(type = r#""draft" | "current" | "deprecated" | null"#)]
     pub status: Option<String>,
     pub summary: Option<String>,
     pub tags: Vec<String>,
@@ -454,8 +461,9 @@ pub struct DocPage {
     pub project: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DocLink {
     pub target: String,
     pub target_path: Option<String>,
@@ -463,14 +471,16 @@ pub struct DocLink {
     pub matches: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DocRead {
     #[serde(flatten)]
     pub page: DocPage,
     pub content: String,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub heading: Option<String>,
     pub links: Vec<DocLink>,
     pub backlinks: Vec<String>,
@@ -478,8 +488,9 @@ pub struct DocRead {
     pub policy: Policy,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DocSearchResult {
     #[serde(flatten)]
     pub page: DocPage,

@@ -39,6 +39,7 @@ cargo test                   # ядро, API, рантайм агентов (в 
 cargo clippy --all-targets -- -D warnings && cargo fmt --all --check
 npm test && npm run typecheck && npm run build:web
 npm run dev:web              # Vite с проксированием /api на сервер (порт 7420)
+# Типы API для веба генерируются из Rust-структур: после их изменения — cargo test и коммит web/src/shared/api/generated.
 ```
 
 ## Расширение pi без сервера (TS-версия)

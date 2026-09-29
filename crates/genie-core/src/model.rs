@@ -15,7 +15,8 @@ use crate::error::GenieError;
 macro_rules! str_enum {
     ($(#[$meta:meta])* $name:ident ($label:literal) { $($variant:ident => $s:literal),+ $(,)? }) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+        #[ts(export)]
         pub enum $name { $(#[serde(rename = $s)] $variant),+ }
 
         impl $name {
@@ -256,8 +257,9 @@ impl Actor {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields)]
 pub struct AcceptanceCriterion {
     pub id: i64,
     pub text: String,
@@ -268,7 +270,8 @@ pub struct AcceptanceCriterion {
     pub checked_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct Comment {
     pub id: i64,
     pub at: String,
@@ -278,7 +281,8 @@ pub struct Comment {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct Artifact {
     /// Per-task number (#1, #2…).
     pub id: i64,
@@ -292,7 +296,8 @@ pub struct Artifact {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct HistoryEntry {
     pub at: String,
     pub actor: String,
@@ -306,7 +311,8 @@ pub struct HistoryEntry {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct NeedsOwner {
     pub question: String,
     pub by: String,
@@ -315,22 +321,25 @@ pub struct NeedsOwner {
     pub previous: Status,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct Blocked {
     pub reason: String,
     pub by: String,
     pub at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct Worktree {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields)]
 pub struct Task {
     pub id: String,
     pub title: String,
@@ -373,8 +382,9 @@ pub struct Task {
 }
 
 /// Lightweight row for lists and boards.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields)]
 pub struct TaskSummary {
     pub id: String,
     pub title: String,

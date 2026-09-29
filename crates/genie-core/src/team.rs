@@ -35,7 +35,8 @@ const DELIBERATE_SQL: &str = "('orchestrator', 'owner', 'task_closed')";
 pub const MAIL_LEVELS: &[&str] = &["low", "normal", "high", "interrupt"];
 pub const MAIL_INTENTS: &[&str] = &["question", "blocker", "verdict", "done", "fyi"];
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, optional_fields)]
 pub struct TeamWorktree {
     pub path: String,
     pub branch: String,
@@ -43,8 +44,9 @@ pub struct TeamWorktree {
     pub base: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields)]
 pub struct Member {
     pub name: String,
     pub role: String,
@@ -57,21 +59,25 @@ pub struct Member {
     pub status: String,
     pub status_at: String,
     /// `active` | `stopped` | `error`
+    #[ts(type = r#""active" | "stopped" | "error""#)]
     pub state: String,
     /// `idle` | `working` | `error`
+    #[ts(type = r#""idle" | "working" | "error""#)]
     pub activity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
     pub runtime: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_file: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields)]
 pub struct Team {
     pub id: String,
     pub task: String,
@@ -80,6 +86,7 @@ pub struct Team {
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<TeamWorktree>,
+    #[ts(type = r#""active" | "stopped""#)]
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
@@ -89,24 +96,31 @@ pub struct Team {
     /// How the team works, fixed when it was assembled: the template, member
     /// keys, relations between members and the team charter.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
     pub spec: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields)]
 pub struct Mail {
     pub id: i64,
     pub at: String,
+    /// `null` for the orchestrator's global mailbox.
+    #[ts(optional = false)]
     pub team: Option<String>,
     pub from: String,
     pub from_role: String,
     pub to: String,
     pub text: String,
     pub urgent: bool,
+    #[ts(type = r#""low" | "normal" | "high" | "interrupt""#)]
     pub level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(type = r#""question" | "blocker" | "verdict" | "done" | "fyi""#)]
     pub intent: Option<String>,
     /// `message` | `kickoff` | `system` | `owner`
+    #[ts(type = r#""message" | "kickoff" | "system" | "owner""#)]
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
@@ -119,6 +133,7 @@ pub struct Mail {
     pub reply_to: Option<i64>,
     /// An ask: the sender waits for a reply.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>")]
     pub awaits: bool,
 }
 

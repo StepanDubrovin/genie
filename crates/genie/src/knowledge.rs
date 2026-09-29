@@ -254,11 +254,55 @@ fn changed_paths(wt: &genie_core::team::TeamWorktree) -> (bool, Vec<String>, Vec
     (true, paths.into_iter().collect(), notes)
 }
 
+/// Why a page is a candidate: a changed path matched its `paths`, or its `related` names the task or its epic.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+#[ts(export)]
+pub enum DocsImpactReason {
+    ChangedPath { path: String, pattern: String },
+    Related { id: String },
+}
+
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DocsImpactCandidate {
+    pub path: String,
+    pub title: String,
+    #[serde(rename = "type")]
+    #[ts(type = r#""guide" | "reference" | "decision" | "glossary" | "runbook" | "note" | null"#)]
+    pub doc_type: Option<String>,
+    #[ts(type = r#""draft" | "current" | "deprecated" | null"#)]
+    pub status: Option<String>,
+    pub stale: bool,
+    pub stale_reasons: Vec<String>,
+    pub diagnostics: Vec<String>,
+    pub reasons: Vec<DocsImpactReason>,
+    /// English one-liner for the CLI and logs; the web phrases the reasons itself.
+    pub summary: String,
+}
+
+/// The docs-impact hint of a task (`GET /api/tasks/<id>/docs-impact`).
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DocsImpact {
+    pub task_id: String,
+    pub status: genie_core::Status,
+    /// The task is in review or done: the statuses the hint is meant for.
+    pub applicable: bool,
+    pub changed_paths_available: bool,
+    pub changed_paths: Vec<String>,
+    /// Stable English notes on what could not be read; the web translates them.
+    pub notes: Vec<String>,
+    pub candidates: Vec<DocsImpactCandidate>,
+}
+
 /// Pages of the project's knowledge a task may have made stale: a path its team
 /// changed matches a page's `paths`, or the page names the task (or its epic) in
 /// `related`. A hint for the reviewer and the documenter, never a gate: whatever
 /// cannot be read becomes a note.
-pub fn docs_impact(app: &App, project: &str, id: &str) -> AppResult<Value> {
+pub fn docs_impact(app: &App, project: &str, id: &str) -> AppResult<DocsImpact> {
     use genie_core::Status;
     let task = app.with_tracker(project, |t| t.get(id))?;
     let mut notes: Vec<String> = Vec::new();
@@ -281,7 +325,7 @@ pub fn docs_impact(app: &App, project: &str, id: &str) -> AppResult<Value> {
             Vec::new()
         }
     };
-    let mut found: Vec<(usize, Value, bool, String)> = Vec::new();
+    let mut found: Vec<(usize, DocsImpactCandidate)> = Vec::new();
     for page in pages.into_iter().filter(|p| p.project.as_deref() == Some(project)) {
         let mut reasons = Vec::new();
         let mut matched = 0;
@@ -290,45 +334,52 @@ pub fn docs_impact(app: &App, project: &str, id: &str) -> AppResult<Value> {
                 if glob_matches(pattern, path) {
                     matched += 1;
                     if reasons.len() < MAX_REASONS_PER_PAGE {
-                        reasons.push(json!({ "kind": "changed-path", "path": path, "pattern": pattern }));
+                        reasons.push(DocsImpactReason::ChangedPath { path: path.clone(), pattern: pattern.clone() });
                     }
                 }
             }
         }
         let named: Vec<&String> = page.related.iter().filter(|r| related.contains(&r.trim().to_uppercase())).collect();
         for r in &named {
-            reasons.push(json!({ "kind": "related", "id": r }));
+            reasons.push(DocsImpactReason::Related { id: (*r).clone() });
         }
         if reasons.is_empty() || (page.status.as_deref() == Some("deprecated") && named.is_empty()) {
             continue;
         }
         let summary = reasons
             .iter()
-            .map(|r| match r["kind"].as_str() {
-                Some("changed-path") => {
-                    format!("changes {} (page paths {})", r["path"].as_str().unwrap_or_default(), r["pattern"].as_str().unwrap_or_default())
-                }
-                _ => format!("related to {}", r["id"].as_str().unwrap_or_default()),
+            .map(|r| match r {
+                DocsImpactReason::ChangedPath { path, pattern } => format!("changes {path} (page paths {pattern})"),
+                DocsImpactReason::Related { id } => format!("related to {id}"),
             })
             .collect::<Vec<_>>()
             .join("; ");
-        let candidate = json!({
-            "path": page.path, "title": page.title, "type": page.doc_type, "status": page.status, "stale": page.stale,
-            "staleReasons": page.stale_reasons, "diagnostics": page.diagnostics, "reasons": reasons, "summary": summary,
-        });
-        found.push((matched, candidate, page.stale, page.path));
+        found.push((
+            matched,
+            DocsImpactCandidate {
+                path: page.path,
+                title: page.title,
+                doc_type: page.doc_type,
+                status: page.status,
+                stale: page.stale,
+                stale_reasons: page.stale_reasons,
+                diagnostics: page.diagnostics,
+                reasons,
+                summary,
+            },
+        ));
     }
     // Pages matched by changed paths first (most matches first), stale ones before fresh, then by path.
-    found.sort_by(|a, b| (a.0 == 0).cmp(&(b.0 == 0)).then(b.0.cmp(&a.0)).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)));
-    Ok(json!({
-        "taskId": task.id,
-        "status": task.status,
-        "applicable": matches!(task.status, Status::Review | Status::Done),
-        "changedPathsAvailable": available,
-        "changedPaths": changed,
-        "notes": notes,
-        "candidates": found.into_iter().map(|f| f.1).collect::<Vec<_>>(),
-    }))
+    found.sort_by(|a, b| (a.0 == 0).cmp(&(b.0 == 0)).then(b.0.cmp(&a.0)).then(b.1.stale.cmp(&a.1.stale)).then(a.1.path.cmp(&b.1.path)));
+    Ok(DocsImpact {
+        task_id: task.id,
+        status: task.status,
+        applicable: matches!(task.status, Status::Review | Status::Done),
+        changed_paths_available: available,
+        changed_paths: changed,
+        notes,
+        candidates: found.into_iter().map(|f| f.1).collect(),
+    })
 }
 
 #[cfg(test)]
