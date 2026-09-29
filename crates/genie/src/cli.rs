@@ -57,6 +57,17 @@ enum Command {
         #[arg(long)]
         keep: Option<usize>,
     },
+    /// What happened over the last days, for reviewing a pilot: tasks, decisions, reviews, agent runs, knowledge.
+    Stats {
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        /// One project only.
+        #[arg(long)]
+        project: Option<String>,
+        /// JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Check that the server is ready: data, web UI, people, projects, pi and the models, sandbox, git, channels, network.
     Doctor {
         /// Built web UI the server serves.
@@ -261,6 +272,14 @@ pub async fn run() -> Result<(), String> {
                 for old in prune_backups(&dir, keep)? {
                     println!("removed {}", old.display());
                 }
+            }
+        }
+        Command::Stats { days, project, json } => {
+            let stats = crate::stats::collect(&data, days, project.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())?);
+            } else {
+                println!("{}", crate::stats::render(&stats));
             }
         }
         Command::Doctor { web } => {

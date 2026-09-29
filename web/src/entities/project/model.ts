@@ -130,3 +130,38 @@ export function doctorSummary(checks: DoctorCheck[]): { level: DoctorCheck["leve
   if (warn) return { level: "warn", text: `Готов к работе, предупреждений: ${warn}` };
   return { level: "ok", text: "Всё готово" };
 }
+
+/** What happened in a project over a period (`genie stats`). */
+export interface ProjectStats {
+  project: string;
+  name: string;
+  created: number;
+  createdByPeople: number;
+  done: number;
+  cancelled: number;
+  open: number;
+  cycleHoursMedian: number | null;
+  cycleHoursP90: number | null;
+  decisions: number;
+  answerHoursMedian: number | null;
+  returns: number;
+  commentsByPeople: number;
+  commentsByAgents: number;
+  mcpCalls: number;
+  runs: number;
+  runsFailed: number;
+  jobs: number;
+  jobsFailed: number;
+  proposals: number;
+  proposalsApproved: number;
+  proposalsRejected: number;
+  people: string[];
+}
+
+/** Hours in words: «40 мин», «5,5 ч», «3,2 дн». */
+export function hoursText(h: number | null | undefined): string {
+  if (h === null || h === undefined) return "—";
+  if (h < 1) return `${Math.max(1, Math.round(h * 60))} мин`;
+  if (h < 48) return `${h.toFixed(1).replace(".", ",")} ч`;
+  return `${(h / 24).toFixed(1).replace(".", ",")} дн`;
+}

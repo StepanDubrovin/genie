@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { initials, type Membership, responsibleChoices } from "../web/src/entities/project/model.ts";
+import { doctorSummary, hoursText, initials, type Membership, responsibleChoices } from "../web/src/entities/project/model.ts";
 import { inViewOf, type TaskSummary } from "../web/src/entities/task/model.ts";
 
 const person = (login: string, name = "", disabled = false) => ({ id: login.length, login, name, isAdmin: false, disabled, created: "" });
@@ -39,4 +39,19 @@ test("my tasks: the ones I am responsible for, finished ones for a week", () => 
   assert.equal(inViewOf(task("done", "anna", "2026-09-01T00:00:00Z"), "mine", "anna", now), false);
   assert.equal(inViewOf(task("cancelled", "anna"), "mine", "anna", now), false);
   assert.equal(inViewOf(task("review"), "active", undefined, now), true, "other views go by status only");
+});
+
+test("the server page speaks in words: hours and readiness", () => {
+  assert.equal(hoursText(null), "—");
+  assert.equal(hoursText(0.25), "15 мин");
+  assert.equal(hoursText(5.5), "5,5 ч");
+  assert.equal(hoursText(72), "3,0 дн");
+  assert.deepEqual(doctorSummary([{ area: "web", level: "ok", text: "" }]), { level: "ok", text: "Всё готово" });
+  assert.deepEqual(
+    doctorSummary([
+      { area: "pi", level: "fail", text: "" },
+      { area: "channels", level: "warn", text: "" },
+    ]),
+    { level: "fail", text: "Нужно исправить: 1, предупреждений: 1" },
+  );
 });

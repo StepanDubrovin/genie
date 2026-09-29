@@ -73,3 +73,7 @@
 .pj-checks .txt { min-width: 0; overflow-wrap: anywhere; }
 .pj-checks .hint { display: block; color: var(--muted); font-size: 12px; }
 .pj-bad { color: var(--red); }
+.pj-stats { padding: 12px 0; border-top: 1px solid var(--line); }
+.pj-stats:first-of-type { border-top: 0; }
+.pj-stats .pj-stats-head { font-weight: 600; color: var(--text); }
+.pj-stats dd.pj-stats-head { font-weight: 400; color: var(--muted); }

@@ -1,6 +1,6 @@
 {
   "title": "Полная",
-  "description": "Larger code change: analyst, executor, tester and reviewer; the documenter joins after approval.",
+  "description": "Крупное изменение кода: аналитик, исполнитель, тестировщик и ревьюер; документатор подключается после одобрения.",
   "stage": "delivery",
   "workspace": "worktree",
   "members": [

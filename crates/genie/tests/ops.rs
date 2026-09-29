@@ -79,3 +79,43 @@ async fn the_preflight_is_for_server_admins() {
     let (s, _, _) = call(&h.remote, "GET", "/api/doctor").cookie(&cookies[0]).send().await;
     assert_eq!(s, StatusCode::FORBIDDEN, "a project admin is not a server admin");
 }
+
+#[tokio::test]
+async fn stats_count_tasks_decisions_and_answers() {
+    let h = Harness::new();
+    h.project("shop");
+    let r = &h.router;
+    for title in ["first", "second", "third"] {
+        call(r, "POST", "/api/tasks").json(json!({ "title": title })).send().await;
+    }
+    let orch = h
+        .app
+        .with_server(|db| {
+            db.create_agent_token("shop", genie_core::Role::Orchestrator, "orchestrator", None, None, chrono::Duration::hours(1))
+        })
+        .unwrap();
+    let (s, e, _) = call(&h.remote, "POST", "/api/tasks/G-1/status")
+        .bearer(&orch)
+        .no_csrf()
+        .json(json!({ "status": "needs_owner", "note": "CSV или XLSX?" }))
+        .send()
+        .await;
+    assert_eq!(s, StatusCode::OK, "{e}");
+    call(r, "POST", "/api/tasks/G-1/comments").json(json!({ "text": "CSV" })).send().await;
+    let (s, e, _) = call(r, "POST", "/api/tasks/G-2/status").json(json!({ "status": "done", "force": true })).send().await;
+    assert_eq!(s, StatusCode::OK, "{e}");
+    call(r, "POST", "/api/tasks/G-3/status").json(json!({ "status": "cancelled" })).send().await;
+
+    let stats = genie::stats::collect(&h.app.data, 7, None).unwrap();
+    let p = &stats.projects[0];
+    assert_eq!((p.created, p.created_by_people, p.done, p.cancelled, p.open), (3, 3, 1, 1, 1), "{p:?}");
+    assert_eq!(p.decisions, 1);
+    assert!(p.answer_hours_median.is_some(), "the answer to the agent's question is timed: {p:?}");
+    assert_eq!((p.comments_by_people, p.comments_by_agents), (1, 0));
+    assert!(p.cycle_hours_median.is_some());
+    assert!(genie::stats::render(&stats).contains("agents asked people 1 time(s)"));
+    let (s, j, _) = call(r, "GET", "/api/stats?days=30").send().await;
+    assert_eq!(s, StatusCode::OK, "{j}");
+    assert_eq!(j["projects"][0]["decisions"], 1);
+    assert!(genie::stats::collect(&h.app.data, 7, Some("nope")).is_err());
+}

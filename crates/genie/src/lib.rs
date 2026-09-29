@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod sessions;
 pub mod state;
+pub mod stats;
 pub mod vault_sync;
 
 use std::net::SocketAddr;

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { keys, request, useInvalidating } from "@/shared/api";
-import type { DoctorCheck, Meta, Membership, Person, ProjectInfo, ProjectRole, VaultSync } from "./model.ts";
+import type { DoctorCheck, Meta, Membership, Person, ProjectInfo, ProjectRole, ProjectStats, VaultSync } from "./model.ts";
 
 export const useMeta = () => useQuery({ queryKey: keys.meta, queryFn: () => request<Meta>("GET", "/api/meta") });
 
@@ -47,3 +47,6 @@ export const useVaultSync = (enabled: boolean) =>
   useQuery({ queryKey: ["vault-sync"], queryFn: () => request<VaultSync>("GET", "/api/vault/sync"), enabled, refetchInterval: 30_000 });
 
 export const useSyncVaultNow = () => useInvalidating(() => request<Pick<VaultSync, "last">>("POST", "/api/vault/sync"));
+
+export const useStats = (days: number) =>
+  useQuery({ queryKey: ["stats", days], queryFn: () => request<{ days: number; since: string; projects: ProjectStats[] }>("GET", `/api/stats?days=${days}`) });

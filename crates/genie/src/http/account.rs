@@ -32,6 +32,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/projects/{slug}/members/{user}", put(set_member).delete(remove_member))
         .route("/projects/{slug}/invites", post(create_invite))
         .route("/doctor", get(doctor))
+        .route("/stats", get(stats))
         .route("/vault/sync", get(vault_sync).post(vault_sync_now))
 }
 
@@ -379,4 +380,22 @@ async fn vault_sync_now(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json
     ctx.server_admin()?;
     let st = app.blocking(crate::vault_sync::sync).await?.ok_or_else(|| ApiError::bad("vault.remote is not set in config.json"))?;
     Ok(Json(json!({ "last": st })))
+}
+
+#[derive(Deserialize)]
+struct StatsQuery {
+    days: Option<i64>,
+    project: Option<String>,
+}
+
+/// What happened over the last days (`genie stats`), for the server's admins.
+async fn stats(State(app): State<Arc<App>>, ctx: Ctx, axum::extract::Query(q): axum::extract::Query<StatsQuery>) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let stats = app
+        .blocking(move |app| {
+            crate::stats::collect(&app.data, q.days.unwrap_or(7), q.project.as_deref())
+                .map_err(|e| genie_core::GenieError::invalid(e).into())
+        })
+        .await?;
+    Ok(Json(json!(stats)))
 }

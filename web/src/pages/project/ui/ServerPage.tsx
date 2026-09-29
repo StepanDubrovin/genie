@@ -8,6 +8,7 @@ import {
   DOCTOR_AREA,
   type DoctorCheck,
   doctorSummary,
+  hoursText,
   PersonAvatar,
   personName,
   PROJECT_ROLE_NAME,
@@ -15,6 +16,7 @@ import {
   useCreateUser,
   useDoctor,
   usePatchUser,
+  useStats,
   useSyncVaultNow,
   useVaultSync,
   useProjects,
@@ -42,6 +44,7 @@ export function ServerPage() {
         ) : (
           <>
             <Health />
+            <Activity />
             <Knowledge />
             <Projects current={session?.project} />
             {!local && <Accounts me={session?.user.login} />}
@@ -99,6 +102,64 @@ function Health() {
           </p>
         </>
       )}
+    </section>
+  );
+}
+
+/** How the work went over the last days, per project (`genie stats`). */
+function Activity() {
+  const [days, setDays] = useState(7);
+  const stats = useStats(days);
+  const list = stats.data?.projects ?? [];
+  return (
+    <section>
+      <h2>Как идёт работа</h2>
+      <div className="seg" role="group" aria-label="Период" style={{ marginLeft: 0 }}>
+        {[7, 30].map((d) => (
+          <button key={d} type="button" className={d === days ? "on" : ""} aria-pressed={d === days} onClick={() => setDays(d)}>
+            {d === 7 ? "Неделя" : "Месяц"}
+          </button>
+        ))}
+      </div>
+      {stats.isPending ? (
+        <p className="muted">Загрузка…</p>
+      ) : stats.isError ? (
+        <p className="muted">{stats.error.message}</p>
+      ) : (
+        list.map((p) => (
+          <dl key={p.project} className="pj-facts pj-stats">
+            <dt className="pj-stats-head">{p.name}</dt>
+            <dd className="pj-stats-head muted">{p.people.length ? `люди: ${p.people.join(", ")}` : "людей не было"}</dd>
+            <dt>Задачи</dt>
+            <dd>
+              создано {p.created} (людьми {p.createdByPeople}), готово {p.done}, отменено {p.cancelled}; открыто сейчас {p.open}
+            </dd>
+            <dt>До готовности</dt>
+            <dd>
+              медиана {hoursText(p.cycleHoursMedian)}, 90% — до {hoursText(p.cycleHoursP90)}
+            </dd>
+            <dt>Вопросы агентов</dt>
+            <dd>
+              {p.decisions ? `${p.decisions}, люди отвечали за ${hoursText(p.answerHoursMedian)} (медиана)` : "не было"}
+            </dd>
+            <dt>Ревью</dt>
+            <dd>{p.returns ? `работу возвращали на доработку ${p.returns} раз` : "без возвратов"}</dd>
+            <dt>Агенты</dt>
+            <dd>
+              запусков {p.runs}
+              {p.runsFailed ? `, со сбоем ${p.runsFailed}` : ""}; заданий {p.jobs}
+              {p.jobsFailed ? `, со сбоем ${p.jobsFailed}` : ""}; вызовов MCP {p.mcpCalls}
+            </dd>
+            <dt>Знания</dt>
+            <dd>
+              предложений {p.proposals}, принято {p.proposalsApproved}, отклонено {p.proposalsRejected}
+            </dd>
+          </dl>
+        ))
+      )}
+      <p className="muted">
+        То же в терминале: <code>genie stats --days {days}</code>.
+      </p>
     </section>
   );
 }
