@@ -110,7 +110,7 @@ pub struct RuntimeConfig {
     /// A turn, or a session step without any sign of life, is stopped after this long.
     pub turn_timeout_secs: u64,
     pub max_attempts: u32,
-    /// How long `genie agent ask` waits for the answer by default.
+    /// How long `genie mail ask` waits for the answer by default.
     pub ask_timeout_secs: u64,
     /// Characters of mail put into a session at one step boundary.
     pub delivery_budget: usize,

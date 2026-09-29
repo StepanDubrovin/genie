@@ -766,7 +766,7 @@ pub fn playbooks() -> Vec<(&'static str, &'static str, Value)> {
                     { "id": "docs", "timeout": "45m", "agent": {
                         "role": "documenter",
                         "workspace": "read-only",
-                        "goal": "Task {{ event.task.id }} ({{ event.task.title }}) is done. Turn its artifacts, decisions and review into durable knowledge of this project's vault space: update existing pages (search them first with `genie agent docs search`), add new pages only for genuinely new topics, link back to the task, set `verified` to today, and write pages with `genie agent docs write` (the section policy may turn them into proposals). Then write one changelog line for people who use the product.",
+                        "goal": "Task {{ event.task.id }} ({{ event.task.title }}) is done. Turn its artifacts, decisions and review into durable knowledge of this project's vault space: update existing pages (search them first with `genie docs search`), add new pages only for genuinely new topics, link back to the task, set `verified` to today, and write pages with `genie docs write` (the section policy may turn them into proposals). Then write one changelog line for people who use the product.",
                         "output": { "pages_changed": ["path"], "summary": "one paragraph for the owner", "changelog": { "group": "added | changed | fixed", "text": "one line, user-facing, in the owner's language" } }
                     } },
                     { "id": "log", "changelog.add": { "group": "{{ steps.docs.output.changelog.group }}", "text": "{{ steps.docs.output.changelog.text }}" } },
@@ -790,7 +790,7 @@ pub fn playbooks() -> Vec<(&'static str, &'static str, Value)> {
                     { "id": "analyse", "timeout": "45m", "agent": {
                         "role": "analyst",
                         "workspace": "read-only",
-                        "goal": "Analyse task {{ event.task.id }}: study the project (code if any, knowledge base with `genie agent docs search`), draft scope and verifiable acceptance criteria, and list only the questions that the task's author must answer (product decisions, missing facts). Do not guess product answers. Write the questions in the owner's language, offer options when the answer is a choice. Save your analysis as an `analysis` artifact on the task.",
+                        "goal": "Analyse task {{ event.task.id }}: study the project (code if any, knowledge base with `genie docs search`), draft scope and verifiable acceptance criteria, and list only the questions that the task's author must answer (product decisions, missing facts). Do not guess product answers. Write the questions in the owner's language, offer options when the answer is a choice. Save your analysis as an `analysis` artifact on the task.",
                         "output": { "questions": [{ "text": "question", "why": "why it matters", "options": ["optional choices"] }], "draft_acceptance": ["criterion"] }
                     } },
                     { "id": "criteria", "if": "{{ steps.analyse.output.draft_acceptance | length }}", "task.comment": { "kind": "decision", "text": "Черновик критериев приёмки от аналитика:\n{{ steps.analyse.output.draft_acceptance | lines }}" } },

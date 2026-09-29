@@ -1,10 +1,11 @@
 //! Teams of agents and one-shot jobs.
 
+use genie_core::Capability;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Cx, Entry, Need, Op, Out, enc, register, render};
+use super::{Cx, Entry, Listed, Need, Op, Out, enc, register, render};
 
 pub fn register(all: &mut Vec<Entry>) {
     register!(
@@ -84,6 +85,7 @@ impl Op for Board {
     const GROUP: &'static str = "team";
     const NAME: &'static str = "board";
     const LEGACY: Option<&'static str> = Some("board");
+    const LISTED: Listed = Listed::Orchestrator;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("GET", "/agents", None).await?;
         Ok(Out::new(render::agents(&v), v))
@@ -107,6 +109,7 @@ impl Op for Peek {
     const GROUP: &'static str = "team";
     const NAME: &'static str = "peek";
     const LEGACY: Option<&'static str> = Some("peek");
+    const CAPS: &'static [Capability] = &[Capability::TeamPeek];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let team = if self.member == "orchestrator" { "orchestrator".to_string() } else { cx.team(self.team)? };
         let deep = if self.deep { "?deep=1" } else { "" };
@@ -208,6 +211,7 @@ impl Op for RemoveMember {
     const GROUP: &'static str = "team";
     const NAME: &'static str = "remove-member";
     const NEED: Need = Need::Orchestrator;
+    const LISTED: Listed = Listed::Agents;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("DELETE", &format!("/teams/{}/members/{}", enc(&self.team), enc(&self.member)), None).await?;
         Ok(Out::new(format!("{} left team {}", self.member, self.team), v))
@@ -369,6 +373,7 @@ impl Op for Templates {
     const GROUP: &'static str = "team";
     const NAME: &'static str = "templates";
     const LEGACY: Option<&'static str> = Some("templates");
+    const LISTED: Listed = Listed::Orchestrator;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("GET", "/agent-config", None).await?;
         let mut out = Vec::new();
@@ -407,6 +412,7 @@ impl Op for Roles {
     const GROUP: &'static str = "team";
     const NAME: &'static str = "roles";
     const LEGACY: Option<&'static str> = Some("roles");
+    const LISTED: Listed = Listed::Orchestrator;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("GET", "/agent-config", None).await?;
         let text = v["roles"]

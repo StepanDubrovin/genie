@@ -145,7 +145,11 @@ fn recovery_stops_only_verified_stray_agent_processes() {
     })
     .unwrap();
     genie::runtime::recover(&app).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    // Stopping is a signal: give the process a moment to go, even on a busy machine.
+    let start = Instant::now();
+    while stray.try_wait().unwrap().is_none() && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(stray.try_wait().unwrap().is_some(), "the stray agent was stopped");
     assert!(other.try_wait().unwrap().is_none(), "a process that is not that agent is left alone");
     other.kill().unwrap();

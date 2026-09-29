@@ -176,7 +176,7 @@ async fn ask(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<AskBody>) -> A
         .await?;
     let Some(ask) = asked.first().cloned() else { return Err(ApiError::bad("nobody to ask")) };
     if asked.len() > 1 {
-        return Err(ApiError::bad("ask one teammate (not all); broadcast with `genie agent send all`"));
+        return Err(ApiError::bad("ask one teammate (not all); broadcast with `genie mail send all`"));
     }
     wake(&app);
     let limit = Duration::from_secs(b.timeout.unwrap_or(app.cfg.runtime.ask_timeout_secs).clamp(1, 1800));

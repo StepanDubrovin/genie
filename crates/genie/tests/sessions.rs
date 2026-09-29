@@ -2,7 +2,7 @@
 //! RPC mode, the genie-bus extension) against a scripted OpenAI-compatible model
 //! served by the test. The model follows instructions found in the mail it gets:
 //! `RUN: <command>` runs a shell command; a question carrying `ANSWER=<word>` is
-//! answered with `genie agent reply`.
+//! answered with `genie mail reply`.
 //!
 //! Skipped (with a note) when pi is not installed, except on CI.
 
@@ -65,10 +65,10 @@ fn decide(messages: &[(String, String)]) -> Value {
         let args: Value = serde_json::from_str(text[i + 5..].lines().next().unwrap_or_default().trim()).unwrap_or_default();
         return json!({ "tool": "mcp", "args": args });
     }
-    if let (Some(r), Some(a)) = (text.find("genie agent reply "), text.find("ANSWER=")) {
-        let id: String = text[r + 18..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    if let (Some(r), Some(a)) = (text.find("genie mail reply "), text.find("ANSWER=")) {
+        let id: String = text[r + 17..].chars().take_while(|c| c.is_ascii_digit()).collect();
         let answer: String = text[a + 7..].chars().take_while(|c| c.is_alphanumeric()).collect();
-        return json!({ "tool": "bash", "args": { "command": format!("genie agent reply {id} {answer}") } });
+        return json!({ "tool": "bash", "args": { "command": format!("genie mail reply {id} {answer}") } });
     }
     json!({ "content": "ok" })
 }
@@ -354,7 +354,7 @@ async fn mail_reaches_live_agents_between_steps_and_on_interrupt() {
     // Ask and wait: bender asks yoda; yoda answers; bender's command returns the answer.
     until("bender idle before asking", 30, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
     let sent = Instant::now();
-    mail(app, "anna", "human", "bender", "RUN: genie agent ask yoda 'Which export format? ANSWER=CSV'", None);
+    mail(app, "anna", "human", "bender", "RUN: genie mail ask yoda 'Which export format? ANSWER=CSV'", None);
     let req = until("the answer in bender's context", 60, || {
         log.lock().unwrap().iter().find(|r| r.model == "executor" && r.last().0 == "tool" && r.last().1.contains("yoda answered")).cloned()
     })
@@ -505,6 +505,15 @@ async fn a_role_gets_its_skills_and_the_guard_keeps_it_within_its_grants() {
     assert!(req.system.contains("<name>house-style</name>"), "the repository's skill");
     assert!(!req.system.contains("user-wide"), "no other skills");
     assert!(req.system.contains("## MCP connections") && req.system.contains("`docs`"), "{}", req.system);
+    // The command table of the role, from the catalog of operations.
+    assert!(
+        req.system.contains(
+            "| `genie_task` status | `genie task status <STATUS> [--task …] [--note …]` (your role may set: in_progress, review) |"
+        ),
+        "the command table:\n{}",
+        req.system
+    );
+    assert!(!req.system.contains("genie agent ") && !req.system.contains("--title"), "the catalog's commands, those of the role");
 
     // A denied command is blocked, the rest of the shell works.
     mail(app, "anna", "human", "bender", "RUN: echo one && git push origin main", None);

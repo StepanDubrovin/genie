@@ -1,5 +1,6 @@
 //! Mail between the members of a team, the orchestrator and people.
 
+use genie_core::Capability;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,14 +20,14 @@ pub struct Send {
     #[arg(allow_hyphen_values = true)]
     pub text: String,
     /// low, normal or high; people and the orchestrator also `interrupt`.
-    #[arg(long)]
+    #[arg(long, value_parser = ["low", "normal", "high", "interrupt"])]
     pub level: Option<String>,
     /// Same as --level high.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     #[serde(default)]
     pub urgent: bool,
     /// question, blocker, verdict, done or fyi.
-    #[arg(long)]
+    #[arg(long, value_parser = ["question", "blocker", "verdict", "done", "fyi"])]
     pub intent: Option<String>,
     /// Replaces your undelivered message to the same recipient on this topic.
     #[arg(long)]
@@ -41,6 +42,10 @@ impl Op for Send {
     const NAME: &'static str = "send";
     const LEGACY: Option<&'static str> = Some("send");
     const NEED: Need = Need::Write;
+    const CAPS: &'static [Capability] = &[Capability::MailTeam, Capability::MailOrchestrator];
+    fn arg_allowed(arg: &str, _can: &dyn Fn(Capability) -> bool) -> bool {
+        arg != "team"
+    }
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let team = cx.team(self.team)?;
         let body = json!({ "to": self.to, "text": self.text, "level": self.level, "urgent": self.urgent, "intent": self.intent, "topic": self.topic });
@@ -73,7 +78,11 @@ impl Op for Ask {
     const GROUP: &'static str = "mail";
     const NAME: &'static str = "ask";
     const LEGACY: Option<&'static str> = Some("ask");
-    const NEED: Need = Need::Member;
+    const NEED: Need = Need::Agent;
+    const CAPS: &'static [Capability] = &[Capability::MailTeam, Capability::MailOrchestrator];
+    fn arg_allowed(arg: &str, _can: &dyn Fn(Capability) -> bool) -> bool {
+        arg != "team"
+    }
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let team = self.team.or_else(|| cx.team.clone());
         let v = cx

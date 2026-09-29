@@ -13,8 +13,9 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use clap::{ArgMatches, Command};
+use clap::{ArgAction, ArgMatches, Command};
 use futures_util::future::BoxFuture;
+use genie_core::Capability;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -43,6 +44,8 @@ pub enum Need {
     Write,
     /// The orchestrator and people.
     Orchestrator,
+    /// Agents of a team and the orchestrator; not people.
+    Agent,
     /// A member of a team (its own status line, replies).
     Member,
     /// A one-shot job of an automation.
@@ -51,6 +54,27 @@ pub enum Need {
     Person,
     /// People who administer the server or a project; never agents.
     Admin,
+}
+
+/// An agent genie runs, as the catalog sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentKind {
+    /// Holds every permission.
+    Orchestrator,
+    /// A member of a team, with its role's permissions.
+    Member,
+    /// A one-shot job: no team, no mail.
+    Job,
+}
+
+/// Which agents' prompts list an operation in their command table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listed {
+    Nobody,
+    /// Every agent that may use it.
+    Agents,
+    /// The orchestrator only, though others may use it.
+    Orchestrator,
 }
 
 /// What an operation gives back: text for people and models, the API's data for scripts.
@@ -135,11 +159,26 @@ pub trait Op: clap::Args + DeserializeOwned + JsonSchema + Send + Sized + 'stati
     /// The command under `genie agent …` before the catalog, kept working for older prompts.
     const LEGACY: Option<&'static str> = None;
     const NEED: Need = Need::Read;
+    /// For agents: any of these permissions of their role (the orchestrator holds them all).
+    const CAPS: &'static [Capability] = &[];
+    /// In agents' command tables: the commands agents knew are.
+    const LISTED: Listed = if Self::LEGACY.is_some() { Listed::Agents } else { Listed::Nobody };
+    /// Whether an agent's role uses an argument (by its id); the command tables leave
+    /// out the others. The orchestrator uses them all; the API decides anyway.
+    fn arg_allowed(_arg: &str, _can: &dyn Fn(Capability) -> bool) -> bool {
+        true
+    }
+    /// A remark for an agent's command table, e.g. the statuses its role may set.
+    fn prompt_note(_kind: AgentKind, _can: &dyn Fn(Capability) -> bool) -> Option<String> {
+        None
+    }
     fn run(self, cx: &Cx) -> impl Future<Output = Result<Out, String>> + Send;
 }
 
 type RunCli = for<'a> fn(&'a ArgMatches, &'a Cx) -> BoxFuture<'a, Result<Out, String>>;
 type RunJson = for<'a> fn(Value, &'a Cx) -> BoxFuture<'a, Result<Out, String>>;
+type ArgAllowed = fn(&str, &dyn Fn(Capability) -> bool) -> bool;
+type PromptNote = fn(AgentKind, &dyn Fn(Capability) -> bool) -> Option<String>;
 
 /// An operation as the entrances see it.
 pub struct Entry {
@@ -147,6 +186,8 @@ pub struct Entry {
     pub name: &'static str,
     pub legacy: Option<&'static str>,
     pub need: Need,
+    pub caps: &'static [Capability],
+    pub listed: Listed,
     /// What it does: the doc comment of its arguments.
     pub about: String,
     /// JSON schema of its arguments.
@@ -154,6 +195,8 @@ pub struct Entry {
     augment: fn(Command) -> Command,
     run_cli: RunCli,
     run_json: RunJson,
+    arg_allowed: ArgAllowed,
+    prompt_note: PromptNote,
 }
 
 fn run_cli<'a, T: Op>(m: &'a ArgMatches, cx: &'a Cx) -> BoxFuture<'a, Result<Out, String>> {
@@ -184,12 +227,82 @@ impl Entry {
             name: T::NAME,
             legacy: T::LEGACY,
             need: T::NEED,
+            caps: T::CAPS,
+            listed: T::LISTED,
             about,
             schema,
             augment: <T as clap::Args>::augment_args,
             run_cli: run_cli::<T>,
             run_json: run_json::<T>,
+            arg_allowed: T::arg_allowed,
+            prompt_note: T::prompt_note,
         }
+    }
+
+    /// Whether an agent may use it: its need, then its role's permissions.
+    pub fn for_agent(&self, kind: AgentKind, can: &dyn Fn(Capability) -> bool) -> bool {
+        let fits = match self.need {
+            Need::Read | Need::Write => true,
+            Need::Orchestrator => kind == AgentKind::Orchestrator,
+            Need::Agent => kind != AgentKind::Job,
+            Need::Member => kind == AgentKind::Member,
+            Need::Job => kind == AgentKind::Job,
+            Need::Person | Need::Admin => false,
+        };
+        let alone = kind == AgentKind::Job && matches!(self.group, "team" | "mail");
+        fits && !alone && (kind == AgentKind::Orchestrator || self.caps.is_empty() || self.caps.iter().any(|c| can(*c)))
+    }
+
+    /// Whether an agent's command table lists it.
+    pub fn listed_for(&self, kind: AgentKind, can: &dyn Fn(Capability) -> bool) -> bool {
+        let listed = match self.listed {
+            Listed::Nobody => false,
+            Listed::Agents => true,
+            Listed::Orchestrator => kind == AgentKind::Orchestrator,
+        };
+        listed && self.for_agent(kind, can)
+    }
+
+    /// Its command line in short, with the arguments the agent uses:
+    /// `genie task status <status> [--task …] [--note …]`.
+    pub fn usage_for(&self, kind: AgentKind, can: &dyn Fn(Capability) -> bool) -> String {
+        let cmd = self.command(self.name);
+        let uses = |a: &&clap::Arg| !a.is_hide_set() && (kind == AgentKind::Orchestrator || (self.arg_allowed)(a.get_id().as_str(), can));
+        let mut out = format!("genie {} {}", self.group, self.name);
+        let (positionals, options): (Vec<&clap::Arg>, Vec<&clap::Arg>) = cmd.get_arguments().filter(uses).partition(|a| a.is_positional());
+        for a in positionals.into_iter().chain(options) {
+            let values: Vec<String> = a.get_possible_values().iter().map(|v| v.get_name().to_string()).collect();
+            let value = if !values.is_empty() {
+                values.join("|")
+            } else if a.is_positional() {
+                format!(
+                    "<{}>",
+                    a.get_value_names().and_then(|v| v.first()).map_or_else(|| a.get_id().as_str().replace('_', "-"), |v| v.to_string())
+                )
+            } else {
+                "…".into()
+            };
+            let item = match (a.is_positional(), a.get_long()) {
+                (true, _) => value,
+                (false, Some(long)) if a.get_action().takes_values() => format!("--{long} {value}"),
+                (false, Some(long)) => format!("--{long}"),
+                (false, None) => continue,
+            };
+            let many = matches!(a.get_action(), ArgAction::Append);
+            out.push(' ');
+            out.push_str(&match (a.is_required_set(), many) {
+                (true, false) => item,
+                (true, true) => format!("{item}..."),
+                (false, false) => format!("[{item}]"),
+                (false, true) => format!("[{item}]..."),
+            });
+        }
+        out
+    }
+
+    /// A remark for an agent's command table.
+    pub fn note_for(&self, kind: AgentKind, can: &dyn Fn(Capability) -> bool) -> Option<String> {
+        (self.prompt_note)(kind, can)
     }
 
     /// The first line of what it does.
@@ -326,6 +439,37 @@ pub fn pairs(items: &[String], what: &str) -> Result<serde_json::Map<String, Val
     Ok(out)
 }
 
+/// The tool names the role guides use (those of the pi extension) where they differ from `genie_<group>` `<action>`.
+fn guide_name(e: &Entry) -> Option<&'static str> {
+    Some(match (e.group, e.name) {
+        ("task", "artifact-read") => "artifact_read",
+        ("mail", "send") => "team_send",
+        ("team", "show") => "team_status",
+        ("team", "set-status") => "team_set_status",
+        ("team", "spawn") => "team_spawn",
+        ("team", "add-member") => "team_add_member",
+        ("team", "remove-member") => "team_remove_member",
+        ("team", "stop") => "team_stop",
+        ("team", "restart") => "team_recover",
+        ("docs", "search") => "docs_search",
+        ("docs", "read") => "docs_read",
+        ("docs", "note") => "docs_note",
+        _ => return None,
+    })
+}
+
+/// The command table of an agent's prompt: every operation its role uses, the
+/// tool name its role guide mentions, the command, what it does.
+pub fn command_table(kind: AgentKind, can: &dyn Fn(Capability) -> bool) -> String {
+    let mut out = String::from("| Tool | Command | What it does |\n|---|---|---|\n");
+    for e in catalog().iter().filter(|e| e.listed_for(kind, can)) {
+        let tool = guide_name(e).map_or_else(|| format!("`genie_{}` {}", e.group, e.name), |g| format!("`{g}`"));
+        let note = e.note_for(kind, can).map(|n| format!(" ({n})")).unwrap_or_default();
+        out.push_str(&format!("| {tool} | `{}`{note} | {} |\n", e.usage_for(kind, can), e.summary()));
+    }
+    out
+}
+
 /// URL-encode one path segment or query value.
 pub fn enc(s: &str) -> String {
     s.chars()
@@ -354,6 +498,53 @@ mod tests {
             e.command(e.name).debug_assert();
         }
         commands(Command::new("genie")).debug_assert();
+    }
+
+    fn caps(role: genie_core::Role) -> impl Fn(Capability) -> bool {
+        let c = genie_core::class_capabilities(role);
+        move |x| c.contains(&x)
+    }
+
+    #[test]
+    fn command_tables_follow_the_role() {
+        use genie_core::Role;
+        let orch = command_table(AgentKind::Orchestrator, &|_| true);
+        assert!(orch.contains("| `team_spawn` | `genie team spawn <TASK> [--template …] [--member …]... [--note …]` |"), "{orch}");
+        assert!(orch.contains("`genie task status <STATUS> [--task …] [--note …] [--force]` (review and approved are the team's verdicts"));
+        assert!(
+            orch.contains("--merge-strategy") && orch.contains("| `genie_task` split |") && orch.contains("| `genie_team` templates |")
+        );
+        assert!(!orch.contains("set-status") && !orch.contains("genie job output"), "a member's and a job's own commands");
+
+        let reviewer = command_table(AgentKind::Member, &caps(Role::Reviewer));
+        assert!(
+            reviewer.contains("`genie task status <STATUS> [--task …] [--note …]` (your role may set: changes_requested, approved)"),
+            "{reviewer}"
+        );
+        assert!(reviewer.contains("| `genie_task` check |") && reviewer.contains("| `team_set_status` | `genie team set-status <TEXT>` |"));
+        assert!(reviewer.contains(
+            "`genie mail send <TO> <TEXT> [--level low|normal|high|interrupt] [--intent question|blocker|verdict|done|fyi] [--topic …]`"
+        ));
+        for other in ["genie task create", "--title", "--plan", "--force", "genie team spawn", "genie team templates", "genie task split"] {
+            assert!(!reviewer.contains(other), "a reviewer has no {other}");
+        }
+
+        let executor = command_table(AgentKind::Member, &caps(Role::Executor));
+        assert!(executor.contains("`genie task update [--task …] [--plan …] [--notes …] [--append-notes …] [--label …]...`"), "{executor}");
+        assert!(executor.contains("(your role may set: in_progress, review)") && !executor.contains("genie task check"));
+        let analyst = command_table(AgentKind::Member, &caps(Role::Analyst));
+        assert!(analyst.contains("| `genie_task` create |") && analyst.contains("--title …"), "{analyst}");
+
+        let job = command_table(AgentKind::Job, &caps(Role::Documenter));
+        assert!(job.contains("| `genie_job` output | `genie job output <JSON>` |") && job.contains("| `genie_docs` write |"), "{job}");
+        assert!(!job.contains("genie mail") && !job.contains("genie team"), "a job works alone: {job}");
+
+        // Every row is a command line the catalog parses.
+        for line in [orch, reviewer, executor, analyst, job].concat().lines().filter(|l| l.starts_with("| `")) {
+            let cmd = line.split('`').nth(3).unwrap_or_default();
+            let words: Vec<&str> = cmd.split_whitespace().take(3).collect();
+            assert!(find(words[1], words[2]).is_some(), "{line}");
+        }
     }
 
     #[test]

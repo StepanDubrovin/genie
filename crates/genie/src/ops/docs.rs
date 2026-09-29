@@ -2,11 +2,12 @@
 
 use std::path::PathBuf;
 
+use genie_core::Capability;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Cx, Entry, Need, Op, Out, enc, register, render};
+use super::{Cx, Entry, Listed, Need, Op, Out, enc, register, render};
 
 pub fn register(all: &mut Vec<Entry>) {
     register!(all, Search, Read, Tree, Write, Note, Impact, Proposals, Proposal, Approve, Reject, Spaces, Space, Changelog, Release);
@@ -32,6 +33,7 @@ impl Op for Search {
     const GROUP: &'static str = "docs";
     const NAME: &'static str = "search";
     const LEGACY: Option<&'static str> = Some("docs search");
+    const CAPS: &'static [Capability] = &[Capability::DocsRead];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let mut q = format!("/docs/search?q={}", enc(&self.query));
         for (k, v) in [("type", self.doc_type), ("status", self.status), ("limit", self.limit.map(|n| n.to_string()))] {
@@ -78,6 +80,7 @@ impl Op for Read {
     const GROUP: &'static str = "docs";
     const NAME: &'static str = "read";
     const LEGACY: Option<&'static str> = Some("docs read");
+    const CAPS: &'static [Capability] = &[Capability::DocsRead];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let mut q = format!("/docs/page?path={}", enc(&self.path));
         if let Some(h) = &self.heading {
@@ -99,6 +102,7 @@ impl Op for Tree {
     const GROUP: &'static str = "docs";
     const NAME: &'static str = "tree";
     const LEGACY: Option<&'static str> = Some("docs tree");
+    const CAPS: &'static [Capability] = &[Capability::DocsRead];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("GET", "/docs/tree", None).await?;
         let pages = v["pages"].as_array().cloned().unwrap_or_default();
@@ -128,7 +132,7 @@ pub struct Write {
     #[arg(long, allow_hyphen_values = true)]
     pub note: Option<String>,
     /// create (the page must not exist), update (it must) or upsert.
-    #[arg(long, default_value = "upsert")]
+    #[arg(long, default_value = "upsert", value_parser = ["create", "update", "upsert"])]
     #[serde(default = "upsert")]
     pub mode: String,
     /// The task this change belongs to (default: yours).
@@ -145,6 +149,7 @@ impl Op for Write {
     const NAME: &'static str = "write";
     const LEGACY: Option<&'static str> = Some("docs write");
     const NEED: Need = Need::Write;
+    const CAPS: &'static [Capability] = &[Capability::DocsWrite];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let content = cx.text(self.text, self.file)?.ok_or("pass the page as --text (or --file on the command line)")?;
         let task = self.task.or_else(|| cx.task.clone());
@@ -185,6 +190,8 @@ impl Op for Note {
     const GROUP: &'static str = "docs";
     const NAME: &'static str = "note";
     const NEED: Need = Need::Write;
+    const CAPS: &'static [Capability] = &[Capability::DocsWrite];
+    const LISTED: Listed = Listed::Agents;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let body =
             json!({ "title": self.title, "body": self.body, "tags": split(self.tags), "related": split(self.related), "task": cx.task });
@@ -208,6 +215,8 @@ pub struct Impact {
 impl Op for Impact {
     const GROUP: &'static str = "docs";
     const NAME: &'static str = "impact";
+    const CAPS: &'static [Capability] = &[Capability::DocsRead];
+    const LISTED: Listed = Listed::Agents;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v: Value = cx.call("GET", &format!("/tasks/{}/docs-impact", enc(&cx.task(self.task)?)), None).await?;
         Ok(Out::new(render::impact(&v), v))

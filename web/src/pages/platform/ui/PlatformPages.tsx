@@ -298,7 +298,7 @@ export function ProfilePage() {
             <section>
               <h2>Токен для CLI</h2>
               <p className="muted">
-                Для <code>genie agent …</code> и скриптов: переменные <code>GENIE_URL</code> и <code>GENIE_TOKEN</code>.
+                Для командной строки <code>genie</code>, MCP-клиентов и скриптов: переменные <code>GENIE_URL</code> и <code>GENIE_TOKEN</code>.
               </p>
               <button
                 type="button"

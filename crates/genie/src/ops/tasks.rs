@@ -2,11 +2,12 @@
 
 use std::path::PathBuf;
 
+use genie_core::{Capability, TEAM_TRANSITIONS};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Cx, Entry, Need, Op, Out, enc, register, render};
+use super::{AgentKind, Cx, Entry, Listed, Need, Op, Out, enc, register, render};
 
 pub fn register(all: &mut Vec<Entry>) {
     register!(all, Show, List, Board, Epics, Create, Update, Status, Accept, Comment, Check, Artifact, ArtifactRead, Split, Block, Unblock);
@@ -127,6 +128,7 @@ pub struct Epics {
 impl Op for Epics {
     const GROUP: &'static str = "task";
     const NAME: &'static str = "epics";
+    const LISTED: Listed = Listed::Orchestrator;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("GET", &format!("/tasks?type=epic{}", if self.all { "&closed=1" } else { "" }), None).await?;
         let text = if v.as_array().is_none_or(|a| a.is_empty()) { "(no epics)".to_string() } else { render::list(&v) };
@@ -147,7 +149,7 @@ pub struct Create {
     #[serde(default)]
     pub acceptance: Vec<String>,
     /// task, bug, spike or epic.
-    #[arg(long = "type")]
+    #[arg(long = "type", value_parser = ["task", "bug", "spike", "epic"])]
     #[serde(rename = "type")]
     pub task_type: Option<String>,
     /// The epic (or parent task) to create it in.
@@ -178,6 +180,7 @@ impl Op for Create {
     const NAME: &'static str = "create";
     const LEGACY: Option<&'static str> = Some("create");
     const NEED: Need = Need::Write;
+    const CAPS: &'static [Capability] = &[Capability::TaskCreate];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let description = cx.text(self.description, None)?;
         let body = json!({
@@ -240,7 +243,7 @@ pub struct Update {
     #[arg(long, visible_alias = "epic")]
     pub parent: Option<String>,
     /// task, bug, spike or epic.
-    #[arg(long = "type")]
+    #[arg(long = "type", value_parser = ["task", "bug", "spike", "epic"])]
     #[serde(rename = "type")]
     pub task_type: Option<String>,
 }
@@ -250,6 +253,17 @@ impl Op for Update {
     const NAME: &'static str = "update";
     const LEGACY: Option<&'static str> = Some("update");
     const NEED: Need = Need::Write;
+    fn arg_allowed(arg: &str, can: &dyn Fn(Capability) -> bool) -> bool {
+        match arg {
+            "title" | "description" | "acceptance" | "remove_acceptance" | "deps" | "remove_deps" | "parent" | "task_type" => {
+                can(Capability::TaskScope)
+            }
+            "plan" => can(Capability::TaskPlan),
+            // The orchestrator's and people's.
+            "priority" | "merge_strategy" | "assignee" => false,
+            _ => true,
+        }
+    }
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let mut body = json!({});
         let fields = [
@@ -312,6 +326,18 @@ impl Op for Status {
     const NAME: &'static str = "status";
     const LEGACY: Option<&'static str> = Some("status");
     const NEED: Need = Need::Write;
+    const CAPS: &'static [Capability] = STATUS_CAPS;
+    fn arg_allowed(arg: &str, _can: &dyn Fn(Capability) -> bool) -> bool {
+        arg != "force"
+    }
+    fn prompt_note(kind: AgentKind, can: &dyn Fn(Capability) -> bool) -> Option<String> {
+        if kind == AgentKind::Orchestrator {
+            return Some("review and approved are the team's verdicts: set them yourself only with --force".into());
+        }
+        let mut to: Vec<&str> = TEAM_TRANSITIONS.iter().filter(|(_, _, c)| can(*c)).map(|(_, to, _)| to.as_str()).collect();
+        to.dedup();
+        Some(format!("your role may set: {}", to.join(", ")))
+    }
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let note = cx.text(self.note, None)?;
         let v = cx
@@ -355,7 +381,7 @@ pub struct Comment {
     #[arg(long)]
     pub task: Option<String>,
     /// note, progress, question, decision, review or handoff.
-    #[arg(long, default_value = "note")]
+    #[arg(long, default_value = "note", value_parser = ["note", "progress", "question", "decision", "review", "handoff"])]
     #[serde(default = "note_kind")]
     pub kind: String,
 }
@@ -395,6 +421,7 @@ impl Op for Check {
     const NAME: &'static str = "check";
     const LEGACY: Option<&'static str> = Some("check");
     const NEED: Need = Need::Write;
+    const CAPS: &'static [Capability] = &[Capability::TaskCheck];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx
             .call("POST", &format!("/tasks/{}/acceptance/{}", enc(&cx.task(self.task)?), self.n), Some(json!({ "done": !self.undo })))
@@ -408,7 +435,7 @@ impl Op for Check {
 #[serde(rename_all = "camelCase")]
 pub struct Artifact {
     /// analysis, plan, code, review, test-report, diff, doc, log or other.
-    #[arg(long, default_value = "other")]
+    #[arg(long, default_value = "other", value_parser = ["analysis", "plan", "code", "review", "test-report", "diff", "doc", "log", "other"])]
     #[serde(default = "other_kind")]
     pub kind: String,
     /// File name, e.g. review.md.
@@ -520,7 +547,7 @@ impl Op for Split {
     const GROUP: &'static str = "task";
     const NAME: &'static str = "split";
     const LEGACY: Option<&'static str> = Some("split");
-    const NEED: Need = Need::Write;
+    const NEED: Need = Need::Orchestrator;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("POST", &format!("/tasks/{}/split", enc(&cx.task(self.task)?)), Some(json!({ "children": self.titles }))).await?;
         Ok(Out::new(format!("created:\n{}", render::list(&v)), v))
@@ -542,6 +569,7 @@ impl Op for Block {
     const NAME: &'static str = "block";
     const LEGACY: Option<&'static str> = Some("block");
     const NEED: Need = Need::Write;
+    const CAPS: &'static [Capability] = &[Capability::TaskBlock];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("POST", &format!("/tasks/{}/block", enc(&cx.task(self.task)?)), Some(json!({ "reason": self.reason }))).await?;
         Ok(Out::new("blocked", v))
@@ -561,8 +589,19 @@ impl Op for Unblock {
     const NAME: &'static str = "unblock";
     const LEGACY: Option<&'static str> = Some("unblock");
     const NEED: Need = Need::Write;
+    const CAPS: &'static [Capability] = &[Capability::TaskBlock];
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("DELETE", &format!("/tasks/{}/block", enc(&cx.task(self.task)?)), None).await?;
         Ok(Out::new("unblocked", v))
     }
 }
+
+/// Every permission to move a task.
+const STATUS_CAPS: &[Capability] = &[
+    Capability::StatusRefine,
+    Capability::StatusStart,
+    Capability::StatusRework,
+    Capability::StatusSubmit,
+    Capability::StatusApprove,
+    Capability::StatusReturn,
+];

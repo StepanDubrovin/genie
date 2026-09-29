@@ -1050,7 +1050,7 @@ pub fn render_digest(mails: &[Mail]) -> String {
 
 // --- deliveries to live sessions ------------------------------------------------
 
-/// Longest message body put into a session; the rest is read with `genie agent mail <id>`.
+/// Longest message body put into a session; the rest is read with `genie mail read <id>`.
 pub const MAX_MESSAGE_CHARS: usize = 2000;
 /// Default size budget of one delivery (rendered characters).
 pub const DELIVERY_BUDGET: usize = 8000;
@@ -1074,7 +1074,7 @@ fn clip(text: &str, id: i64) -> String {
         return text.to_string();
     }
     let head: String = text.chars().take(MAX_MESSAGE_CHARS).collect();
-    format!("{head}…\n[cut: {} more characters — read all with `genie agent mail {id}`]", text.chars().count() - MAX_MESSAGE_CHARS)
+    format!("{head}…\n[cut: {} more characters — read all with `genie mail read {id}`]", text.chars().count() - MAX_MESSAGE_CHARS)
 }
 
 /// One message as it appears in a session.
@@ -1103,7 +1103,7 @@ pub fn render_one(m: &Mail) -> String {
     };
     let mut out = format!("{head}\n\n{}", clip(&m.text, m.id));
     if m.awaits {
-        out.push_str(&format!("\n\n→ {} is waiting for your answer: `genie agent reply {} \"…\"`", m.from, m.id));
+        out.push_str(&format!("\n\n→ {} is waiting for your answer: `genie mail reply {} \"…\"`", m.from, m.id));
     }
     out
 }
@@ -1127,7 +1127,7 @@ pub fn render_delivery(d: &Delivery, orchestrator: bool) -> String {
         out.push("(Act where a decision, answer, unblock or acceptance is needed; informational updates need no reply.)".into());
     } else {
         out.extend(d.mails.iter().map(render_one));
-        out.push("(Handle what needs action, then carry on. Reply only when needed — `genie agent send` or `genie agent reply <id>`; no acknowledgements.)".into());
+        out.push("(Handle what needs action, then carry on. Reply only when needed — `genie mail send` or `genie mail reply <id>`; no acknowledgements.)".into());
     }
     out.join("\n\n")
 }
@@ -1244,7 +1244,7 @@ mod tests {
         }
         let first = bus.lease_delivery(Some("G-1"), "yoda", &[], 2500).unwrap().unwrap();
         assert_eq!((first.mails.len(), first.more), (1, 2));
-        assert!(render_one(&first.mails[0]).contains("read all with `genie agent mail"), "long messages are clipped");
+        assert!(render_one(&first.mails[0]).contains("read all with `genie mail read"), "long messages are clipped");
         let rest = bus.lease_delivery(Some("G-1"), "yoda", &[], DELIVERY_BUDGET).unwrap().unwrap();
         assert_eq!(rest.mails.len(), 2);
     }
@@ -1297,7 +1297,7 @@ mod tests {
 
         let ask =
             bus.send(SendMail { intent: Some("question"), awaits: true, ..send("bender", "sherlock", "CSV or XLSX?") }).unwrap().remove(0);
-        assert!(render_one(&ask).contains(&format!("genie agent reply {}", ask.id)));
+        assert!(render_one(&ask).contains(&format!("genie mail reply {}", ask.id)));
         assert!(bus.take_reply(ask.id, "bender").unwrap().is_none());
         assert!(bus.reply("yoda", "reviewer", ask.id, "not mine").is_err(), "only the addressee answers");
         let reply = bus.reply("sherlock", "analyst", ask.id, "CSV").unwrap().remove(0);
