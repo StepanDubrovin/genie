@@ -396,8 +396,15 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
     ]);
     let lists = spec.kit.placeholders(&files, &mut vars);
     let argv = runtime::build_command(&app.cfg.runtime.session_command, &vars, &lists);
-    let Some((program, args)) = argv.split_first() else { return Err(AppError::Internal("runtime.sessionCommand is empty".into())) };
-    let mut cmd = runtime::agent_command(app, program, args, &spec.cwd, key.project(), &spec.identity(), &token);
+    let Some(program) = argv.first() else { return Err(AppError::Internal("runtime.sessionCommand is empty".into())) };
+    let mut cmd = match runtime::agent_command(app, &argv, &spec.cwd, &dir, key.project(), &spec.identity(), &token) {
+        Ok(c) => c,
+        Err(e) => {
+            let t = token.clone();
+            let _ = app.blocking(move |app| app.with_server(|db| db.revoke_token(&t))).await;
+            return Err(AppError::Internal(e));
+        }
+    };
     runtime::kit_env(&mut cmd, &files, &argv);
     cmd.env("GENIE_SESSION", "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = match cmd.spawn() {

@@ -30,6 +30,7 @@ use tokio::sync::Semaphore;
 
 use crate::agent_config::{AgentConfig, FileAccess, MailMode, RelKind, Relation, RoleDef, SpecMember, Stage, TeamSpec, Workspace};
 use crate::config::MemberSpec;
+use crate::sandbox;
 use crate::state::{App, AppError, AppResult};
 
 /// Which agent a turn is for.
@@ -72,6 +73,7 @@ fn with_state<T>(f: impl FnOnce(&mut SchedState) -> T) -> T {
 /// Start background workers: crash recovery, then the scheduler.
 pub fn start(app: &Arc<App>) {
     crate::knowledge::start_watcher(app);
+    crate::vault_sync::start(app);
     crate::agent_config::start_watcher(app);
     crate::engine::start(app);
     crate::channels::start(app);
@@ -541,9 +543,9 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
     ]);
     let lists = p.kit.placeholders(&files, &mut vars);
     let argv = build_command(&app.cfg.runtime.command, &vars, &lists);
-    let Some((program, args)) = argv.split_first() else { return Err("runtime.command is empty".into()) };
+    let Some(program) = argv.first() else { return Err("runtime.command is empty".into()) };
     let who = Identity { role: p.role, role_id: &p.role_id, name: &p.name, team: p.team.as_deref(), task: p.task.as_deref(), job: p.job };
-    let mut cmd = agent_command(app, program, args, &p.cwd, key.project(), &who, &token);
+    let mut cmd = agent_command(app, &argv, &p.cwd, &dir, key.project(), &who, &token)?;
     kit_env(&mut cmd, &files, &argv);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
@@ -595,18 +597,25 @@ pub(crate) struct Identity<'a> {
     pub job: Option<i64>,
 }
 
-/// The harness command with the agent's environment (`GENIE_URL`, `GENIE_TOKEN`…).
+/// The harness command with the agent's environment (`GENIE_URL`, `GENIE_TOKEN`…),
+/// in the agent's sandbox when agents run in one. `dir` is the agent's runtime
+/// directory (its prompt, rules and MCP config).
 pub(crate) fn agent_command(
     app: &App,
-    program: &str,
-    args: &[String],
+    argv: &[String],
     cwd: &Path,
+    dir: &Path,
     project: &str,
     who: &Identity<'_>,
     token: &str,
-) -> tokio::process::Command {
+) -> Result<tokio::process::Command, String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let exe_dir = app.exe.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    let (program, args) = argv.split_first().ok_or("the agent command is empty")?;
+    let (program, args) = match sandbox_plan(app, project, cwd, dir)? {
+        Some(plan) => plan.wrap(program, args),
+        None => (program.to_string(), args.to_vec()),
+    };
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
@@ -629,11 +638,100 @@ pub(crate) fn agent_command(
             cmd.env_remove(var);
         }
     }
+    // Commits need an identity: when the server user has none, agents commit under their own names.
+    if !git_identity(cwd) {
+        let (name, email) = (format!("{} ({})", who.name, who.role_id), format!("{}@genie.local", who.name));
+        cmd.env("GIT_AUTHOR_NAME", &name)
+            .env("GIT_AUTHOR_EMAIL", &email)
+            .env("GIT_COMMITTER_NAME", &name)
+            .env("GIT_COMMITTER_EMAIL", &email);
+    }
     for (k, v) in &app.cfg.runtime.env {
         cmd.env(k, v);
     }
     app.mcp.place(&crate::mcp_gateway::agent_key(project, who.team, who.name), cwd);
-    cmd
+    Ok(cmd)
+}
+
+/// The sandbox of an agent working in `cwd` (`dir`: its runtime directory), or
+/// `None` when agents run without one ([`crate::sandbox`]).
+fn sandbox_plan(app: &App, project: &str, cwd: &Path, dir: &Path) -> Result<Option<sandbox::Plan>, String> {
+    use sandbox::Access::{Hidden, ReadOnly, Writable};
+    let cfg = &app.cfg.runtime.sandbox;
+    if !sandbox::enabled(cfg)? {
+        if cfg.mode == "auto" {
+            warn_once(
+                "genie runtime: agents run without a sandbox: bubblewrap does not work on this machine (apt install bubblewrap); set runtime.sandbox to \"off\" to run without one on purpose",
+            );
+        }
+        return Ok(None);
+    }
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    let mut plan = sandbox::Plan::new(cwd);
+    // The server's data: only the agent's own files show through.
+    plan.set(&app.data, Hidden);
+    for f in ["genie-bus.ts", "genie-guard.ts"] {
+        plan.set(&app.data.join("runtime").join(f), ReadOnly);
+    }
+    plan.set(dir, ReadOnly);
+    plan.set(&app.data.join("skills"), ReadOnly);
+    let sessions = app.data.join("sessions").join(project);
+    let tmp = dir.join("tmp");
+    for d in [&sessions, &tmp] {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    plan.set(&sessions, Writable);
+    plan.tmp(&tmp);
+    // The trackers (agents reach tasks through the API) and the other projects.
+    for p in app.projects().map_err(|e| e.to_string())? {
+        plan.set(Path::new(&p.tracker_dir), Hidden);
+        if p.slug == project {
+            continue;
+        }
+        if let Some(repo) = &p.repo {
+            let repo = Path::new(repo);
+            plan.set(repo, Hidden);
+            if let Some(worktrees) = worktree_place(app, repo, "_", "_").0.parent() {
+                plan.set(worktrees, Hidden);
+            }
+        }
+    }
+    // `genie agent …` is the server's own binary.
+    if let Some(bin) = app.exe.parent() {
+        plan.set(bin, ReadOnly);
+    }
+    // Where the agent works, and the git repository behind a worktree (its commits go there).
+    plan.set(cwd, Writable);
+    if let Some(git) = git_common_dir(cwd) {
+        plan.set(&git, Writable);
+    }
+    let pi_dir = app.cfg.runtime.env.get("PI_CODING_AGENT_DIR").cloned().or_else(|| std::env::var("PI_CODING_AGENT_DIR").ok());
+    sandbox::defaults(&mut plan, cfg, &home, pi_dir.map(|d| sandbox::expand(&d, &home)).as_deref());
+    Ok(Some(plan))
+}
+
+/// The repository's git directory (shared by its worktrees), when `cwd` is in one.
+fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    (out.status.success() && path.is_dir()).then_some(path)
+}
+
+/// Whether git has an identity for commits made in `cwd` (the repository's, the user's or the system's).
+fn git_identity(cwd: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["config", "user.email"])
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
 }
 
 // --- what the harness gets from the role ------------------------------------------
@@ -1025,7 +1123,7 @@ fn tools_table(role: &RoleDef, reader: Reader) -> String {
     }
     update.push_str(" [--append-notes text]");
     if orch {
-        update.push_str(" [--merge-strategy text]");
+        update.push_str(" [--merge-strategy text] [--assignee login|none]");
     }
     update.push('`');
     rows.push(("`genie_task` update", update));
@@ -1219,7 +1317,29 @@ fn agent_prompt(
         lang.internal,
         lang.user,
     ));
+    out.push_str("\nTo reach a person, mention them as `@login` in a task comment: they get a notification (in the web, Telegram or e-mail). A task's person responsible (`assignee`) is the one to ask about it.\n");
     if reader == Reader::Orchestrator {
+        let people: Vec<String> = app
+            .with_server(|db| db.members_of(&project.slug))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(u, _)| !u.disabled)
+            .map(|(u, r)| {
+                format!("@{} ({}{})", u.login, r.as_str(), if u.name.is_empty() { String::new() } else { format!(", {}", u.name) })
+            })
+            .collect();
+        if !people.is_empty() {
+            out.push_str(&format!("\nPeople of the project: {}. Set a task's person responsible with `genie agent update --assignee login` when someone owns the decision or the review.\n", people.join(", ")));
+        }
+        if project.autonomy == "assisted" {
+            out.push_str("\n## Autonomy: assisted\n\nPeople close tasks in this project. Take tasks into work and see them through as usual, but do not move a task to `done` or `cancelled` yourself (the server refuses): when it meets its Definition of Done, move it to `needs_owner` with a short summary of the result and what to check. A person closes it.\n");
+        }
+        if !project.integration.trim().is_empty() {
+            out.push_str(&format!(
+                "\n## Integration\n\nUnless the owner agreed on another way for a task, its result is integrated like this: {}. Use it as the task's integration (`mergeStrategy`) without asking; teams get it with the task.\n",
+                project.integration.trim()
+            ));
+        }
         out.push_str("\n## Automations\n\nSome work is done by the project's automations (their comments and actions are signed `automation:<id>:<run>`). A task in `refining` with the comment \"Взята в разбор автоматически\" is being triaged by an automation: do not start another analysis for it — you will get a message when the author's answers are in. Automations also update the knowledge base and the changelog when a task is done.\n");
         out.push_str(&catalogue_section(agents, project));
     }
@@ -1528,6 +1648,11 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
         let wt = worktree.as_ref().map(|w| genie_core::Worktree { path: w.path.clone(), branch: Some(w.branch.clone()) });
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         t.assign_team(&system, &task.id, Some(&team_id), wt.as_ref(), Some(&names))?;
+        // The project's way of integrating results, unless the task has its own.
+        if !refinement && task.merge_strategy.trim().is_empty() && !project.integration.trim().is_empty() {
+            let input = genie_core::UpdateInput { merge_strategy: Some(project.integration.clone()), ..Default::default() };
+            t.update(&system, &task.id, input)?;
+        }
         if matches!(task.status, Status::Inbox | Status::Draft) {
             t.set_status(
                 &system,

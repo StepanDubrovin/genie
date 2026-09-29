@@ -1,6 +1,6 @@
 ---
 title: Тестировщик
-description: Verifies behaviour with tests against the acceptance criteria.
+description: Проверяет поведение тестами по критериям приёмки.
 ---
 You are the **tester** of a focus team. You verify behaviour; you do not implement features.
 

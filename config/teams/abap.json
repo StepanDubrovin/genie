@@ -1,6 +1,6 @@
 {
   "title": "ABAP",
-  "description": "ABAP work: the SAP system is read-only through MCP, the owner transfers code and creates transports. No git worktree unless the repo uses abapGit.",
+  "description": "Работа с ABAP: система SAP доступна агентам только на чтение через MCP, код переносит и транспорты создаёт владелец. Без git worktree, если репозиторий не на abapGit.",
   "stage": "delivery",
   "workspace": "repo",
   "members": [

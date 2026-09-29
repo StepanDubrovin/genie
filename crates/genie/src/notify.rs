@@ -27,7 +27,7 @@ pub struct Message {
 /// Resolve recipient specs to user ids.
 ///
 /// `event.actor` (the person who caused the event), `task.author` (who created
-/// the task), `task.assignees`, `project.owners`, `project.admins`,
+/// the task), `task.assignee` (the person responsible), `task.assignees`, `project.owners`, `project.admins`,
 /// `project.members`, `@login` or a plain login.
 pub fn resolve(app: &App, project: &str, specs: &[String], ctx: &Value) -> AppResult<Vec<i64>> {
     let mut logins: BTreeSet<String> = BTreeSet::new();
@@ -47,6 +47,14 @@ pub fn resolve(app: &App, project: &str, specs: &[String], ctx: &Value) -> AppRe
                     && let Some(first) = task.history.iter().find(|h| h.role == genie_core::Role::Human)
                 {
                     logins.insert(first.actor.clone());
+                }
+            }
+            "task.assignee" => {
+                if let Some(t) = &task_id
+                    && let Ok(task) = app.with_tracker(project, |tr| tr.get(t))
+                    && let Some(a) = task.assignee
+                {
+                    logins.insert(a);
                 }
             }
             "task.assignees" | "task.watchers" => {

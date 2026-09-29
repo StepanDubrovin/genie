@@ -47,7 +47,7 @@ export const useComment = () => useInvalidating((v: { id: string; text: string }
 export const useCheck = () =>
   useInvalidating((v: { id: string; n: number; done: boolean }) => request<Task>("POST", `/api/tasks/${encodeURIComponent(v.id)}/acceptance/${v.n}`, { done: v.done }));
 export const usePatchTask = () =>
-  useInvalidating((v: { id: string; patch: { title?: string; description?: string; plan?: string; priority?: number; labels?: string[]; mergeStrategy?: string; parent?: string | null } }) =>
+  useInvalidating((v: { id: string; patch: { title?: string; description?: string; plan?: string; priority?: number; labels?: string[]; mergeStrategy?: string; parent?: string | null; assignee?: string | null } }) =>
     request<Task>("PATCH", `/api/tasks/${encodeURIComponent(v.id)}`, v.patch),
   );
 export const useCreateTask = () =>

@@ -57,6 +57,9 @@ pub enum AgentCmd {
         deps: Vec<String>,
         #[arg(long)]
         merge_strategy: Option<String>,
+        /// The person responsible for the task: a login of the project ("none" to clear).
+        #[arg(long)]
+        assignee: Option<String>,
         #[arg(short = 'p', long)]
         priority: Option<i64>,
         /// Move into an epic ("none" to move out).
@@ -314,6 +317,9 @@ pub fn render_task(t: &Value) -> String {
     if !s("mergeStrategy").is_empty() {
         out.push(format!("integration: {}", s("mergeStrategy")));
     }
+    if let Some(a) = t["assignee"].as_str() {
+        out.push(format!("person responsible: @{a} (mention them in a comment to reach them)"));
+    }
     if let Some(e) = t["epic"].as_object() {
         out.push(format!(
             "\n## Epic {}: {}\n{}",
@@ -531,6 +537,7 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
             remove_acceptance,
             deps,
             merge_strategy,
+            assignee,
             priority,
             parent,
         } => {
@@ -557,6 +564,9 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
             }
             if let Some(p) = parent {
                 body["parent"] = if p == "none" { Value::Null } else { json!(p) };
+            }
+            if let Some(a) = assignee {
+                body["assignee"] = if a == "none" { Value::Null } else { json!(a) };
             }
             let v = c.call("PATCH", &format!("/tasks/{}", enc(&my_task(task)?)), Some(body)).await?;
             format!("updated {}", summary(&v))

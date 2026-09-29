@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
-import { EpicIcon, inTaskViews, isView, type ViewId, VIEWS, useEpicMap, useTasks } from "@/entities/task";
+import { personName, useMembers } from "@/entities/project";
+import { useSession } from "@/entities/session";
+import { EpicIcon, inTaskViews, inViewOf, isView, type ViewId, VIEWS, useEpicMap, useTasks } from "@/entities/task";
 import { type Team, useTeamMap } from "@/entities/team";
 import type { NewTaskPreset } from "@/features/create-task";
 import { isTyping, type Layout, plural, readPref, writePref } from "@/shared/lib";
@@ -19,6 +21,10 @@ export function TasksPage({ onNew, searchRef }: { onNew: (preset?: NewTaskPreset
   const [focused, setFocused] = useState<string | undefined>();
   const tasksQ = useTasks();
   const teams = useTeamMap();
+  const session = useSession().data;
+  const login = session?.mode === "users" ? session.user.login : undefined;
+  const members = useMembers(login ? session?.project : undefined).data;
+  const people = useMemo(() => new Map((members ?? []).map((m) => [m.user.login, personName(m.user)])), [members]);
   const selected = sp.get("task") ?? undefined;
   const epicFilter = sp.get("epic") ?? undefined;
   const epic = useEpicMap().get(epicFilter ?? "");
@@ -32,7 +38,8 @@ export function TasksPage({ onNew, searchRef }: { onNew: (preset?: NewTaskPreset
   const q = query.trim().toLowerCase();
   const visible = (tasksQ.data ?? []).filter((t) => (epicFilter ? t.parent === epicFilter : inTaskViews(t)));
   const matches = visible.filter((t) => !q || t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q) || t.labels.some((l) => l.includes(q)));
-  const inView = matches.filter((t) => VIEWS[view].statuses.includes(t.status));
+  const inView = matches.filter((t) => inViewOf(t, view, login));
+  const boardTasks = VIEWS[view].mine ? matches.filter((t) => t.assignee === login) : matches;
   const ordered = useMemo(() => inView, [inView]);
 
   const setLayout = (l: Layout) => {
@@ -85,7 +92,7 @@ export function TasksPage({ onNew, searchRef }: { onNew: (preset?: NewTaskPreset
           </span>
         )}
         <span className="muted d-only" style={{ fontSize: 12 }}>
-          {(layout === "board" ? matches : inView).length} {plural((layout === "board" ? matches : inView).length, "задача", "задачи", "задач")}
+          {(layout === "board" ? boardTasks : inView).length} {plural((layout === "board" ? boardTasks : inView).length, "задача", "задачи", "задач")}
         </span>
         <div className="seg icons" role="group" aria-label="Представление">
           <button type="button" className={layout === "list" ? "on" : ""} aria-pressed={layout === "list"} aria-label="Список" title="Список" onClick={() => setLayout("list")}>
@@ -122,15 +129,17 @@ export function TasksPage({ onNew, searchRef }: { onNew: (preset?: NewTaskPreset
 
       {layout === "list" && (
         <div className="m-only m-nav" role="group" aria-label="Разделы">
-          {(Object.keys(VIEWS) as ViewId[]).map((v) => {
-            const n = visible.filter((t) => VIEWS[v].statuses.includes(t.status)).length;
-            const cls = v === view ? "on" : v === "decisions" && n ? "amber" : "";
-            return (
-              <button key={v} type="button" className={cls} onClick={() => navigate({ pathname: `/${v}`, search: sp.toString() })}>
-                {VIEWS[v].name} {n || ""}
-              </button>
-            );
-          })}
+          {(Object.keys(VIEWS) as ViewId[])
+            .filter((v) => login || !VIEWS[v].mine)
+            .map((v) => {
+              const n = visible.filter((t) => inViewOf(t, v, login) && (!VIEWS[v].mine || t.status !== "done")).length;
+              const cls = v === view ? "on" : v === "decisions" && n ? "amber" : "";
+              return (
+                <button key={v} type="button" className={cls} onClick={() => navigate({ pathname: `/${v}`, search: sp.toString() })}>
+                  {VIEWS[v].name} {n || ""}
+                </button>
+              );
+            })}
           <button type="button" onClick={() => navigate("/epics")}>
             Эпики
           </button>
@@ -149,10 +158,10 @@ export function TasksPage({ onNew, searchRef }: { onNew: (preset?: NewTaskPreset
       ) : tasksQ.isError ? (
         <div className="empty">Не удалось загрузить задачи: {tasksQ.error.message}</div>
       ) : layout === "board" ? (
-        <Board tasks={matches} teams={teams} showDone={showDone} onShowDone={() => setShowDone(true)} onOpen={open} />
+        <Board tasks={boardTasks} teams={teams} showDone={showDone} onShowDone={() => setShowDone(true)} onOpen={open} />
       ) : (
         <div className="scroll">
-          <TaskList tasks={ordered} statuses={VIEWS[view].statuses} teams={teams} focused={focused} selected={selected} onOpen={open} onFocus={setFocused} />
+          <TaskList tasks={ordered} statuses={VIEWS[view].statuses} teams={teams} people={people} focused={focused} selected={selected} onOpen={open} onFocus={setFocused} />
         </div>
       )}
 

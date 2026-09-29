@@ -164,3 +164,187 @@ pub fn changelog_add(app: &App, project: &str, group: &str, text: &str, task: Op
         Ok(format!("{space}/changelog.md"))
     })
 }
+
+// --- docs impact -----------------------------------------------------------------
+
+/// Changed-path reasons kept per page, so a broad glob cannot flood the answer.
+const MAX_REASONS_PER_PAGE: usize = 8;
+
+/// A repository glob of a page's `paths`: `*` stays within a segment, `**`
+/// crosses segments (`**/` also matches no segment at all), `?` is one character.
+pub fn glob_matches(pattern: &str, path: &str) -> bool {
+    if pattern.is_empty() || pattern.starts_with('/') || path.starts_with('/') || pattern.split('/').any(|p| p == ".." || p == ".") {
+        return false;
+    }
+    fn go(p: &[char], s: &[char]) -> bool {
+        match p.first() {
+            None => s.is_empty(),
+            Some('*') if p.get(1) == Some(&'*') => {
+                if p.get(2) == Some(&'/') {
+                    let rest = &p[3..];
+                    go(rest, s) || (0..s.len()).any(|i| s[i] == '/' && go(rest, &s[i + 1..]))
+                } else {
+                    (0..=s.len()).any(|i| go(&p[2..], &s[i..]))
+                }
+            }
+            Some('*') => {
+                let mut i = 0;
+                loop {
+                    if go(&p[1..], &s[i..]) {
+                        return true;
+                    }
+                    if i == s.len() || s[i] == '/' {
+                        return false;
+                    }
+                    i += 1;
+                }
+            }
+            Some('?') => s.first().is_some_and(|c| *c != '/') && go(&p[1..], &s[1..]),
+            Some(c) => s.first() == Some(c) && go(&p[1..], &s[1..]),
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let s: Vec<char> = path.chars().collect();
+    go(&p, &s)
+}
+
+/// What a team changed in its worktree: committed since its base, and not yet committed.
+fn changed_paths(wt: &genie_core::team::TeamWorktree) -> (bool, Vec<String>, Vec<String>) {
+    let root = std::path::Path::new(&wt.path);
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git").arg("-C").arg(root).args(args).stderr(std::process::Stdio::null()).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    if !root.exists() {
+        return (false, Vec::new(), vec![format!("worktree {} does not exist", wt.path)]);
+    }
+    let top = git(&["rev-parse", "--show-toplevel"]).map(|t| std::path::PathBuf::from(t.trim()));
+    if top.and_then(|t| t.canonicalize().ok()) != root.canonicalize().ok() {
+        return (false, Vec::new(), vec![format!("worktree {} is not a git working tree", wt.path)]);
+    }
+    let mut notes = Vec::new();
+    let mut paths = std::collections::BTreeSet::new();
+    match &wt.base {
+        None => notes.push("no base commit recorded for the team".to_string()),
+        Some(base) => {
+            let short = &base[..base.len().min(10)];
+            match git(&["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")]) {
+                None => notes.push(format!("base {short} is not reachable from the worktree")),
+                Some(diff) => {
+                    paths.extend(diff.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string));
+                    if paths.is_empty() {
+                        notes.push(format!("no changes found between {short} and HEAD"));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(status) = git(&["status", "--porcelain=v1", "-z", "--untracked-files=all"]) {
+        let mut chunks = status.split('\0').filter(|c| !c.is_empty());
+        while let Some(chunk) = chunks.next() {
+            let (code, file) = (chunk.get(..2).unwrap_or_default(), chunk.get(3..).unwrap_or_default());
+            paths.insert(file.to_string());
+            if code.contains(['R', 'C'])
+                && let Some(from) = chunks.next()
+            {
+                paths.insert(from.to_string());
+            }
+        }
+    }
+    (true, paths.into_iter().collect(), notes)
+}
+
+/// Pages of the project's knowledge a task may have made stale: a path its team
+/// changed matches a page's `paths`, or the page names the task (or its epic) in
+/// `related`. A hint for the reviewer and the documenter, never a gate: whatever
+/// cannot be read becomes a note.
+pub fn docs_impact(app: &App, project: &str, id: &str) -> AppResult<Value> {
+    use genie_core::Status;
+    let task = app.with_tracker(project, |t| t.get(id))?;
+    let mut notes: Vec<String> = Vec::new();
+    let (mut available, mut changed) = (false, Vec::new());
+    let worktree = task.team.as_ref().and_then(|team| app.with_tracker(project, |t| t.bus().get(team)).ok()).and_then(|t| t.worktree);
+    match worktree {
+        None => notes.push("no team worktree for this task".into()),
+        Some(wt) => {
+            let (ok, paths, n) = changed_paths(&wt);
+            (available, changed) = (ok, paths);
+            notes.extend(n);
+        }
+    }
+    let related: std::collections::BTreeSet<String> =
+        std::iter::once(task.id.clone()).chain(task.parent.clone()).map(|s| s.to_uppercase()).collect();
+    let pages = match app.with_vault(|v| v.tree()) {
+        Ok(p) => p,
+        Err(e) => {
+            notes.push(format!("docs index unavailable: {e}"));
+            Vec::new()
+        }
+    };
+    let mut found: Vec<(usize, Value, bool, String)> = Vec::new();
+    for page in pages.into_iter().filter(|p| p.project.as_deref() == Some(project)) {
+        let mut reasons = Vec::new();
+        let mut matched = 0;
+        for pattern in page.paths.iter().flatten() {
+            for path in &changed {
+                if glob_matches(pattern, path) {
+                    matched += 1;
+                    if reasons.len() < MAX_REASONS_PER_PAGE {
+                        reasons.push(json!({ "kind": "changed-path", "path": path, "pattern": pattern }));
+                    }
+                }
+            }
+        }
+        let named: Vec<&String> = page.related.iter().filter(|r| related.contains(&r.trim().to_uppercase())).collect();
+        for r in &named {
+            reasons.push(json!({ "kind": "related", "id": r }));
+        }
+        if reasons.is_empty() || (page.status.as_deref() == Some("deprecated") && named.is_empty()) {
+            continue;
+        }
+        let summary = reasons
+            .iter()
+            .map(|r| match r["kind"].as_str() {
+                Some("changed-path") => {
+                    format!("changes {} (page paths {})", r["path"].as_str().unwrap_or_default(), r["pattern"].as_str().unwrap_or_default())
+                }
+                _ => format!("related to {}", r["id"].as_str().unwrap_or_default()),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let candidate = json!({
+            "path": page.path, "title": page.title, "type": page.doc_type, "status": page.status, "stale": page.stale,
+            "staleReasons": page.stale_reasons, "diagnostics": page.diagnostics, "reasons": reasons, "summary": summary,
+        });
+        found.push((matched, candidate, page.stale, page.path));
+    }
+    // Pages matched by changed paths first (most matches first), stale ones before fresh, then by path.
+    found.sort_by(|a, b| (a.0 == 0).cmp(&(b.0 == 0)).then(b.0.cmp(&a.0)).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)));
+    Ok(json!({
+        "taskId": task.id,
+        "status": task.status,
+        "applicable": matches!(task.status, Status::Review | Status::Done),
+        "changedPathsAvailable": available,
+        "changedPaths": changed,
+        "notes": notes,
+        "candidates": found.into_iter().map(|f| f.1).collect::<Vec<_>>(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_matches;
+
+    #[test]
+    fn globs_follow_the_docs_paths_contract() {
+        assert!(glob_matches("src/**", "src/a/b.rs"));
+        assert!(glob_matches("src/**/*.abap", "src/pricing.abap"), "**/ also matches no segment");
+        assert!(glob_matches("src/**/*.abap", "src/a/b/pricing.abap"));
+        assert!(glob_matches("src/*.rs", "src/lib.rs"));
+        assert!(!glob_matches("src/*.rs", "src/a/lib.rs"), "* stays within a segment");
+        assert!(glob_matches("docs/?.md", "docs/a.md"));
+        assert!(!glob_matches("docs/?.md", "docs/ab.md"));
+        assert!(!glob_matches("../x", "../x"));
+        assert!(!glob_matches("src/**", "/etc/passwd"));
+    }
+}

@@ -1,6 +1,6 @@
 {
   "title": "Исследование",
-  "description": "Refinement team for an unresearched task: analysts investigate and propose scope + acceptance criteria; a reviewer challenges them. Allowed before the task is ready.",
+  "description": "Уточнение неисследованной задачи: аналитики изучают её и предлагают объём и критерии приёмки, ревьюер их оспаривает. Можно до того, как задача готова к работе.",
   "stage": "refinement",
   "workspace": "repo",
   "members": [

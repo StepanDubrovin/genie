@@ -686,8 +686,10 @@ fn notify_intake(app: &App, project: &str) -> AppResult<()> {
         let (specs, msg): (Vec<&str>, Option<Message>) = match (e.kind.as_str(), to) {
             ("task.status_changed", "needs_owner") if e.actor_role != "human" => {
                 let id = task_id.clone().unwrap_or_default();
+                // The person responsible decides, with the author; without one, the admins.
+                let responsible = app.with_tracker(project, |t| Ok(t.get(&id)?.assignee)).ok().flatten().is_some();
                 (
-                    vec!["task.author", "project.admins"],
+                    if responsible { vec!["task.assignee", "task.author"] } else { vec!["task.author", "project.admins"] },
                     Some(Message {
                         kind: "needs_owner".into(),
                         title: format!("{id} ждёт вашего решения"),

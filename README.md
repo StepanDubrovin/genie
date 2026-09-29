@@ -1,8 +1,42 @@
 # genie
 
-Набор расширений для [pi](https://pi.dev): **оркестратор + фокус-команды** агентов с локальным трекером задач (SQLite), прямым общением агентов, отдельным git worktree на команду, моделями разных провайдеров в одной команде и веб-интерфейсом в духе Linear.
+**Командный сервис задач, знаний и команд ИИ-агентов.** Люди ставят задачи в веб, Telegram или почту; оркестратор уточняет их и собирает под каждую фокус-команду агентов (аналитик, исполнитель, ревьюер, тестировщик, документатор — у каждого своя модель); команда работает в своём git worktree или, для проектов без кода, в своём каталоге, а когда нужно решение человека — спрашивает ответственного. Знания — Obsidian-совместимое хранилище в git, которое правят и люди, и агенты.
 
-## Как это работает
+- **Сервер** `genie serve` (Rust): веб-интерфейс в духе Linear, API, живые сессии агентов на [pi](https://pi.dev) в песочнице bubblewrap, роли и шаблоны команд, шлюз MCP, автоматизации, уведомления в веб, Telegram и почту, база знаний с синхронизацией в git.
+- **Люди и проекты**: несколько проектов, роли в проекте, ответственные за задачи, упоминания `@login`, приглашения ссылкой; автономность оркестратора на проект (`autonomous`, `assisted`, `manual`).
+- **Надёжность**: перезапуск ничего не теряет, резервная копия на ходу, `genie doctor` перед запуском, юниты systemd.
+
+## Быстрый старт
+
+```bash
+cargo build --release -p genie && npm install && npm run build:web
+npm install -g @earendil-works/pi-coding-agent && pi          # pi и /login у провайдеров моделей
+./target/release/genie serve --web web/dist                     # http://127.0.0.1:7420
+```
+
+Откройте веб на этой же машине: сервер без проектов предложит создать первый, на странице «Проект и люди» — учётную запись администратора и ссылки-приглашения для коллег. `./target/release/genie doctor` скажет, чего ещё не хватает (модели ролей, песочница, каналы, сеть).
+
+## Документация
+
+- [Запуск и эксплуатация](docs/platform/getting-started.md) — люди, агенты, песочница, роли и шаблоны, Telegram и почта, знания и Obsidian, резервные копии, systemd, `genie doctor`.
+- [Пилот](docs/platform/pilot.md) — подготовка, репетиция, первый день, что измерять.
+- [Видение](docs/platform/vision.md), [бэкенд](docs/platform/backend.md), [роли и команды](docs/platform/agent-roles-and-teams.md), [шина агентов](docs/platform/agent-bus.md), [база знаний](docs/platform/knowledge-vault.md), [автоматизации](docs/platform/automations.md), [решения](docs/platform/decisions.md).
+- [CHANGELOG](CHANGELOG.md).
+
+## Разработка
+
+```bash
+cargo test                   # ядро, API, рантайм агентов (в том числе живые сессии pi и песочница), сценарии владельца
+cargo clippy --all-targets -- -D warnings && cargo fmt --all --check
+npm test && npm run typecheck && npm run build:web
+npm run dev:web              # Vite с проксированием /api на сервер (порт 7420)
+```
+
+## Расширение pi без сервера (TS-версия)
+
+Исходная форма genie — набор расширений для pi: **оркестратор + фокус-команды** агентов с локальным трекером задач (SQLite) прямо в вашей сессии pi, без сервера. Работает и сейчас; новые возможности появляются в сервере.
+
+### Как это работает
 
 1. Задача приходит в чат оркестратору (ваша сессия pi в проекте с `.genie/`) или во **входящие** из веба / CLI — оркестратор получает уведомление.
 2. Оркестратор уточняет задачу (при необходимости запускает команду аналитиков), формулирует критерии приёмки, договаривается о способе интеграции, режет на атомарные подзадачи и переводит в `ready`.
@@ -10,7 +44,7 @@
 4. Участники общаются напрямую, ведут задачу (статусы, план, заметки, комментарии, артефакты). Когда нужно ваше решение — задача уходит в «Нужно решение», приходит уведомление; ответ из веба или чата будит оркестратора.
 5. Ревьюер выносит вердикт, оркестратор проверяет доказательства и закрывает задачу (или спрашивает вас, если сомневается).
 
-## Установка
+### Установка
 
 ```bash
 cd ~/projects/personal/genie
@@ -21,7 +55,7 @@ ln -s ~/projects/personal/genie/bin/genie ~/.local/bin/genie
 
 Нужен Node ≥ 23.6. Во время работы пакет не имеет runtime-зависимостей: SQLite берётся встроенный (`bun:sqlite` внутри pi, `node:sqlite` в CLI и веб-сервере).
 
-## Использование
+### Использование
 
 ```bash
 cd ~/projects/my-repo
@@ -50,31 +84,17 @@ CLI: `genie board`, `genie new "…"` (во входящие), `genie epic "…"
 
 **Эпики.** Большую работу оркестратор сначала оформляет эпиком: цель, критерии успеха, дорожная карта и общие артефакты (требования, глоссарий, решения) хранятся в эпике, а не разбросаны по задачам. Задачи эпика видят его цель и артефакты, эпик сам отслеживает прогресс.
 
-## Настройка
+### Настройка
 
 Порядок слияния: `config/default.json` → `~/.pi/agent/genie/config.json` → `<.genie>/config.json`. Проще всего — `/genie settings`.
 
 Роли — `agents/<role>.md` (переопределяются в `~/.pi/agent/genie/agents/` или `<.genie>/agents/`); во frontmatter `excludeTools` (read-only роли) и `mcp` (разрешённые MCP-серверы). Контракт frontmatter для проектных документов описан в [спецификации docs](docs/reference/genie-docs-system.md).
 
-Сейчас для проб все роли назначены на `litellm/deepseek-v4-flash-vision-exp` (`~/.pi/agent/genie/config.json`).
-
-## Разработка
+### Разработка
 
 ```bash
 npm test                  # тесты трекера и шины
 npm run typecheck         # сервер/расширение + веб
 npm run dev:web           # Vite с проксированием /api на `genie web` (порт 7420)
 node scripts/e2e.ts --template standard --model litellm/deepseek-v4-flash-vision-exp --analyst-model litellm/deepseek-v4-flash-vision-exp
-```
-
-## Genie server (Rust)
-
-Командный сервис: несколько проектов и людей, агенты без открытого терминала, автоматизации, Telegram и почта, база знаний в формате Obsidian. Подробно — [docs/platform/getting-started.md](docs/platform/getting-started.md), архитектура — [docs/platform/vision.md](docs/platform/vision.md).
-
-```bash
-cargo build --release -p genie && npm install && npm run build:web
-./target/release/genie project add shop --repo ~/code/shop          # проект (существующий .genie/ подхватится)
-./target/release/genie serve --web web/dist                          # http://127.0.0.1:7420
-echo 'пароль' | ./target/release/genie user add anna --admin --password-stdin   # когда нужен вход и коллеги
-cargo test                                                            # в том числе оба сценария владельца end-to-end
 ```

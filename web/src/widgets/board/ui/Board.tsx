@@ -14,6 +14,7 @@ import {
 import { useState } from "react";
 import { Link } from "react-router";
 import { Avatar, Avatars, memberLabel } from "@/entities/member";
+import { PersonAvatar } from "@/entities/project";
 import { COLUMNS, type Column, EpicChip, EpicIcon, Labels, PriorityIcon, type Status, STATUS_NAME, StatusIcon, type TaskSummary, useMoveTask } from "@/entities/task";
 import type { Team } from "@/entities/team";
 import { Icon, Modal, useToast } from "@/shared/ui";
@@ -56,6 +57,7 @@ function CardBody({ t, team }: { t: TaskSummary; team?: Team }) {
         )}
         <span className="grow" />
         {team && <Avatars members={team.members} />}
+        {t.assignee && <PersonAvatar login={t.assignee} />}
       </span>
     </>
   );

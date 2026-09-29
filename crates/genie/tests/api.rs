@@ -228,3 +228,138 @@ async fn team_members_act_only_on_their_task_its_subtasks_and_epic_notes() {
     assert_eq!(send("POST", "/api/tasks".into(), json!({ "title": "loose" })).await, StatusCode::FORBIDDEN);
     assert_eq!(send("POST", "/api/tasks".into(), json!({ "title": "piece", "parent": "G-2" })).await, StatusCode::CREATED);
 }
+
+#[tokio::test]
+async fn in_an_assisted_project_people_close_tasks_and_teams_get_the_default_integration() {
+    let h = Harness::new();
+    h.project("shop");
+    let r = &h.router;
+    for title in ["first", "second", "third"] {
+        let (s, _, _) = call(r, "POST", "/api/tasks").json(json!({ "title": title })).send().await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+    let (s, p, _) = call(r, "PATCH", "/api/projects/shop")
+        .json(json!({ "name": "Магазин", "autonomy": "assisted", "integration": "the owner reviews the branch and merges it" }))
+        .send()
+        .await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+    assert_eq!((p["name"].as_str(), p["autonomy"].as_str()), (Some("Магазин"), Some("assisted")));
+    let orch = h
+        .app
+        .with_server(|db| db.create_agent_token("shop", Role::Orchestrator, "orchestrator", None, None, chrono::Duration::hours(1)))
+        .unwrap();
+    let close = |id: &str| format!("/api/tasks/{id}/status");
+    let (s, e, _) = call(&h.remote, "POST", &close("G-1")).bearer(&orch).no_csrf().json(json!({ "status": "cancelled" })).send().await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("needs_owner"), "the refusal says what to do instead: {e}");
+    let (s, _, _) = call(r, "POST", &close("G-1")).json(json!({ "status": "cancelled" })).send().await;
+    assert_eq!(s, StatusCode::OK, "a person closes it");
+    call(r, "PATCH", "/api/projects/shop").json(json!({ "autonomy": "autonomous" })).send().await;
+    let (s, _, _) = call(&h.remote, "POST", &close("G-2")).bearer(&orch).no_csrf().json(json!({ "status": "cancelled" })).send().await;
+    assert_eq!(s, StatusCode::OK, "an autonomous orchestrator closes tasks itself");
+
+    // A team gets the project's way of integrating results.
+    call(r, "PATCH", "/api/tasks/G-3").json(json!({ "description": "Do it", "acceptance": ["it works"] })).send().await;
+    let (s, t, _) = call(r, "POST", &close("G-3")).json(json!({ "status": "ready" })).send().await;
+    assert_eq!(s, StatusCode::OK, "{t}");
+    let (s, team, _) = call(r, "POST", "/api/teams").json(json!({ "task": "G-3", "template": "pair" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let (_, t, _) = call(r, "GET", "/api/tasks/G-3").send().await;
+    assert_eq!(t["mergeStrategy"], "the owner reviews the branch and merges it");
+}
+
+#[tokio::test]
+async fn a_person_is_responsible_for_a_task_and_mentions_reach_people() {
+    let h = Harness::new();
+    h.project("shop");
+    let (anna, boris, carol) = h
+        .app
+        .with_server(|db| {
+            let anna = db.create_user("anna", "Анна", None, Some("password-1"), false)?;
+            let boris = db.create_user("boris", "Борис", None, Some("password-2"), false)?;
+            let carol = db.create_user("carol", "", None, Some("password-3"), false)?;
+            db.set_membership("shop", anna.id, ProjectRole::Member)?;
+            db.set_membership("shop", boris.id, ProjectRole::Member)?;
+            Ok((anna.id, boris.id, carol.id))
+        })
+        .unwrap();
+    let r = &h.remote;
+    let (_, _, cookies) = call(r, "POST", "/api/auth/login").json(json!({ "login": "anna", "password": "password-1" })).send().await;
+    let session = cookies[0].clone();
+    let (s, t, _) = call(r, "POST", "/api/tasks").cookie(&session).json(json!({ "title": "Экспорт" })).send().await;
+    assert_eq!(s, StatusCode::CREATED);
+    let id = t["id"].as_str().unwrap().to_string();
+    let task = format!("/api/tasks/{id}");
+    let notes = |user: i64| h.app.with_server(|db| db.notifications(user, false, 20)).unwrap();
+
+    let (s, e, _) = call(r, "PATCH", &task).cookie(&session).json(json!({ "assignee": "@carol" })).send().await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("not a member"), "{e}");
+    let (s, t, _) = call(r, "PATCH", &task).cookie(&session).json(json!({ "assignee": "@Boris" })).send().await;
+    assert_eq!(s, StatusCode::OK, "{t}");
+    assert_eq!(t["assignee"], "boris");
+    assert!(notes(boris).iter().any(|n| n.kind == "assigned" && n.title.contains(&id)), "{:#?}", notes(boris));
+    let (_, list, _) = call(r, "GET", "/api/tasks").cookie(&session).send().await;
+    assert_eq!(list[0]["assignee"], "boris", "lists show the person responsible");
+    call(r, "PATCH", &task).cookie(&session).json(json!({ "assignee": "boris" })).send().await;
+    assert_eq!(notes(boris).iter().filter(|n| n.kind == "assigned").count(), 1, "the same person is not told twice");
+
+    // Mentions reach the project's people: not the one who writes, not outsiders.
+    let (s, _, _) = call(r, "POST", &format!("{task}/comments"))
+        .cookie(&session)
+        .json(json!({ "text": "@boris глянь, пожалуйста (и @anna, и @carol)." }))
+        .send()
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert!(notes(boris).iter().any(|n| n.kind == "mention" && n.body.contains("глянь")), "{:#?}", notes(boris));
+    assert!(notes(anna).is_empty(), "no note to oneself");
+    assert!(notes(carol).is_empty(), "outsiders are not reached");
+    // Agents reach people the same way.
+    let orch = h
+        .app
+        .with_server(|db| db.create_agent_token("shop", Role::Orchestrator, "orchestrator", None, None, chrono::Duration::hours(1)))
+        .unwrap();
+    let (s, _, _) = call(&h.remote, "POST", &format!("{task}/comments"))
+        .bearer(&orch)
+        .no_csrf()
+        .json(json!({ "text": "@anna нужен формат" }))
+        .send()
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert!(notes(anna).iter().any(|n| n.kind == "mention" && n.body.starts_with("orchestrator: @anna")), "{:#?}", notes(anna));
+
+    // A question to people goes to the person responsible and the author.
+    let (s, e, _) = call(&h.remote, "POST", &format!("{task}/status"))
+        .bearer(&orch)
+        .no_csrf()
+        .json(json!({ "status": "needs_owner", "note": "CSV или XLSX?" }))
+        .send()
+        .await;
+    assert_eq!(s, StatusCode::OK, "{e}");
+    genie::engine::tick(&h.app).unwrap();
+    for who in [boris, anna] {
+        assert!(notes(who).iter().any(|n| n.kind == "needs_owner"), "{:#?}", notes(who));
+    }
+
+    let (_, t, _) = call(r, "PATCH", &task).cookie(&session).json(json!({ "assignee": null })).send().await;
+    assert!(t.get("assignee").is_none(), "cleared: {t}");
+}
+
+#[tokio::test]
+async fn a_project_is_checked_before_anything_is_created() {
+    let h = Harness::new();
+    let r = &h.router;
+    let (s, e, _) = call(r, "POST", "/api/projects").json(json!({ "slug": "../evil" })).send().await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+    let (s, e, _) = call(r, "POST", "/api/projects").json(json!({ "slug": "shop", "repo": "/nonexistent/repo" })).send().await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("/nonexistent/repo"), "{e}");
+    assert!(!h.app.data.join("projects/shop").exists(), "a refused project leaves nothing behind");
+    assert!(!h.app.data.join("evil").exists() && !h.app.data.join("projects/../evil").exists());
+    let (s, p, _) = call(r, "POST", "/api/projects").json(json!({ "slug": "Shop", "name": "Магазин" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{p}");
+    assert_eq!(p["slug"], "shop");
+    assert!(h.app.data.join("projects/shop").is_dir(), "the tracker lives under the lowercase slug");
+    let (s, e, _) = call(r, "POST", "/api/projects").json(json!({ "slug": "shop" })).send().await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+}

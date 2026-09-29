@@ -23,9 +23,11 @@ export const STATUS_ORDER: Status[] = ["needs_owner", "review", "changes_request
 
 export const ACTIVE: Status[] = ["draft", "refining", "ready", "in_progress", "review", "changes_requested", "approved", "needs_owner"];
 
-export type ViewId = "inbox" | "decisions" | "active" | "prep" | "done";
+export type ViewId = "mine" | "inbox" | "decisions" | "active" | "prep" | "done";
 
-export const VIEWS: Record<ViewId, { name: string; statuses: Status[] }> = {
+/** Task views; `mine` keeps the tasks the viewer is responsible for. */
+export const VIEWS: Record<ViewId, { name: string; statuses: Status[]; mine?: boolean }> = {
+  mine: { name: "Мои задачи", statuses: ["inbox", ...ACTIVE, "done"], mine: true },
   inbox: { name: "Входящие", statuses: ["inbox"] },
   decisions: { name: "Нужно решение", statuses: ["needs_owner"] },
   active: { name: "Все активные", statuses: ACTIVE },
@@ -35,6 +37,15 @@ export const VIEWS: Record<ViewId, { name: string; statuses: Status[] }> = {
 
 export function isView(v: string | undefined): v is ViewId {
   return !!v && v in VIEWS;
+}
+
+/** Whether a task belongs in a view; "mine" needs the viewer's login. Finished tasks stay in "mine" for a week. */
+export function inViewOf(t: TaskSummary, view: ViewId, login?: string, now = Date.now()): boolean {
+  const v = VIEWS[view];
+  if (!v.statuses.includes(t.status)) return false;
+  if (!v.mine) return true;
+  if (!login || t.assignee !== login) return false;
+  return t.status !== "done" || now - Date.parse(t.updated) < 7 * 86_400_000;
 }
 
 export interface Column {
@@ -106,6 +117,7 @@ const FIELD_RU: Record<string, string> = {
   notes: "заметки",
   labels: "метки",
   assignees: "исполнителей",
+  assignee: "ответственного",
   acceptance: "критерии",
   dependencies: "зависимости",
 };

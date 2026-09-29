@@ -142,6 +142,8 @@ async fn live(max_attempts: u32, adapter: bool) -> Live {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut cfg = Config::load(data).unwrap();
+    // Test files live in the data directory, which a sandboxed agent does not see.
+    cfg.runtime.sandbox.mode = "off".into();
     cfg.port = listener.local_addr().unwrap().port();
     std::fs::create_dir_all(data.join("rec")).unwrap();
     let script = r#"out="$GENIE_REC/$GENIE_AGENT_NAME"; { pwd -P; echo "policy=${GENIE_POLICY:-}"; echo "mcpmode=${PI_MCP_CONFIG_MODE:-}"; echo "secrets=${GENIE_TEST_DOCS_TOKEN-unset},${GENIE_TEST_WIKI_TOKEN-unset}"; printf 'arg=%s\n' "$@"; } > "$out"; "$GENIE_BIN" agent output '{"summary":"ok"}'"#;

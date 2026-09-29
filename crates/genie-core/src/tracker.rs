@@ -54,6 +54,8 @@ pub struct UpdateInput {
     pub labels: Option<Vec<String>>,
     pub assignees: Option<Vec<String>>,
     pub merge_strategy: Option<String>,
+    /// The person responsible (`Some(None)` clears it).
+    pub assignee: Option<Option<String>>,
     pub add_acceptance: Vec<String>,
     pub remove_acceptance: Vec<i64>,
     pub add_deps: Vec<String>,
@@ -127,6 +129,7 @@ struct TaskRow {
     blocked: Option<String>,
     needs_owner: Option<String>,
     merge_strategy: String,
+    assignee: String,
     created: String,
     updated: String,
 }
@@ -150,6 +153,7 @@ impl TaskRow {
             blocked: r.get("blocked")?,
             needs_owner: r.get("needs_owner")?,
             merge_strategy: r.get("merge_strategy")?,
+            assignee: r.get("assignee")?,
             created: r.get("created")?,
             updated: r.get("updated")?,
         })
@@ -353,6 +357,7 @@ impl Tracker {
             plan: r.plan,
             notes: r.notes,
             merge_strategy: r.merge_strategy,
+            assignee: Some(r.assignee).filter(|a| !a.is_empty()),
             parent: r.parent,
             team: r.team,
             comments,
@@ -434,6 +439,7 @@ impl Tracker {
                 priority: t.priority,
                 parent: t.parent,
                 team: t.team,
+                assignee: Some(t.assignee).filter(|a| !a.is_empty()),
                 created: t.created,
                 updated: t.updated,
             })
@@ -679,6 +685,10 @@ impl Tracker {
             if let Some(m) = &input.merge_strategy {
                 privileged("merge strategy")?;
                 set("merge_strategy", m, "merge strategy")?;
+            }
+            if let Some(a) = &input.assignee {
+                privileged("the person responsible")?;
+                set("assignee", &a.as_deref().map(str::trim).unwrap_or_default(), "assignee")?;
             }
             if let Some(p) = &input.plan {
                 scope("plan", Capability::TaskPlan)?;

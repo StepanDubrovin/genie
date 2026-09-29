@@ -147,7 +147,7 @@ code { font-family: var(--mono); font-size: 0.92em; color: var(--text-2); }
 .group-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 10px; height: 36px; margin-top: 6px; padding: 0 28px; background: var(--bg); font-size: 12px; font-weight: 500; color: var(--text-2); }
 .group-head .n { font-weight: 400; color: var(--muted); }
 .row { display: grid; grid-template-columns: 52px 16px minmax(0, 1fr) auto 104px 56px; align-items: center; gap: 12px; height: 44px; margin: 0 12px; padding: 0 16px; border-radius: var(--radius); cursor: default; }
-.row .who { display: flex; justify-content: flex-end; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.row .who { display: flex; justify-content: flex-end; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .app.with-detail .row { grid-template-columns: 52px 16px minmax(0, 1fr) 56px; }
 .app.with-detail .row .tags, .app.with-detail .row .who { display: none; }
 .row:hover { background: var(--bg-hover); }
@@ -167,7 +167,7 @@ code { font-family: var(--mono); font-size: 0.92em; color: var(--text-2); }
 .av.solo { margin-left: 0; box-shadow: none; }
 .av.more { background: var(--bg-card); color: var(--text-2); font-weight: 500; }
 .av.lg { width: 30px; height: 30px; font-size: 12px; margin: 0; box-shadow: none; }
-.av.md { width: 26px; height: 26px; font-size: 12px; margin: 0; box-shadow: none; }
+.av.md { width: 26px; height: 26px; font-size: 12px; margin: 0; box-shadow: none; color: #0e0f11; line-height: normal; }
 .av.working::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent-2); border-right-color: var(--accent-2); animation: spin 1s linear infinite; }
 .av.error { box-shadow: 0 0 0 2px var(--red); }
 .av.stopped { opacity: 0.45; }
@@ -434,6 +434,10 @@ button.title { background: none; border: 0; padding: 0; color: inherit; text-ali
 }
 
 /* member that lost contact with the orchestrator */
+/* People (not agents): a ring tells them apart from the team's avatars. */
+.av.person { background: #d6d8de; box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px #d6d8de55; }
+.av.person.solo { margin-left: 0; }
+.av.person.md { box-shadow: none; }
 .av.lost { opacity: 0.55; box-shadow: 0 0 0 2px var(--amber); }
 
 /* owner team controls */
