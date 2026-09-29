@@ -31,6 +31,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/projects/{slug}/members", get(list_members))
         .route("/projects/{slug}/members/{user}", put(set_member).delete(remove_member))
         .route("/projects/{slug}/invites", post(create_invite))
+        .route("/doctor", get(doctor))
+        .route("/stats", get(stats))
+        .route("/vault/sync", get(vault_sync).post(vault_sync_now))
 }
 
 fn cookie_header(name: &str, value: &str, max_age_secs: i64) -> HeaderValue {
@@ -277,7 +280,9 @@ async fn create_project(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<New
 
 #[derive(Deserialize)]
 struct ProjectPatch {
+    name: Option<String>,
     autonomy: Option<String>,
+    integration: Option<String>,
 }
 
 async fn update_project(
@@ -293,7 +298,7 @@ async fn update_project(
                 if let Some(a) = &b.autonomy {
                     db.set_autonomy(&slug, a)?;
                 }
-                db.project(&slug)
+                db.update_project(&slug, b.name.as_deref(), b.integration.as_deref())
             })
         })
         .await?;
@@ -354,4 +359,43 @@ async fn create_invite(
     let secret = app.blocking(move |app| app.with_server(|db| db.create_invite(by, Some(&project), role, b.email.as_deref()))).await?;
     let url = format!("{}/invite?token={secret}", app.cfg.public_url());
     Ok((StatusCode::CREATED, Json(json!({ "token": secret, "url": url }))))
+}
+
+/// The server's preflight (`genie doctor`) for its admins.
+async fn doctor(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let checks = app.blocking(|app| Ok(crate::doctor::run(&app.data, &app.cfg, &app.agents(), &app.web_root))).await?;
+    Ok(Json(json!({ "checks": checks })))
+}
+
+/// How the vault syncs with its git remote (`vault.remote`).
+async fn vault_sync(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let remote = app.cfg.vault.remote.clone().filter(|r| !r.trim().is_empty());
+    Ok(Json(json!({ "remote": remote, "every": app.cfg.vault.sync_secs.unwrap_or(120), "last": crate::vault_sync::state() })))
+}
+
+/// Sync the vault now.
+async fn vault_sync_now(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let st = app.blocking(crate::vault_sync::sync).await?.ok_or_else(|| ApiError::bad("vault.remote is not set in config.json"))?;
+    Ok(Json(json!({ "last": st })))
+}
+
+#[derive(Deserialize)]
+struct StatsQuery {
+    days: Option<i64>,
+    project: Option<String>,
+}
+
+/// What happened over the last days (`genie stats`), for the server's admins.
+async fn stats(State(app): State<Arc<App>>, ctx: Ctx, axum::extract::Query(q): axum::extract::Query<StatsQuery>) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let stats = app
+        .blocking(move |app| {
+            crate::stats::collect(&app.data, q.days.unwrap_or(7), q.project.as_deref())
+                .map_err(|e| genie_core::GenieError::invalid(e).into())
+        })
+        .await?;
+    Ok(Json(json!(stats)))
 }

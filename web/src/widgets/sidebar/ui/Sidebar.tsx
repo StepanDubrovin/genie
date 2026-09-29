@@ -1,15 +1,15 @@
 import { NavLink, useLocation } from "react-router";
 import { useAgentConfig } from "@/entities/agent-config";
 import { BookIcon, useDocsTree } from "@/entities/doc";
-import { useMeta } from "@/entities/project";
+import { initials, useMeta } from "@/entities/project";
 import { useLogout, useSession, useSwitchProject } from "@/entities/session";
 import { useNotifications, useProposals } from "@/entities/platform";
-import { EpicIcon, inTaskViews, StatusIcon, type ViewId, VIEWS, useTasks } from "@/entities/task";
+import { EpicIcon, inTaskViews, inViewOf, StatusIcon, type ViewId, VIEWS, useTasks } from "@/entities/task";
 import { useTeams } from "@/entities/team";
 import { timeAgo, useTick } from "@/shared/lib";
 import { Icon } from "@/shared/ui";
 
-const NAV: { id: ViewId; icon: "inbox" | "needs_owner" | "in_progress" | "refining" | "done" }[] = [
+const NAV: { id: Exclude<ViewId, "mine">; icon: "inbox" | "needs_owner" | "in_progress" | "refining" | "done" }[] = [
   { id: "inbox", icon: "inbox" },
   { id: "decisions", icon: "needs_owner" },
   { id: "active", icon: "in_progress" },
@@ -33,6 +33,10 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
   const agents = useAgentConfig();
   const count = (id: ViewId) =>
     tasks ? tasks.filter((t) => inTaskViews(t) && VIEWS[id].statuses.includes(t.status)).length : VIEWS[id].statuses.reduce((n, s) => n + (meta?.counts[s] ?? 0), 0);
+  const login = session?.mode === "users" ? session.user.login : undefined;
+  // Open tasks the viewer is responsible for; the ones waiting for them are marked.
+  const mine = login ? (tasks ?? []).filter((t) => inViewOf(t, "mine", login) && t.status !== "done") : [];
+  const mineWaiting = mine.filter((t) => t.status === "needs_owner").length;
   const openEpics = tasks?.filter((t) => t.type === "epic" && t.status !== "done" && t.status !== "cancelled").length ?? 0;
 
   const project = session?.projects.find((p) => p.slug === session.project);
@@ -73,6 +77,19 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
       </button>
 
       <div className="nav-group">
+        {login && (
+          <NavLink to={{ pathname: "/mine", search: keepLayout(search) }} className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+            <Icon.user size={15} />
+            <span className="grow">{VIEWS.mine.name}</span>
+            {mineWaiting > 0 ? (
+              <span className="count alert" title="ждут вашего решения">
+                {mineWaiting}
+              </span>
+            ) : (
+              <span className="count">{mine.length || ""}</span>
+            )}
+          </NavLink>
+        )}
         {NAV.map((n) => {
           const c = count(n.id);
           return (
@@ -124,6 +141,16 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
           <span className="grow">Уведомления</span>
           {unread > 0 && <span className="unread-dot" role="img" aria-label={`непрочитанных: ${unread}`} />}
         </NavLink>
+        <NavLink to="/project" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+          <Icon.folder size={15} />
+          <span className="grow">Проект и люди</span>
+        </NavLink>
+        {session?.user.isAdmin && (
+          <NavLink to="/server" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+            <Icon.server size={15} />
+            <span className="grow">Сервер</span>
+          </NavLink>
+        )}
       </div>
 
       {teams.length > 0 && (
@@ -170,12 +197,6 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
 }
 
 const ROLE_NAME: Record<string, string> = { owner: "владелец", admin: "админ", member: "участник", viewer: "только чтение" };
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  const two = parts.length > 1 ? parts[0][0] + parts[1][0] : name.slice(0, 2);
-  return two.toUpperCase();
-}
 
 function statusShort(s: string): string {
   return ({ inbox: "входящие", draft: "черновик", refining: "уточнение", ready: "готово", in_progress: "в работе", changes_requested: "доработка", review: "ревью", approved: "одобрено", done: "принято" } as Record<string, string>)[s] ?? s;

@@ -148,6 +148,8 @@ async fn live(pi: PathBuf, tweak: impl FnOnce(&mut Config)) -> Live {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut cfg = Config::load(dir.path()).unwrap();
+    // Real pi in the agent sandbox: GENIE_TEST_SANDBOX=bwrap (the fake model's files are in the data directory's pi dir).
+    cfg.runtime.sandbox.mode = std::env::var("GENIE_TEST_SANDBOX").unwrap_or_else(|_| "off".into());
     cfg.port = listener.local_addr().unwrap().port();
     let g = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     cfg.runtime.mode = "sessions".into();

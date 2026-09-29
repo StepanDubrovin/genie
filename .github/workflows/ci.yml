@@ -25,7 +25,16 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
+      # The agent sandbox: bubblewrap, with the unprivileged user namespaces Ubuntu restricts by default.
+      - name: Sandbox
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Test
+        # The live-session tests run the real pi harness inside the sandbox too.
+        env:
+          GENIE_REQUIRE_SANDBOX: 1
+          GENIE_TEST_SANDBOX: bwrap
         run: cargo test --all
 
   web:

@@ -354,6 +354,9 @@ pub struct Task {
     pub deps: Vec<String>,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
+    /// The person responsible for the task (a login), besides the team working on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -384,6 +387,8 @@ pub struct TaskSummary {
     pub labels: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked: Option<Blocked>,
     #[serde(skip_serializing_if = "Option::is_none")]

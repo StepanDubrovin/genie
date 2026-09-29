@@ -55,6 +55,8 @@ async fn live(telegram: Option<String>) -> Live {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut cfg = Config::load(dir.path()).unwrap();
+    // Test files live in the data directory, which a sandboxed agent does not see.
+    cfg.runtime.sandbox.mode = "off".into();
     cfg.port = listener.local_addr().unwrap().port();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-agent.sh");
     cfg.runtime.command = vec![vec!["bash".into(), script.to_string_lossy().into_owned()], vec!["{message}".into()]];

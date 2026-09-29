@@ -89,3 +89,43 @@ async fn locked_sections_and_changelog_release() {
     let events = h.app.with_tracker("shop", |t| t.events_after(0, 100)).unwrap();
     assert!(events.iter().any(|e| e.kind == "release.published"));
 }
+
+#[tokio::test]
+async fn a_task_in_review_names_the_pages_its_changes_may_have_made_stale() {
+    let h = common::Harness::new();
+    let repo = h.dir.path().join("shop-repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/pricing.abap"), "CLASS zcl_pricing DEFINITION.\nENDCLASS.\n").unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+    h.app.create_project("shop", "Магазин", Some(&repo.to_string_lossy()), None, None).unwrap();
+    let r = &h.router;
+    call(r, "POST", "/api/tasks").json(json!({ "title": "Скидки в возвратах", "description": "d", "acceptance": ["a"] })).send().await;
+    call(r, "POST", "/api/tasks/G-1/status").json(json!({ "status": "ready" })).send().await;
+    let (s, team, _) = call(r, "POST", "/api/teams").json(json!({ "task": "G-1", "template": "pair" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let worktree = std::path::PathBuf::from(team["worktree"]["path"].as_str().unwrap());
+    std::fs::write(worktree.join("src/pricing.abap"), "CLASS zcl_pricing DEFINITION.\n* returns\nENDCLASS.\n").unwrap();
+    for (path, content) in [
+        ("shop/ceny.md", "---\ntitle: Цены\npaths: [src/**]\n---\n# Цены\n\nКак считаются цены.\n"),
+        ("shop/vozvraty.md", "---\ntitle: Возвраты\nrelated: [G-1]\n---\n# Возвраты\n\nПравила возвратов.\n"),
+        ("shop/sklad.md", "---\ntitle: Склад\npaths: [docs/**]\n---\n# Склад\n\nВолны.\n"),
+    ] {
+        let (s, e, _) = call(r, "POST", "/api/docs/page").json(json!({ "path": path, "content": content })).send().await;
+        assert!(s.is_success(), "{s}: {e}");
+    }
+    let (s, impact, _) = call(r, "GET", "/api/tasks/G-1/docs-impact").send().await;
+    assert_eq!(s, StatusCode::OK, "{impact}");
+    assert_eq!(impact["changedPathsAvailable"], true, "{impact}");
+    assert_eq!(impact["changedPaths"], json!(["src/pricing.abap"]));
+    let pages: Vec<&str> = impact["candidates"].as_array().unwrap().iter().map(|c| c["path"].as_str().unwrap()).collect();
+    assert_eq!(pages, ["shop/ceny.md", "shop/vozvraty.md"], "changed paths first, then pages naming the task: {impact}");
+    assert_eq!(impact["candidates"][0]["reasons"][0], json!({ "kind": "changed-path", "path": "src/pricing.abap", "pattern": "src/**" }));
+    assert_eq!(impact["candidates"][1]["reasons"][0], json!({ "kind": "related", "id": "G-1" }));
+    assert_eq!(impact["applicable"], false, "the hint is meant for review and done");
+}

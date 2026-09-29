@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS projects (
   repo TEXT,
   space TEXT NOT NULL,
   autonomy TEXT NOT NULL DEFAULT 'autonomous',
+  integration TEXT NOT NULL DEFAULT '',
   created TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS memberships (
@@ -269,6 +270,8 @@ CREATE INDEX IF NOT EXISTS config_changes_item ON config_changes(item, id);
 const SERVER_COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
     // Agent tokens name the configured role the agent acts in.
     ("api_tokens", "role_id", "ALTER TABLE api_tokens ADD COLUMN role_id TEXT"),
+    // How a project's finished work gets integrated unless a task says otherwise.
+    ("projects", "integration", "ALTER TABLE projects ADD COLUMN integration TEXT NOT NULL DEFAULT ''"),
 ];
 
 pub const SESSION_DAYS: i64 = 30;
@@ -346,7 +349,12 @@ pub struct Project {
     pub repo: Option<String>,
     /// Vault space (top-level folder) of the project.
     pub space: String,
+    /// `autonomous` — the orchestrator works and closes tasks itself; `assisted`
+    /// — it works, people close tasks; `manual` — no server orchestrator.
     pub autonomy: String,
+    /// How finished work gets integrated unless a task says otherwise
+    /// (the task's `mergeStrategy`), e.g. "the owner reviews the branch and merges it".
+    pub integration: String,
     pub created: String,
 }
 
@@ -359,6 +367,7 @@ impl Project {
             repo: r.get("repo")?,
             space: r.get("space")?,
             autonomy: r.get("autonomy")?,
+            integration: r.get("integration")?,
             created: r.get("created")?,
         })
     }
@@ -425,7 +434,8 @@ pub fn time_in(duration: ChronoDuration) -> String {
     (Utc::now() + duration).to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn valid_slug(s: &str) -> bool {
+/// A project slug: lowercase latin letters, digits and dashes (it names directories).
+pub fn valid_slug(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !s.starts_with('-')
 }
 
@@ -768,6 +778,21 @@ impl ServerDb {
         }
         self.conn().execute("UPDATE projects SET autonomy = ?1 WHERE slug = ?2", params![autonomy, slug])?;
         Ok(())
+    }
+
+    /// Change a project's name and default integration (`None` keeps a field).
+    pub fn update_project(&self, slug: &str, name: Option<&str>, integration: Option<&str>) -> Result<Project> {
+        self.project(slug)?;
+        if let Some(name) = name {
+            if name.trim().is_empty() {
+                return Err(GenieError::invalid("project name must not be empty"));
+            }
+            self.conn().execute("UPDATE projects SET name = ?1 WHERE slug = ?2", params![name.trim(), slug])?;
+        }
+        if let Some(i) = integration {
+            self.conn().execute("UPDATE projects SET integration = ?1 WHERE slug = ?2", params![i.trim(), slug])?;
+        }
+        self.project(slug)
     }
 
     pub fn set_membership(&self, project: &str, user: i64, role: ProjectRole) -> Result<()> {

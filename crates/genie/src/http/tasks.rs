@@ -30,6 +30,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/tasks/{id}/artifacts/{n}", get(read_artifact))
         .route("/tasks/{id}/split", post(split))
         .route("/tasks/{id}/block", post(block).delete(unblock))
+        .route("/tasks/{id}/docs-impact", get(docs_impact))
         .route("/journal", get(journal))
 }
 
@@ -241,6 +242,7 @@ async fn update(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
         labels: strings(&b["labels"]),
         assignees: strings(&b["assignees"]),
         merge_strategy: b.get("mergeStrategy").and_then(text),
+        assignee: b.get("assignee").map(|v| v.as_str().map(|s| s.trim().trim_start_matches('@').to_lowercase()).filter(|s| !s.is_empty())),
         add_acceptance: strings(&b["addAcceptance"]).unwrap_or_default(),
         remove_acceptance: b["removeAcceptance"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default(),
         add_deps: strings(&b["addDeps"]).unwrap_or_default(),
@@ -251,10 +253,77 @@ async fn update(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
             Some(v) => Some(v.as_str().filter(|s| !s.is_empty()).map(str::to_string)),
         },
     };
+    // The person responsible is someone who works in the project.
+    let assigned = input.assignee.clone().flatten();
+    if let Some(login) = assigned.clone() {
+        let project = access.project.clone();
+        let member = app
+            .blocking(move |app| {
+                app.with_server(|db| match db.user_by_login(&login)? {
+                    Some(u) if !u.disabled => Ok(db.project_role(&project, &u)?.is_some()),
+                    _ => Ok(false),
+                })
+            })
+            .await?;
+        if !member {
+            return Err(ApiError::bad(format!("{} is not a member of this project", assigned.unwrap_or_default())));
+        }
+    }
+    let before = match assigned {
+        Some(_) => {
+            tracker(&app, &access, {
+                let id = id.clone();
+                move |t| t.get(&id)
+            })
+            .await?
+            .assignee
+        }
+        None => None,
+    };
     let actor = access.actor.clone();
     let task = tracker(&app, &access, move |t| t.update(&actor, &id, input)).await?;
+    // A new person responsible hears of it (not when they assign themselves).
+    if let Some(login) = task.assignee.clone().filter(|l| before.as_ref() != Some(l) && *l != access.actor.name) {
+        let (project, id, title, by) = (access.project.clone(), task.id.clone(), task.title.clone(), access.actor.name.clone());
+        app.blocking(move |app| {
+            let users = crate::notify::resolve(app, &project, &[format!("@{login}")], &json!({}))?;
+            let msg = crate::notify::Message {
+                kind: "assigned".into(),
+                title: format!("{id}: вы ответственный"),
+                body: format!("{title}\n\nНазначил(а): {by}"),
+                project: Some(project.clone()),
+                task: Some(id.clone()),
+                link: Some(format!("/mine?task={id}")),
+                ..Default::default()
+            };
+            crate::notify::send(app, &users, &msg, None).map(|_| ())
+        })
+        .await?;
+    }
     changed(&app);
     Ok(to_json(task))
+}
+
+/// People named `@login` in a text who work in the project.
+fn mentioned(app: &App, project: &str, text: &str) -> crate::state::AppResult<Vec<i64>> {
+    let logins: std::collections::BTreeSet<String> = text
+        .split(|c: char| c.is_whitespace() || ",;:!?()[]<>\"'«»".contains(c))
+        .filter_map(|w| w.strip_prefix('@'))
+        .map(|w| w.trim_end_matches(['.', '-']).to_lowercase())
+        .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
+        .collect();
+    app.with_server(|db| {
+        let mut out = Vec::new();
+        for login in logins {
+            if let Some(u) = db.user_by_login(&login)?
+                && !u.disabled
+                && db.project_role(project, &u)?.is_some()
+            {
+                out.push(u.id);
+            }
+        }
+        Ok(out)
+    })
 }
 
 async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {
@@ -265,6 +334,17 @@ async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
     let to: Status = to_raw.parse().map_err(|_| ApiError::bad(format!("unknown status {to_raw}")))?;
     // The owner's moves in the web UI are authoritative (as in the TypeScript server);
     // agents follow the workflow and may only force as orchestrator when asked to.
+    // In an `assisted` project people close tasks; the orchestrator asks one instead.
+    if !access.is_human() && access.actor.role == Role::Orchestrator && CLOSED.contains(&to) {
+        let slug = access.project.clone();
+        let autonomy = app.blocking(move |app| app.with_server(|db| db.project(&slug)).map(|p| p.autonomy)).await?;
+        if autonomy == "assisted" {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "people close tasks in this project (assisted): move the task to needs_owner with a short summary of the result and what to check",
+            ));
+        }
+    }
     let force = access.is_human() || (access.actor.role == Role::Orchestrator && b["force"] == json!(true));
     let opts = StatusOptions { note: b.get("note").and_then(text).filter(|n| !n.is_empty()), force };
     let actor = access.actor.clone();
@@ -284,7 +364,31 @@ async fn comment(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, 
     let kind =
         if access.is_human() { CommentKind::Owner } else { b["kind"].as_str().and_then(|k| k.parse().ok()).unwrap_or(CommentKind::Note) };
     let actor = access.actor.clone();
+    let said = text.clone();
     let task = tracker(&app, &access, move |t| t.comment(&actor, &id, &text, kind)).await?;
+    // People named with `@login` hear of it — from people and agents alike.
+    if said.contains('@') {
+        let (project, id, title, by) = (access.project.clone(), task.id.clone(), task.title.clone(), access.actor.name.clone());
+        app.blocking(move |app| {
+            let me = app.with_server(|db| db.user_by_login(&by))?.map(|u| u.id);
+            let users: Vec<i64> = mentioned(app, &project, &said)?.into_iter().filter(|u| Some(*u) != me).collect();
+            if users.is_empty() {
+                return Ok(());
+            }
+            let excerpt: String = said.chars().take(500).collect();
+            let msg = crate::notify::Message {
+                kind: "mention".into(),
+                title: format!("Вас упомянули в {id}"),
+                body: format!("{by}: {excerpt}\n\n{title}"),
+                project: Some(project.clone()),
+                task: Some(id.clone()),
+                link: Some(format!("/active?task={id}")),
+                ..Default::default()
+            };
+            crate::notify::send(app, &users, &msg, None).map(|_| ())
+        })
+        .await?;
+    }
     changed(&app);
     Ok((StatusCode::CREATED, to_json(task)))
 }
@@ -452,4 +556,11 @@ async fn journal(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<JournalQ
     let (after, limit) = (q.after.unwrap_or(0), q.limit.unwrap_or(100).min(1000));
     let (events, last) = tracker(&app, &access, move |t| Ok((t.events_after(after, limit)?, t.last_event_id()?))).await?;
     Ok(Json(json!({ "events": events, "last": last })))
+}
+
+/// Pages of the project's knowledge the task may have made stale (a hint for review).
+async fn docs_impact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let project = access.project.clone();
+    Ok(Json(app.blocking(move |app| crate::knowledge::docs_impact(app, &project, &id)).await?))
 }

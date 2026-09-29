@@ -1,6 +1,6 @@
 {
   "title": "Пара",
-  "description": "Executor + reviewer for small, already well-specified tasks.",
+  "description": "Исполнитель и ревьюер — для небольших задач, которые уже хорошо описаны.",
   "stage": "delivery",
   "workspace": "worktree",
   "members": [

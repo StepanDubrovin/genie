@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Avatars } from "@/entities/member";
+import { PersonAvatar } from "@/entities/project";
 import { EpicChip, EpicIcon, Labels, PriorityIcon, StatusIcon, type Status, STATUS_NAME, STATUS_ORDER, type TaskSummary } from "@/entities/task";
 import type { Team } from "@/entities/team";
 import { timeAgo } from "@/shared/lib";
@@ -8,6 +9,7 @@ export function TaskList({
   tasks,
   statuses,
   teams,
+  people,
   focused,
   selected,
   onOpen,
@@ -16,6 +18,8 @@ export function TaskList({
   tasks: TaskSummary[];
   statuses: Status[];
   teams: Map<string, Team>;
+  /** login → name of the project's people. */
+  people?: Map<string, string>;
   focused?: string;
   selected?: string;
   onOpen: (id: string) => void;
@@ -76,7 +80,10 @@ export function TaskList({
                   <EpicChip id={t.parent} />
                   <Labels labels={t.labels} />
                 </span>
-                <span className="who">{team ? <Avatars members={team.members} max={4} /> : t.status === "inbox" ? "ждёт оркестратора" : "без команды"}</span>
+                <span className="who">
+                  {team ? <Avatars members={team.members} max={t.assignee ? 3 : 4} /> : !t.assignee && (t.status === "inbox" ? "ждёт оркестратора" : "без команды")}
+                  {t.assignee && <PersonAvatar login={t.assignee} name={people?.get(t.assignee)} />}
+                </span>
                 <span className="when">{timeAgo(t.updated)}</span>
               </div>
             );

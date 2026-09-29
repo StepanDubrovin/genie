@@ -79,6 +79,24 @@ export const Icon = {
       <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
     </svg>
   ),
+  folder: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.8l1.5 1.5h4.7A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" />
+    </svg>
+  ),
+  server: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <rect x="2.5" y="2.5" width="11" height="4.5" rx="1.2" />
+      <rect x="2.5" y="9" width="11" height="4.5" rx="1.2" />
+      <path d="M5 4.75h.01M5 11.25h.01" />
+    </svg>
+  ),
+  user: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <circle cx="8" cy="5.5" r="2.5" />
+      <path d="M3.5 13.5c.6-2.3 2.3-3.5 4.5-3.5s3.9 1.2 4.5 3.5" />
+    </svg>
+  ),
   userPlus: ({ size, ...p }: IconProps) => (
     <svg {...stroke(size, p)} strokeWidth={1.5}>
       <circle cx="6.5" cy="5.5" r="2.5" />

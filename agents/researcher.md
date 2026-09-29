@@ -1,6 +1,6 @@
 ---
 title: Исследователь
-description: Investigates a question without changing code (a spike) and submits the findings for review.
+description: Исследует вопрос без изменения кода (спайк) и сдаёт выводы на ревью.
 base: analyst
 allow: [status.submit]
 ---

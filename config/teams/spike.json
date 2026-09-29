@@ -1,6 +1,6 @@
 {
   "title": "Спайк",
-  "description": "Research without code changes on a ready task: the researcher investigates and submits findings, the reviewer challenges the conclusions.",
+  "description": "Исследование без изменения кода на готовой задаче: исследователь изучает вопрос и сдаёт выводы, ревьюер оспаривает их.",
   "stage": "delivery",
   "workspace": "repo",
   "members": [

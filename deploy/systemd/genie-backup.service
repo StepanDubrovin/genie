@@ -1,0 +1,13 @@
+# A consistent backup of the running server: databases, the vault and the
+# configuration; keeps the 14 most recent. Started daily by genie-backup.timer.
+
+[Unit]
+Description=genie backup: databases, vault and configuration
+
+[Service]
+Type=oneshot
+User=genie
+Group=genie
+Environment=HOME=/home/genie
+Environment=GENIE_DATA=/var/lib/genie
+ExecStart=/opt/genie/bin/genie backup /var/backups/genie --keep 14

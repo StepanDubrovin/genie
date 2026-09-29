@@ -1,6 +1,6 @@
 {
   "title": "Стандартная",
-  "description": "Analyst → executor → reviewer in a dedicated worktree. Default for code changes in git repositories.",
+  "description": "Аналитик → исполнитель → ревьюер в отдельном worktree. По умолчанию для изменений кода в git-репозиториях.",
   "stage": "delivery",
   "workspace": "worktree",
   "members": [

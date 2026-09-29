@@ -232,6 +232,8 @@ async fn catalogue(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Valu
     v["admin"] = json!(ctx.server_admin().is_ok());
     v["mcpAdapter"] = json!(app.cfg.runtime.mcp_adapter());
     v["mcpGateway"] = json!(app.cfg.runtime.mcp_gateway);
+    let (active, note) = crate::sandbox::status(&app.cfg.runtime.sandbox);
+    v["sandbox"] = json!({ "active": active, "note": note });
     Ok(Json(v))
 }
 

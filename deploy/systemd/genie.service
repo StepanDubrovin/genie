@@ -1,0 +1,39 @@
+# genie server as a systemd service.
+#
+#   sudo deploy/install.sh                       # binary and web UI into /opt/genie
+#   sudo cp deploy/systemd/genie*.service deploy/systemd/genie*.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now genie genie-backup.timer
+#
+# Adjust the user, the paths and the port to your machine; `genie doctor` (as the
+# same user, with the same GENIE_DATA and PATH) says what is still missing.
+
+[Unit]
+Description=genie server: tasks, knowledge and agent teams
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=genie
+Group=genie
+# pi keeps its logins and settings in the home of this user (~/.pi).
+Environment=HOME=/home/genie
+Environment=GENIE_DATA=/var/lib/genie
+# pi, node and git for the agents; genie itself is found next to its binary.
+Environment=PATH=/home/genie/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Secrets of MCP connections, referenced in mcp.json as ${env:NAME}: they stay with the server.
+EnvironmentFile=-/etc/genie/secrets.env
+WorkingDirectory=/var/lib/genie
+ExecStart=/opt/genie/bin/genie serve --web /opt/genie/web
+Restart=on-failure
+RestartSec=5
+# Agents are processes of the service and stop with it; a restart resumes their work.
+KillMode=control-group
+TimeoutStopSec=30
+# Hardening that keeps the agent sandbox working (bubblewrap uses unprivileged user namespaces).
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

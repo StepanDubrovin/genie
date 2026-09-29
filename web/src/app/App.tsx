@@ -9,6 +9,7 @@ import { EpicPage } from "@/pages/epic";
 import { EpicsPage } from "@/pages/epics";
 import { DocsPage } from "@/pages/docs";
 import { InvitePage, LoginPage } from "@/pages/auth";
+import { FirstProjectPage, ProjectPage, ServerPage } from "@/pages/project";
 import { AnswerPage, AutomationsPage, NotificationsPage, ProfilePage, ProposalsPage } from "@/pages/platform";
 import { useSession } from "@/entities/session";
 import { TasksPage } from "@/pages/tasks";
@@ -34,7 +35,7 @@ function Shell() {
   const tasks = useTasks().data;
   const teamRoute = location.pathname.startsWith("/team/");
   const docsRoute = location.pathname.startsWith("/docs");
-  const platformRoute = ["/automations", "/agents", "/notifications", "/profile"].some((p) => location.pathname.startsWith(p));
+  const platformRoute = ["/automations", "/agents", "/notifications", "/profile", "/project", "/server"].some((p) => location.pathname.startsWith(p));
   // Pages without a task list: palette actions that need one go to "active".
   const ownPage = teamRoute || location.pathname.startsWith("/epic") || docsRoute || platformRoute;
   const openTaskId = teamRoute ? undefined : (sp.get("task") ?? undefined);
@@ -61,7 +62,7 @@ function Shell() {
     [navigate, sp, location.pathname, ownPage, newTask],
   );
 
-  // Global shortcuts (Linear-style): C, /, ⌘K, Esc, G then I/D/A/P/C/E
+  // Global shortcuts (Linear-style): C, /, ⌘K, Esc, G then M/I/D/A/P/C/E
   const gPending = useRef(0);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -77,7 +78,7 @@ function Shell() {
       }
       if (isTyping(e)) return;
       if (Date.now() - gPending.current < 1200) {
-        const map: Record<string, ViewId> = { i: "inbox", d: "decisions", a: "active", p: "prep", c: "done" };
+        const map: Record<string, ViewId> = { m: "mine", i: "inbox", d: "decisions", a: "active", p: "prep", c: "done" };
         gPending.current = 0;
         if (e.key === "e") {
           navigate("/epics");
@@ -148,15 +149,8 @@ function Gate() {
   if (session.error) return <LoginPage note={`Сервер недоступен: ${session.error.message}`} />;
   if (!session.data) return <LoginPage />;
   if (!session.data.projects.length) {
-    return (
-      <LoginPage
-        note={
-          session.data.user.isAdmin
-            ? "Проектов пока нет. Создайте первый: genie project add <slug> [--repo путь]"
-            : "У вас пока нет доступа ни к одному проекту — попросите приглашение у администратора."
-        }
-      />
-    );
+    if (session.data.user.isAdmin) return <FirstProjectPage />;
+    return <LoginPage note="У вас пока нет доступа ни к одному проекту — попросите приглашение у администратора." />;
   }
   return <Shell />;
 }
@@ -179,6 +173,8 @@ export const router = createBrowserRouter([
       { path: "agents", element: <AgentsPage /> },
       { path: "notifications", element: <NotificationsPage /> },
       { path: "profile", element: <ProfilePage /> },
+      { path: "project", element: <ProjectPage /> },
+      { path: "server", element: <ServerPage /> },
       { path: ":view", element: <TasksRoute /> },
     ],
   },
