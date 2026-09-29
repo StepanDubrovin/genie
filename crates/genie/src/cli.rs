@@ -34,9 +34,9 @@ enum Command {
     Serve {
         #[arg(long)]
         port: Option<u16>,
-        /// Built web UI (`npm run build:web`).
-        #[arg(long, default_value = "web/dist")]
-        web: PathBuf,
+        /// Serve the web UI built in this directory (`npm run build:web` → web/dist) instead of the one built into genie.
+        #[arg(long)]
+        web: Option<PathBuf>,
         /// Do not start agents (UI and automations only).
         #[arg(long)]
         no_agents: bool,
@@ -77,9 +77,9 @@ enum Command {
     },
     /// Check that the server is ready: data, web UI, people, projects, pi and the models, sandbox, git, channels, network.
     Doctor {
-        /// Built web UI the server serves.
-        #[arg(long, default_value = "web/dist")]
-        web: PathBuf,
+        /// The web UI directory the server is started with (`serve --web`), if any.
+        #[arg(long)]
+        web: Option<PathBuf>,
     },
     /// Knowledge vault maintenance.
     #[command(subcommand)]
@@ -130,7 +130,7 @@ pub fn op_context(data: &Path, project: Option<String>, setup: bool) -> Result<C
     }
     let cfg = Config::load(data)?;
     let port = cfg.port;
-    let app = App::open(data, cfg, PathBuf::new()).map_err(|e| e.to_string())?;
+    let app = App::open(data, cfg, None).map_err(|e| e.to_string())?;
     Ok(Cx {
         api: Box::new(InProcess::new(crate::http::router(app), port, Auth::Operator, project.clone())),
         project,
@@ -182,6 +182,13 @@ pub async fn run() -> Result<(), String> {
                 cfg.runtime.enabled = false;
             }
             let app = App::open(&data, cfg, web).map_err(|e| e.to_string())?;
+            match (crate::http::web::resolve(app.web_root.as_deref()), &app.web_root) {
+                (crate::http::web::WebUi::BuiltIn, Some(dir)) => {
+                    eprintln!("genie: no web UI in {}: serving the one built into genie", dir.display())
+                }
+                (crate::http::web::WebUi::Missing(why), _) => eprintln!("genie: {why}"),
+                _ => {}
+            }
             app.print_agent_errors();
             crate::runtime::start(&app);
             crate::serve(app).await?;
@@ -226,7 +233,7 @@ pub async fn run() -> Result<(), String> {
         Command::Doctor { web } => {
             let cfg = Config::load(&data)?;
             let agents = crate::agent_config::AgentConfig::load(&data, &cfg, None);
-            let (report, failed) = crate::doctor::print(&crate::doctor::run(&data, &cfg, &agents, &web));
+            let (report, failed) = crate::doctor::print(&crate::doctor::run(&data, &cfg, &agents, web.as_deref()));
             println!("{report}");
             if failed > 0 {
                 return Err(format!("{failed} check(s) failed"));
@@ -283,7 +290,7 @@ pub async fn run() -> Result<(), String> {
                     println!("{copied} page(s) imported into {}/{space}", vault_dir.display());
                 }
                 VaultCmd::Sync => {
-                    let app = App::open(&data, cfg.clone(), PathBuf::new()).map_err(|e| e.to_string())?;
+                    let app = App::open(&data, cfg.clone(), None).map_err(|e| e.to_string())?;
                     match crate::vault_sync::sync(&app).map_err(|e| e.to_string())? {
                         None => return Err("vault.remote is not set in config.json".into()),
                         Some(st) if !st.ok => return Err(st.error.unwrap_or_default()),

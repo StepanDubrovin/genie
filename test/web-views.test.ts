@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { bodyUnderTitle, firstParagraph } from "../web/src/entities/doc/model.ts";
 import { statusNote } from "../web/src/entities/task/model.ts";
 import { condition, cronText, describeStep, describeTrigger, duration, untemplate } from "../web/src/pages/platform/model/describe.ts";
+import { imageRefSrc, parseImageRef } from "../web/src/shared/lib/images.ts";
 
 test("a rule's trigger reads as words, not as its JSON", () => {
   assert.equal(
@@ -57,4 +58,14 @@ test("a doc page shows its title and summary once", () => {
 test("a status note of the activity is recognised", () => {
   assert.deepEqual(statusNote("[in_progress → review] Сдано на ревью"), { from: "in_progress", to: "review", note: "Сдано на ревью" });
   assert.equal(statusNote("Просто комментарий"), undefined);
+});
+
+test("an image path in a team's chat is read from that team's worktree", () => {
+  const shot = parseImageRef("docs/shot.png");
+  assert.ok(shot);
+  assert.equal(imageRefSrc(shot), "/api/images?path=docs%2Fshot.png");
+  assert.equal(imageRefSrc(shot, "shop-G-7"), "/api/images?path=docs%2Fshot.png&team=shop-G-7");
+  const artifact = parseImageRef("artifact:G-7/3");
+  assert.ok(artifact);
+  assert.equal(imageRefSrc(artifact, "shop-G-7"), "/api/tasks/G-7/artifacts/3?raw=1", "artifacts belong to the task, not the worktree");
 });

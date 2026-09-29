@@ -248,7 +248,7 @@ export function TeamView() {
                           </div>
                         )}
                         <div className="text">
-                          <MessageText text={m.text} />
+                          <MessageText text={m.text} team={team.id} />
                         </div>
                         {m.kind === "mine" && !same(next) && <span className="receipt">{m.delivered ? "получено" : "ещё не прочитано"}</span>}
                       </div>

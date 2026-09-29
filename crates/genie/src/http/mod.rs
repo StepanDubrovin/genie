@@ -13,16 +13,18 @@ pub mod automations;
 pub mod console;
 pub mod ctx;
 pub mod docs;
+pub mod images;
 pub mod live;
 pub mod mcp_gateway;
 pub mod mcp_server;
 pub mod tasks;
 pub mod teams;
+pub mod web;
 
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -86,25 +88,22 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(teams::routes())
         .merge(agents::routes())
         .merge(docs::routes())
+        .merge(images::routes())
         .merge(automations::routes())
         .merge(console::routes())
         .merge(agent_config::routes())
         .merge(mcp_gateway::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
-    let index = app.web_root.join("index.html");
     let router =
         Router::new().nest("/api", api).route("/mcp", post(mcp_server::endpoint).get(mcp_server::no_stream).delete(mcp_server::no_stream));
     // Client-side routes (/board, /team/G-7…) fall back to the SPA entry.
-    let router = if index.exists() {
-        router.fallback_service(ServeDir::new(&app.web_root).fallback(ServeFile::new(index)))
-    } else {
-        router.fallback(|| async {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "genie web UI is not built yet: run `npm install && npm run build:web` in the genie repository",
-            )
-        })
+    let router = match web::resolve(app.web_root.as_deref()) {
+        web::WebUi::BuiltIn => {
+            router.fallback(|method: Method, uri: Uri| async move { web::respond(web::WEB_ASSETS, &method, uri.path()) })
+        }
+        web::WebUi::Dir(dir) => router.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
+        web::WebUi::Missing(why) => router.fallback(move || async move { (StatusCode::SERVICE_UNAVAILABLE, why) }),
     };
     router.layer(middleware::from_fn_with_state(app.clone(), guard)).with_state(app)
 }

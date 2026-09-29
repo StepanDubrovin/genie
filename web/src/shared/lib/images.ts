@@ -19,7 +19,10 @@ export function isRasterFileName(name: string): boolean {
 // chat surface (never by the shared Markdown renderer):
 //
 //   !image[artifact:<TASK-ID>/<N>]   -> GET /api/tasks/<TASK-ID>/artifacts/<N>?raw=1
-//   !image[<repo-relative-path>]     -> GET /api/images?path=<url-encoded path>
+//   !image[<repo-relative-path>]     -> GET /api/images?path=<url-encoded path>[&team=<id>]
+//
+// A path is relative to the team's worktree (what its agents see), or to the
+// project's repository when the team has none.
 //
 // Anything unrecognised stays literal text; a reference is only ever local, so no
 // URL scheme is ever accepted (criterion #6).
@@ -80,9 +83,8 @@ export function parseImageRefs(text: string): ImageSegment[] {
   return out;
 }
 
-/** URL an `!image` reference resolves to (local API only). */
-export function imageRefSrc(ref: ImageRef): string {
-  return ref.kind === "artifact"
-    ? `/api/tasks/${encodeURIComponent(ref.task)}/artifacts/${ref.n}?raw=1`
-    : `/api/images?path=${encodeURIComponent(ref.path)}`;
+/** URL an `!image` reference resolves to (local API only); `team` — the chat's team. */
+export function imageRefSrc(ref: ImageRef, team?: string): string {
+  if (ref.kind === "artifact") return `/api/tasks/${encodeURIComponent(ref.task)}/artifacts/${ref.n}?raw=1`;
+  return `/api/images?path=${encodeURIComponent(ref.path)}${team ? `&team=${encodeURIComponent(team)}` : ""}`;
 }

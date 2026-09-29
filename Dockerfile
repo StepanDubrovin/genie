@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Genie server: one image with the Rust server, the web UI and the pi harness that runs the agents.
+# Genie server: one image with the Rust server (the web UI built in) and the pi harness that runs the agents.
 # Guide: docs/platform/docker.md
 #
 #   docker build -t genie .
@@ -32,14 +32,15 @@ RUN npm run build:web
 FROM rust:${RUST_VERSION}-${DEBIAN_RELEASE} AS server
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-# config/, agents/ and crates/genie/pi/ are embedded into the binary (include_str!).
+# config/, agents/, crates/genie/pi/ and the web UI are embedded into the binary (include_str!, build.rs).
 COPY config ./config
 COPY agents ./agents
 COPY crates ./crates
+COPY --from=web /src/web/dist ./web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p genie \
+    GENIE_WEB_DIST=web/dist cargo build --release --locked -p genie \
  && install -D -m 0755 target/release/genie /out/genie \
  && strip /out/genie
 
@@ -84,7 +85,6 @@ COPY docker/configure.mjs docker/load-secrets.sh /usr/local/lib/genie/
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/genie-cli.sh /usr/local/bin/genie
 COPY --from=server /out/genie /opt/genie/bin/genie
-COPY --from=web /src/web/dist /opt/genie/web
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/genie
 
 RUN mkdir -p /data /workspace \

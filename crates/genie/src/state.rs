@@ -44,7 +44,8 @@ pub struct ProjectRt {
 pub struct App {
     pub data: PathBuf,
     pub cfg: Config,
-    pub web_root: PathBuf,
+    /// A directory with the built web UI (`--web`); None: the one built into the binary.
+    pub web_root: Option<PathBuf>,
     server: Mutex<ServerDb>,
     /// The knowledge vault shared by all projects of this installation.
     pub vault: Mutex<Vault>,
@@ -68,7 +69,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn open(data: &Path, cfg: Config, web_root: PathBuf) -> AppResult<Arc<App>> {
+    pub fn open(data: &Path, cfg: Config, web_root: impl Into<Option<PathBuf>>) -> AppResult<Arc<App>> {
         std::fs::create_dir_all(data).map_err(|e| AppError::Internal(format!("{}: {e}", data.display())))?;
         let server = ServerDb::open(&data.join("server.db"))?;
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("genie"));
@@ -80,7 +81,7 @@ impl App {
         Ok(Arc::new(App {
             data: data.to_path_buf(),
             cfg,
-            web_root,
+            web_root: web_root.into(),
             server: Mutex::new(server),
             vault: Mutex::new(vault),
             projects: RwLock::new(HashMap::new()),

@@ -42,13 +42,15 @@ config.json          настройки (необязательно)
 Нужны Rust (stable), Node 23.6+ (для веба и pi) и git.
 
 ```bash
+npm install && npm run build:web        # веб-интерфейс web/dist: он встраивается в бинарь
 cargo build --release -p genie          # бинарь target/release/genie
-npm install && npm run build:web        # веб-интерфейс web/dist
 
 ./target/release/genie project add shop --name "Магазин" --repo ~/code/shop   # проект с кодом
 ./target/release/genie project add product --name "Продукт"                    # проект без кода
-./target/release/genie serve --web web/dist                                    # http://127.0.0.1:7420
+./target/release/genie serve                                                   # http://127.0.0.1:7420
 ```
+
+Веб встраивается, если `web/dist` собран до `cargo build`; `GENIE_WEB_DIST=web/dist cargo build --release -p genie` требует его и пересобирает бинарь с ним. Бинарь без встроенного веба раздаёт `web/dist` из текущего каталога, `serve --web <каталог>` — веб из каталога (свежая сборка без пересборки бинаря).
 
 Пока на сервере нет пользователей, веб открыт без входа — но только с этой машины (loopback). Репозиторий, где уже есть `.genie/`, подключается со всеми задачами на месте: TS-инструменты продолжают работать с тем же файлом.
 
@@ -308,7 +310,7 @@ You are the QA engineer of a focus team…
 
 `genie doctor` (запускайте от пользователя сервера, с теми же `GENIE_DATA` и `PATH`) проверяет всё, без чего пилот не пойдёт, и называет, что сделать:
 
-- каталог данных (запись, свободное место), собранный веб (`--web`);
+- каталог данных (запись, свободное место), веб (встроенный или `--web`);
 - люди (есть ли администратор) и проекты (трекер открывается, репозиторий на месте);
 - агенты: ошибки конфигурации ролей, `pi` в `PATH`, **модели ролей доступны pi** (по `pi --list-models`: нет входа у провайдера или опечатка в id — ошибка), pi-mcp-adapter для прямых MCP-подключений;
 - песочница bubblewrap, git и имя для коммитов (без него агенты коммитят как `<имя>@genie.local`);
@@ -323,13 +325,13 @@ You are the QA engineer of a focus team…
 ## Как служба (systemd)
 
 ```bash
-cargo build --release -p genie && npm ci && npm run build:web
-sudo deploy/install.sh        # /opt/genie/bin/genie, /opt/genie/web, пользователь genie, /var/lib/genie, /var/backups/genie
+npm ci && npm run build:web && GENIE_WEB_DIST=web/dist cargo build --release -p genie
+sudo deploy/install.sh        # /opt/genie/bin/genie (веб внутри), пользователь genie, /var/lib/genie, /var/backups/genie
 sudo -iu genie npm install -g --prefix ~/.local @earendil-works/pi-coding-agent
 sudo -iu genie pi             # /login у провайдеров моделей ролей
 sudo cp deploy/systemd/genie.service deploy/systemd/genie-backup.service deploy/systemd/genie-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now genie genie-backup.timer
-sudo -iu genie env GENIE_DATA=/var/lib/genie /opt/genie/bin/genie doctor --web /opt/genie/web
+sudo -iu genie env GENIE_DATA=/var/lib/genie /opt/genie/bin/genie doctor
 ```
 
 - `genie.service` — сервер от пользователя `genie` (`HOME` — там логины pi), данные в `/var/lib/genie`, перезапуск при сбое; агенты — процессы службы и останавливаются вместе с ней, после перезапуска работа продолжается.

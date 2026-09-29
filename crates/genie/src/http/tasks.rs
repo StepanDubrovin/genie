@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::ctx::{Access, Ctx};
+use super::images::image_mime;
 use super::{ApiError, ApiResult};
 use crate::state::App;
 
@@ -431,21 +432,6 @@ async fn add_artifact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<Stri
     let task = tracker(&app, &access, move |t| t.add_artifact(&actor, &id, input)).await?;
     changed(&app);
     Ok((StatusCode::CREATED, to_json(task)))
-}
-
-/// PNG, JPEG, GIF or WebP by magic bytes (the only formats shown inline).
-pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
 }
 
 #[derive(Deserialize, Default)]

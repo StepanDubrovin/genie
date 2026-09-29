@@ -415,7 +415,7 @@ async fn create_invite(
 /// The server's preflight (`genie doctor`) for its admins.
 async fn doctor(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
     ctx.server_admin()?;
-    let checks = app.blocking(|app| Ok(crate::doctor::run(&app.data, &app.cfg, &app.agents(), &app.web_root))).await?;
+    let checks = app.blocking(|app| Ok(crate::doctor::run(&app.data, &app.cfg, &app.agents(), app.web_root.as_deref()))).await?;
     Ok(Json(json!({ "checks": checks })))
 }
 

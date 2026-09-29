@@ -363,3 +363,95 @@ async fn a_project_is_checked_before_anything_is_created() {
     let (s, e, _) = call(r, "POST", "/api/projects").json(json!({ "slug": "shop" })).send().await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
 }
+
+/// `!image[docs/shot.png]` in the team chat: a raster file of the project's
+/// repository — or of the team's worktree — served inline, and nothing else.
+#[tokio::test]
+async fn images_come_from_the_repository_or_the_teams_worktree_and_nowhere_else() {
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f,
+        0x15, 0xc4, 0x89,
+    ];
+    let h = Harness::new();
+    let repo = h.dir.path().join("shop-repo");
+    let write = |rel: &str, bytes: &[u8]| {
+        let file = repo.join(rel);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, bytes).unwrap();
+    };
+    write("docs/shot.png", PNG);
+    write("docs/mislabeled.txt", PNG);
+    write("docs/vector.svg", b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>");
+    write("docs/big.png", &[PNG, &vec![0u8; 11 * 1024 * 1024]].concat());
+    std::fs::create_dir_all(repo.join("docs/dir.png")).unwrap();
+    let outside = h.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.png"), PNG).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.png"), repo.join("docs/linked.png")).unwrap();
+    std::os::unix::fs::symlink(repo.join("docs/shot.png"), repo.join("docs/alias.png")).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("out")).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "docs/shot.png"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+    h.app.create_project("shop", "Магазин", Some(&repo.to_string_lossy()), None, None).unwrap();
+    let r = &h.router;
+    let get = |uri: String| async move { call(r, "GET", &uri).send_raw().await };
+
+    let (s, headers, bytes) = get("/api/images?path=docs%2Fshot.png".into()).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["content-disposition"], "inline");
+    assert_eq!(bytes, PNG);
+    let (s, headers, _) = get("/api/images?path=docs%2Fmislabeled.txt".into()).await;
+    assert_eq!((s, headers["content-type"].to_str().unwrap()), (StatusCode::OK, "image/png"), "the type comes from the bytes");
+
+    for (path, status) in [
+        ("..%2Fescape.png", StatusCode::BAD_REQUEST),
+        ("%2Fetc%2Fpasswd", StatusCode::BAD_REQUEST),
+        ("a%5Cb.png", StatusCode::BAD_REQUEST),
+        ("a%00b.png", StatusCode::BAD_REQUEST),
+        ("", StatusCode::BAD_REQUEST),
+        ("https%3A%2F%2Fexample.com%2Fx.png", StatusCode::BAD_REQUEST),
+        ("docs%2Flinked.png", StatusCode::BAD_REQUEST),
+        ("docs%2Falias.png", StatusCode::BAD_REQUEST),
+        ("out%2Fsecret.png", StatusCode::BAD_REQUEST),
+        ("docs%2Fmissing.png", StatusCode::NOT_FOUND),
+        ("docs%2Fdir.png", StatusCode::NOT_FOUND),
+        ("docs%2Fvector.svg", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ("docs%2Fbig.png", StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        assert_eq!(get(format!("/api/images?path={path}")).await.0, status, "{path}");
+    }
+    assert_eq!(get("/api/images".into()).await.0, StatusCode::BAD_REQUEST);
+
+    // A file the team made in its worktree shows in its chat, not in the project's.
+    call(r, "POST", "/api/tasks").json(json!({ "title": "Screenshots" })).send().await;
+    call(r, "POST", "/api/tasks/G-1/status").json(json!({ "status": "ready" })).send().await;
+    let (s, team, _) = call(r, "POST", "/api/teams").json(json!({ "task": "G-1", "template": "pair" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let (id, worktree) = (team["id"].as_str().unwrap(), team["worktree"]["path"].as_str().unwrap());
+    std::fs::create_dir_all(std::path::Path::new(worktree).join("shots")).unwrap();
+    std::fs::write(std::path::Path::new(worktree).join("shots/new.png"), PNG).unwrap();
+    assert_eq!(get(format!("/api/images?path=shots%2Fnew.png&team={id}")).await.0, StatusCode::OK);
+    assert_eq!(get("/api/images?path=shots%2Fnew.png".into()).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        get(format!("/api/images?path=docs%2Fshot.png&team={id}")).await.0,
+        StatusCode::OK,
+        "committed files are in the worktree too"
+    );
+
+    // A project without a repository has no files to show.
+    h.project("notes");
+    let (s, _, _) = call(r, "GET", "/api/images?path=docs%2Fshot.png").header("x-genie-project", "notes").send_raw().await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // Agents of another project do not read this one's files.
+    let agent =
+        h.app.with_server(|db| db.create_agent_token("notes", Role::Documenter, "ada", None, None, chrono::Duration::hours(1))).unwrap();
+    let (s, _, _) = call(&h.remote, "GET", "/api/images?path=docs%2Fshot.png&project=shop").bearer(&agent).no_csrf().send_raw().await;
+    assert_ne!(s, StatusCode::OK);
+}

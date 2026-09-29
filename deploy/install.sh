@@ -1,12 +1,13 @@
 #!/bin/sh
 # Lay out a built genie under /opt/genie (or $PREFIX) and prepare the service user.
 #
-#   cargo build --release -p genie && npm ci && npm run build:web
+#   npm ci && npm run build:web && GENIE_WEB_DIST=web/dist cargo build --release -p genie
 #   sudo deploy/install.sh
 #
-# Then, as the service user: install pi (npm install -g --prefix ~/.local
-# @earendil-works/pi-coding-agent), log in to the model providers (pi, then /login),
-# and check everything with `GENIE_DATA=/var/lib/genie /opt/genie/bin/genie doctor --web /opt/genie/web`.
+# The web UI goes into the binary, so it is built first (GENIE_WEB_DIST makes the
+# build fail without it). Then, as the service user: install pi (npm install -g
+# --prefix ~/.local @earendil-works/pi-coding-agent), log in to the model providers
+# (pi, then /login), and check everything with `GENIE_DATA=/var/lib/genie /opt/genie/bin/genie doctor`.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -15,15 +16,17 @@ USER_NAME=${GENIE_USER:-genie}
 DATA=${GENIE_DATA:-/var/lib/genie}
 BACKUPS=${GENIE_BACKUPS:-/var/backups/genie}
 
-test -x target/release/genie || { echo "build first: cargo build --release -p genie" >&2; exit 1; }
-test -f web/dist/index.html || { echo "build the web UI first: npm ci && npm run build:web" >&2; exit 1; }
+BUILD="npm ci && npm run build:web && GENIE_WEB_DIST=web/dist cargo build --release -p genie"
+test -x target/release/genie || { echo "build first: $BUILD" >&2; exit 1; }
+if [ -f web/dist/index.html ] && [ web/dist/index.html -nt target/release/genie ]; then
+  echo "the web UI is newer than the binary it goes into: $BUILD" >&2
+  exit 1
+fi
 
 install -d "$PREFIX/bin"
 install -m 0755 target/release/genie "$PREFIX/bin/genie"
-rm -rf "$PREFIX/web.new"
-cp -r web/dist "$PREFIX/web.new"
+# The web UI is inside the binary; a unit still passing --web must not serve an old copy.
 rm -rf "$PREFIX/web"
-mv "$PREFIX/web.new" "$PREFIX/web"
 
 if ! id "$USER_NAME" >/dev/null 2>&1; then
   useradd --system --create-home --home-dir "/home/$USER_NAME" --shell /bin/bash "$USER_NAME"

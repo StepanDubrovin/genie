@@ -51,19 +51,22 @@ impl Out {
     }
 }
 
-/// Run every check. `web`: the built web UI the server serves.
-pub fn run(data: &Path, cfg: &Config, agents: &AgentConfig, web: &Path) -> Vec<Check> {
+/// Run every check. `web`: the web UI directory the server is started with (`serve --web`).
+pub fn run(data: &Path, cfg: &Config, agents: &AgentConfig, web: Option<&Path>) -> Vec<Check> {
     let mut out = Out(Vec::new());
     storage(&mut out, data);
-    let web_index = web.join("index.html");
-    if web_index.exists() {
-        out.ok("web", format!("web UI in {}", web.display()));
-    } else {
-        out.fail(
+    match (crate::http::web::resolve(web), web) {
+        (crate::http::web::WebUi::BuiltIn, Some(dir)) => out.warn(
             "web",
-            format!("no web UI in {}", web.display()),
-            "npm install && npm run build:web in the genie repository, then serve with --web <path>/web/dist",
-        );
+            format!("no web UI in {}: the one built into genie is served", dir.display()),
+            "drop --web from the command line (the web UI is inside genie now)",
+        ),
+        (crate::http::web::WebUi::BuiltIn, None) => out.ok("web", "web UI built into genie"),
+        (crate::http::web::WebUi::Dir(dir), _) => out.ok("web", format!("web UI in {}", dir.display())),
+        (crate::http::web::WebUi::Missing(why), _) => {
+            let (what, hint) = why.split_once(": ").unwrap_or((why.as_str(), ""));
+            out.fail("web", what.to_string(), hint);
+        }
     }
     let repos = people_and_projects(&mut out, data);
     agents_and_models(&mut out, cfg, agents);
@@ -548,7 +551,8 @@ mod tests {
         assert_eq!(levels(&out.0, "data")[0], Level::Ok);
         assert_eq!(levels(&out.0, "people"), [Level::Warn]);
         assert_eq!(levels(&out.0, "projects"), [Level::Warn]);
-        let (text, _) = print(&run(data.path(), &c, &AgentConfig::load(data.path(), &c, None), web.path()));
+        let (text, _) = print(&run(data.path(), &c, &AgentConfig::load(data.path(), &c, None), Some(web.path())));
         assert!(text.contains("warn people"), "{text}");
+        assert!(text.contains(&format!("ok   web       web UI in {}", web.path().display())), "{text}");
     }
 }
