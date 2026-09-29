@@ -462,6 +462,8 @@ async fn preview(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, 
                 }))
                 .map_err(|e| AppError::Internal(e.to_string()))?,
             };
+            // An example task has no pages of its own; a real one gets its L1 context.
+            let docs = task_id.as_ref().and_then(|_| crate::context::l1(app, &slug, &task));
             let members: Vec<SpecMember> = t
                 .members
                 .iter()
@@ -494,6 +496,7 @@ async fn preview(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, 
                 note: None,
                 epic: None,
                 joining: false,
+                docs: docs.as_deref(),
             };
             let members: Vec<Value> =
                 spec.members.iter().map(|m| json!({ "key": m.key, "name": m.name, "role": m.role, "kickoff": k.text(m) })).collect();

@@ -57,6 +57,10 @@ impl AgentKey {
     }
 }
 
+/// The scheduler's own state: whose turn is running, and who waits after failures.
+#[derive(Default)]
+pub struct Sched(Mutex<SchedState>);
+
 #[derive(Default)]
 struct SchedState {
     running: HashSet<AgentKey>,
@@ -64,11 +68,10 @@ struct SchedState {
     backoff: HashMap<AgentKey, (u32, Instant)>,
 }
 
-static STATE: Mutex<Option<SchedState>> = Mutex::new(None);
-
-fn with_state<T>(f: impl FnOnce(&mut SchedState) -> T) -> T {
-    let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    f(g.get_or_insert_with(SchedState::default))
+impl Sched {
+    fn with<T>(&self, f: impl FnOnce(&mut SchedState) -> T) -> T {
+        f(&mut self.0.lock().unwrap_or_else(|e| e.into_inner()))
+    }
 }
 
 /// Start background workers: crash recovery, then the scheduler.
@@ -192,16 +195,16 @@ async fn schedule(app: &Arc<App>, slots: &Arc<Semaphore>) -> AppResult<()> {
             crate::sessions::deliver(app, &key).await;
             continue;
         }
-        let ready = with_state(|s| !s.running.contains(&key) && s.backoff.get(&key).is_none_or(|(_, until)| *until <= now));
+        let ready = app.sched.with(|s| !s.running.contains(&key) && s.backoff.get(&key).is_none_or(|(_, until)| *until <= now));
         if !ready {
             continue;
         }
         let Ok(permit) = slots.clone().try_acquire_owned() else { break };
-        with_state(|s| s.running.insert(key.clone()));
+        app.sched.with(|s| s.running.insert(key.clone()));
         let app = app.clone();
         tokio::spawn(async move {
             let ok = run_turn(&app, &key).await;
-            with_state(|s| {
+            app.sched.with(|s| {
                 s.running.remove(&key);
                 if ok {
                     s.backoff.remove(&key);
@@ -220,8 +223,8 @@ async fn schedule(app: &Arc<App>, slots: &Arc<Semaphore>) -> AppResult<()> {
 }
 
 /// Consecutive failures of an agent so far (for the attempt limit).
-fn failures(key: &AgentKey) -> u32 {
-    with_state(|s| s.backoff.get(key).map(|(n, _)| *n).unwrap_or(0))
+fn failures(app: &App, key: &AgentKey) -> u32 {
+    app.sched.with(|s| s.backoff.get(key).map(|(n, _)| *n).unwrap_or(0))
 }
 
 struct Prepared {
@@ -280,7 +283,7 @@ async fn run_turn(app: &Arc<App>, key: &AgentKey) -> bool {
     };
     let k = key.clone();
     let max_attempts = app.cfg.runtime.max_attempts.max(1);
-    let attempts = failures(key) + u32::from(!ok);
+    let attempts = failures(app, key) + u32::from(!ok);
     let res = app.blocking(move |app| finish(app, &k, &p, ok, code, error.as_deref(), &log, attempts >= max_attempts, max_attempts)).await;
     if let Err(e) = res {
         eprintln!("genie runtime: turn {turn}: {e}");
@@ -1222,6 +1225,11 @@ fn agent_prompt(
         lang.user,
     ));
     out.push_str("\nTo reach a person, mention them as `@login` in a task comment: they get a notification (in the web, Telegram or e-mail). A task's person responsible (`assignee`) is the one to ask about it.\n");
+    if (reader == AgentKind::Orchestrator || role.can(Capability::DocsRead))
+        && let Some(l0) = crate::context::l0(app, &project.slug)
+    {
+        out.push_str(&format!("\n{l0}\n"));
+    }
     if reader == AgentKind::Orchestrator {
         let people: Vec<String> = app
             .with_server(|db| db.members_of(&project.slug))
@@ -1408,6 +1416,8 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
     if CLOSED.contains(&task.status) {
         return Err(GenieError::invalid(format!("{} is {}", task.id, task.status)).into());
     }
+    // Chosen outside the tracker's lock: the knowledge base has its own.
+    let docs = crate::context::l1(app, slug, &task);
     let refinement = matches!(task.status, Status::Inbox | Status::Draft | Status::Refining);
     let template = match (&req.template, req.members.is_empty()) {
         (Some(id), _) => Some(agents.team_for(slug, id)?.clone()),
@@ -1576,6 +1586,7 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
             note: req.note.as_deref(),
             epic: epic.as_ref(),
             joining: false,
+            docs: docs.as_deref(),
         };
         for m in &spec.members {
             t.bus().send(team::SendMail {
@@ -1605,6 +1616,8 @@ pub fn add_member(app: &App, slug: &str, team_id: &str, m: MemberSpec, by: &str)
         return Err(GenieError::invalid("the orchestrator is not a team member").into());
     }
     let max = app.cfg.limits.max_members_per_team;
+    let task_id = app.with_tracker(slug, |t| Ok(t.bus().get(team_id)?.task))?;
+    let docs = app.with_tracker(slug, |t| t.get(&task_id)).ok().and_then(|task| crate::context::l1(app, slug, &task));
     app.with_tracker(slug, |t| {
         let team = t.bus().get(team_id)?;
         if team.state != "active" {
@@ -1678,6 +1691,7 @@ pub fn add_member(app: &App, slug: &str, team_id: &str, m: MemberSpec, by: &str)
             note: None,
             epic: None,
             joining: true,
+            docs: docs.as_deref(),
         };
         let bus = t.bus();
         bus.send(team::SendMail {
@@ -1721,6 +1735,8 @@ pub struct Kickoff<'a> {
     pub epic: Option<&'a Task>,
     /// Joining a running team rather than starting with it.
     pub joining: bool,
+    /// Pages of the knowledge base chosen for the task (L1, see `crate::context`).
+    pub docs: Option<&'a str>,
 }
 
 fn and_list(items: &[String]) -> String {
@@ -1882,6 +1898,9 @@ impl Kickoff<'_> {
         if let Some(n) = self.note.filter(|n| !n.trim().is_empty()) {
             out.push(format!("\nFrom {}: {n}", if self.joining { "whoever added you" } else { "the orchestrator" }));
         }
+        if let Some(d) = self.docs {
+            out.push(format!("\n{d}"));
+        }
         out.join("\n")
     }
 }
@@ -1947,7 +1966,7 @@ pub fn restart_member(app: &App, slug: &str, team: &str, member: &str) -> AppRes
         t.bus().log(team, "member_restarted", json!({ "member": member }))
     })?;
     let key = AgentKey::Member { project: slug.to_string(), team: team.to_string(), member: member.to_string() };
-    with_state(|s| {
+    app.sched.with(|s| {
         s.backoff.remove(&key);
     });
     crate::sessions::reset(app, &key);

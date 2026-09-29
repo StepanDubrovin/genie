@@ -7,6 +7,7 @@ pub mod agent_config;
 pub mod channels;
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod doctor;
 pub mod engine;
 pub mod http;
