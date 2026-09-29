@@ -1298,6 +1298,15 @@ fn agent_prompt(
         lang.user,
     ));
     if reader == Reader::Orchestrator {
+        if project.autonomy == "assisted" {
+            out.push_str("\n## Autonomy: assisted\n\nPeople close tasks in this project. Take tasks into work and see them through as usual, but do not move a task to `done` or `cancelled` yourself (the server refuses): when it meets its Definition of Done, move it to `needs_owner` with a short summary of the result and what to check. A person closes it.\n");
+        }
+        if !project.integration.trim().is_empty() {
+            out.push_str(&format!(
+                "\n## Integration\n\nUnless the owner agreed on another way for a task, its result is integrated like this: {}. Use it as the task's integration (`mergeStrategy`) without asking; teams get it with the task.\n",
+                project.integration.trim()
+            ));
+        }
         out.push_str("\n## Automations\n\nSome work is done by the project's automations (their comments and actions are signed `automation:<id>:<run>`). A task in `refining` with the comment \"Взята в разбор автоматически\" is being triaged by an automation: do not start another analysis for it — you will get a message when the author's answers are in. Automations also update the knowledge base and the changelog when a task is done.\n");
         out.push_str(&catalogue_section(agents, project));
     }
@@ -1606,6 +1615,11 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
         let wt = worktree.as_ref().map(|w| genie_core::Worktree { path: w.path.clone(), branch: Some(w.branch.clone()) });
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         t.assign_team(&system, &task.id, Some(&team_id), wt.as_ref(), Some(&names))?;
+        // The project's way of integrating results, unless the task has its own.
+        if !refinement && task.merge_strategy.trim().is_empty() && !project.integration.trim().is_empty() {
+            let input = genie_core::UpdateInput { merge_strategy: Some(project.integration.clone()), ..Default::default() };
+            t.update(&system, &task.id, input)?;
+        }
         if matches!(task.status, Status::Inbox | Status::Draft) {
             t.set_status(
                 &system,

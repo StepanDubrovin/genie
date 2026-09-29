@@ -277,7 +277,9 @@ async fn create_project(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<New
 
 #[derive(Deserialize)]
 struct ProjectPatch {
+    name: Option<String>,
     autonomy: Option<String>,
+    integration: Option<String>,
 }
 
 async fn update_project(
@@ -293,7 +295,7 @@ async fn update_project(
                 if let Some(a) = &b.autonomy {
                     db.set_autonomy(&slug, a)?;
                 }
-                db.project(&slug)
+                db.update_project(&slug, b.name.as_deref(), b.integration.as_deref())
             })
         })
         .await?;

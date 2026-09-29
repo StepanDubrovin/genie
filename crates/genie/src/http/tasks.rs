@@ -265,6 +265,17 @@ async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
     let to: Status = to_raw.parse().map_err(|_| ApiError::bad(format!("unknown status {to_raw}")))?;
     // The owner's moves in the web UI are authoritative (as in the TypeScript server);
     // agents follow the workflow and may only force as orchestrator when asked to.
+    // In an `assisted` project people close tasks; the orchestrator asks one instead.
+    if !access.is_human() && access.actor.role == Role::Orchestrator && CLOSED.contains(&to) {
+        let slug = access.project.clone();
+        let autonomy = app.blocking(move |app| app.with_server(|db| db.project(&slug)).map(|p| p.autonomy)).await?;
+        if autonomy == "assisted" {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "people close tasks in this project (assisted): move the task to needs_owner with a short summary of the result and what to check",
+            ));
+        }
+    }
     let force = access.is_human() || (access.actor.role == Role::Orchestrator && b["force"] == json!(true));
     let opts = StatusOptions { note: b.get("note").and_then(text).filter(|n| !n.is_empty()), force };
     let actor = access.actor.clone();

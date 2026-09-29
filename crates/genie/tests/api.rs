@@ -228,3 +228,42 @@ async fn team_members_act_only_on_their_task_its_subtasks_and_epic_notes() {
     assert_eq!(send("POST", "/api/tasks".into(), json!({ "title": "loose" })).await, StatusCode::FORBIDDEN);
     assert_eq!(send("POST", "/api/tasks".into(), json!({ "title": "piece", "parent": "G-2" })).await, StatusCode::CREATED);
 }
+
+#[tokio::test]
+async fn in_an_assisted_project_people_close_tasks_and_teams_get_the_default_integration() {
+    let h = Harness::new();
+    h.project("shop");
+    let r = &h.router;
+    for title in ["first", "second", "third"] {
+        let (s, _, _) = call(r, "POST", "/api/tasks").json(json!({ "title": title })).send().await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+    let (s, p, _) = call(r, "PATCH", "/api/projects/shop")
+        .json(json!({ "name": "Магазин", "autonomy": "assisted", "integration": "the owner reviews the branch and merges it" }))
+        .send()
+        .await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+    assert_eq!((p["name"].as_str(), p["autonomy"].as_str()), (Some("Магазин"), Some("assisted")));
+    let orch = h
+        .app
+        .with_server(|db| db.create_agent_token("shop", Role::Orchestrator, "orchestrator", None, None, chrono::Duration::hours(1)))
+        .unwrap();
+    let close = |id: &str| format!("/api/tasks/{id}/status");
+    let (s, e, _) = call(&h.remote, "POST", &close("G-1")).bearer(&orch).no_csrf().json(json!({ "status": "cancelled" })).send().await;
+    assert_eq!(s, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("needs_owner"), "the refusal says what to do instead: {e}");
+    let (s, _, _) = call(r, "POST", &close("G-1")).json(json!({ "status": "cancelled" })).send().await;
+    assert_eq!(s, StatusCode::OK, "a person closes it");
+    call(r, "PATCH", "/api/projects/shop").json(json!({ "autonomy": "autonomous" })).send().await;
+    let (s, _, _) = call(&h.remote, "POST", &close("G-2")).bearer(&orch).no_csrf().json(json!({ "status": "cancelled" })).send().await;
+    assert_eq!(s, StatusCode::OK, "an autonomous orchestrator closes tasks itself");
+
+    // A team gets the project's way of integrating results.
+    call(r, "PATCH", "/api/tasks/G-3").json(json!({ "description": "Do it", "acceptance": ["it works"] })).send().await;
+    let (s, t, _) = call(r, "POST", &close("G-3")).json(json!({ "status": "ready" })).send().await;
+    assert_eq!(s, StatusCode::OK, "{t}");
+    let (s, team, _) = call(r, "POST", "/api/teams").json(json!({ "task": "G-3", "template": "pair" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let (_, t, _) = call(r, "GET", "/api/tasks/G-3").send().await;
+    assert_eq!(t["mergeStrategy"], "the owner reviews the branch and merges it");
+}
