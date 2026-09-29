@@ -31,6 +31,7 @@ mod me;
 pub mod render;
 mod tasks;
 mod teams;
+pub mod tools;
 
 pub use api::{Api, Auth, InProcess, Payload, Remote};
 

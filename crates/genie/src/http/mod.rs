@@ -14,6 +14,7 @@ pub mod ctx;
 pub mod docs;
 pub mod live;
 pub mod mcp_gateway;
+pub mod mcp_server;
 pub mod tasks;
 pub mod teams;
 
@@ -23,7 +24,7 @@ use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use genie_core::GenieError;
 use serde_json::json;
@@ -90,7 +91,8 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
     let index = app.web_root.join("index.html");
-    let router = Router::new().nest("/api", api);
+    let router =
+        Router::new().nest("/api", api).route("/mcp", post(mcp_server::endpoint).get(mcp_server::no_stream).delete(mcp_server::no_stream));
     // Client-side routes (/board, /team/G-7…) fall back to the SPA entry.
     let router = if index.exists() {
         router.fallback_service(ServeDir::new(&app.web_root).fallback(ServeFile::new(index)))
