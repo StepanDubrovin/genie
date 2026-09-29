@@ -25,6 +25,8 @@ pub const TASK_BLOCKED: &str = "task.blocked";
 pub const TASK_UNBLOCKED: &str = "task.unblocked";
 pub const TASK_TEAM_ASSIGNED: &str = "task.team_assigned";
 pub const MAIL_SENT: &str = "mail.sent";
+/// A tool call through the MCP gateway.
+pub const MCP_CALLED: &str = "mcp.called";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +56,25 @@ pub fn after(conn: &Connection, after: i64, limit: usize) -> Result<Vec<Event>> 
     let mut stmt =
         conn.prepare_cached("SELECT id, at, type, subject, actor, actor_role, payload FROM events WHERE id > ?1 ORDER BY id LIMIT ?2")?;
     let rows = stmt.query_map(params![after, limit as i64], |r| {
+        let payload: String = r.get(6)?;
+        Ok(Event {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            kind: r.get(2)?,
+            subject: r.get(3)?,
+            actor: r.get(4)?,
+            actor_role: r.get(5)?,
+            payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The newest events of one type, newest first, at most `limit`.
+pub fn latest_of(conn: &Connection, kind: &str, limit: usize) -> Result<Vec<Event>> {
+    let mut stmt = conn
+        .prepare_cached("SELECT id, at, type, subject, actor, actor_role, payload FROM events WHERE type = ?1 ORDER BY id DESC LIMIT ?2")?;
+    let rows = stmt.query_map(params![kind, limit as i64], |r| {
         let payload: String = r.get(6)?;
         Ok(Event {
             id: r.get(0)?,

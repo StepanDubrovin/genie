@@ -339,3 +339,42 @@ fn readiness_problems_report_missing_dependencies() {
     got.deps = vec!["G-99".into()];
     assert_eq!(readiness_problems(&got, &HashSet::new()), vec!["dependency G-99 does not exist"]);
 }
+
+#[test]
+fn configured_roles_adjust_their_class_permissions() {
+    let (_d, t) = fresh();
+    t.create(&orch(), task("Export", "CSV export", &["downloads"])).unwrap();
+    to(&t, &orch(), "G-1", Status::Ready).unwrap();
+    // A researcher: an analyst that may submit its findings for review.
+    let researcher = Actor::with_caps(
+        "poirot",
+        Role::Analyst,
+        adjust_capabilities(&class_capabilities(Role::Analyst), &[Capability::StatusSubmit], &[]),
+    );
+    to(&t, &researcher, "G-1", Status::InProgress).unwrap();
+    to(&t, &researcher, "G-1", Status::Review).unwrap();
+    // A security reviewer that must not tick functional criteria.
+    let security =
+        Actor::with_caps("argus", Role::Reviewer, adjust_capabilities(&class_capabilities(Role::Reviewer), &[], &[Capability::TaskCheck]));
+    assert_err(t.check(&security, "G-1", 1, true), "not allowed to check acceptance criteria");
+    let quiet =
+        Actor::with_caps("mute", Role::Executor, adjust_capabilities(&class_capabilities(Role::Executor), &[], &[Capability::TaskBlock]));
+    assert_err(t.block(&quiet, "G-1", "stuck"), "not allowed to block tasks");
+    to(&t, &security, "G-1", Status::Approved).unwrap();
+}
+
+#[test]
+fn whoever_submitted_the_work_cannot_approve_it() {
+    let (_d, t) = fresh();
+    t.create(&orch(), task("Export", "CSV export", &["downloads"])).unwrap();
+    to(&t, &orch(), "G-1", Status::Ready).unwrap();
+    let both = Actor::with_caps(
+        "solo",
+        Role::Executor,
+        adjust_capabilities(&class_capabilities(Role::Executor), &[Capability::StatusApprove], &[]),
+    );
+    to(&t, &both, "G-1", Status::InProgress).unwrap();
+    to(&t, &both, "G-1", Status::Review).unwrap();
+    assert_err(to(&t, &both, "G-1", Status::Approved), "submitted this work for review themselves");
+    to(&t, &reviewer(), "G-1", Status::Approved).unwrap();
+}

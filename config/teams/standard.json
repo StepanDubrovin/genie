@@ -1,0 +1,18 @@
+{
+  "title": "Стандартная",
+  "description": "Analyst → executor → reviewer in a dedicated worktree. Default for code changes in git repositories.",
+  "stage": "delivery",
+  "workspace": "worktree",
+  "members": [
+    {"role": "analyst"},
+    {"role": "executor"},
+    {"role": "reviewer"}
+  ],
+  "relations": [
+    {"from": "analyst", "to": "executor", "type": "handoff", "note": "the plan is ready"},
+    {"from": "executor", "to": "reviewer", "type": "handoff", "on": "review", "note": "the work is submitted for review"},
+    {"from": "reviewer", "to": "executor", "type": "returns", "on": "changes_requested", "note": "review findings"},
+    {"from": "reviewer", "to": "orchestrator", "type": "reports", "note": "the verdict"},
+    {"from": "executor", "to": "analyst", "type": "consults", "note": "questions about the plan"}
+  ]
+}

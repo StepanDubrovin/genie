@@ -1,11 +1,17 @@
 //! Teams, members and peer-to-peer mail, stored in the project's tracker
-//! database. Port of `src/team/bus.ts` and `src/team/digest.ts`, adapted to the
-//! turn-based runtime:
+//! database. Port of `src/team/bus.ts` and `src/team/digest.ts`, extended for
+//! live agent sessions:
 //!
-//! - an agent works in *turns*: the runtime leases the agent's unread mail to a
-//!   turn (`lease`), runs the agent, and marks the mail delivered only when the
-//!   turn succeeds (`complete_lease`); a failed or interrupted turn releases the
-//!   lease and the mail is offered again — at-least-once delivery, no loss;
+//! - a live session (a long-running `pi --mode rpc`) takes its mail in
+//!   *deliveries*: at every step boundary it leases what is pending
+//!   (`lease_delivery`), most urgent first and within a size budget, puts it into
+//!   the session and acknowledges it once the model sees it (`ack_delivery`); an
+//!   unacknowledged delivery is released and offered again, and ids the session
+//!   already holds (`seen`) are settled instead of being injected twice;
+//! - a turn-based agent (any other harness) leases its whole mailbox to a turn
+//!   (`lease`) and the mail is delivered only when the turn succeeds;
+//! - a message with a `topic` supersedes the sender's undelivered message on the
+//!   same topic; an *ask* awaits a reply (`reply`, `take_reply`);
 //! - the orchestrator's mailbox is its global box plus every team except teams
 //!   stopped on purpose (their late mail is dropped, as before).
 
@@ -25,7 +31,8 @@ pub const BROADCAST: &str = "all";
 pub const DELIBERATE_STOPS: &[&str] = &["orchestrator", "owner", "task_closed"];
 const DELIBERATE_SQL: &str = "('orchestrator', 'owner', 'task_closed')";
 
-pub const MAIL_LEVELS: &[&str] = &["low", "normal", "high"];
+/// `interrupt` stops the recipient's current step (orchestrator and people only).
+pub const MAIL_LEVELS: &[&str] = &["low", "normal", "high", "interrupt"];
 pub const MAIL_INTENTS: &[&str] = &["question", "blocker", "verdict", "done", "fyi"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,9 +86,13 @@ pub struct Team {
     pub created: String,
     pub updated: String,
     pub members: Vec<Member>,
+    /// How the team works, fixed when it was assembled: the template, member
+    /// keys, relations between members and the team charter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Mail {
     pub id: i64,
@@ -101,6 +112,14 @@ pub struct Mail {
     pub task: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    /// The message this one answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<i64>,
+    /// An ask: the sender waits for a reply.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub awaits: bool,
 }
 
 impl Mail {
@@ -128,6 +147,9 @@ impl Mail {
             kind: r.get("kind")?,
             task: r.get("task")?,
             delivered_at: r.get("delivered_at")?,
+            topic: r.get("topic")?,
+            reply_to: r.get("reply_to")?,
+            awaits: r.get::<_, i64>("awaits")? != 0,
         })
     }
 }
@@ -149,9 +171,10 @@ pub struct NewTeam {
     pub cwd: String,
     pub worktree: Option<TeamWorktree>,
     pub members: Vec<NewMember>,
+    pub spec: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SendMail<'a> {
     pub team: &'a str,
     pub from: &'a str,
@@ -161,6 +184,31 @@ pub struct SendMail<'a> {
     pub level: Option<&'a str>,
     pub intent: Option<&'a str>,
     pub kind: &'a str,
+    /// Supersedes the sender's undelivered message on the same topic to the same recipient.
+    pub topic: Option<&'a str>,
+    /// Answers this message.
+    pub reply_to: Option<i64>,
+    /// The sender waits for a reply (an ask).
+    pub awaits: bool,
+}
+
+/// Mail handed to a live session in one step boundary.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Delivery {
+    pub id: i64,
+    pub mails: Vec<Mail>,
+    /// Mail left pending because of the size budget (taken at the next boundary).
+    pub more: usize,
+}
+
+/// A delivery not acknowledged in time (its session died or hung).
+#[derive(Debug, Clone)]
+pub struct OpenDelivery {
+    pub id: i64,
+    pub team: Option<String>,
+    pub recipient: String,
+    pub created: String,
 }
 
 /// A mailbox with unread, unleased mail: `(team, recipient)`; team `None` is the orchestrator.
@@ -216,13 +264,13 @@ impl Bus<'_> {
     }
 
     pub fn get(&self, team: &str) -> Result<Team> {
-        type Row = (String, String, Option<String>, String, Option<String>, String, Option<String>, String, String);
+        type Row = (String, String, Option<String>, String, Option<String>, String, Option<String>, String, String, Option<String>);
         let row: Row = self
             .conn()
             .query_row(
-                "SELECT id, task, template, cwd, worktree, state, stop_reason, created, updated FROM teams WHERE id = ?1",
+                "SELECT id, task, template, cwd, worktree, state, stop_reason, created, updated, spec FROM teams WHERE id = ?1",
                 [team],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )
             .optional()?
             .ok_or_else(|| GenieError::not_found(format!("team {team} not found")))?;
@@ -239,6 +287,7 @@ impl Bus<'_> {
             created: row.7,
             updated: row.8,
             members,
+            spec: row.9.and_then(|s| serde_json::from_str(&s).ok()),
         })
     }
 
@@ -334,8 +383,16 @@ impl Bus<'_> {
             }
             let at = now();
             self.conn().execute(
-                "INSERT INTO teams(id, task, template, cwd, worktree, state, created, updated) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
-                params![team.id, team.task, team.template, team.cwd, team.worktree.as_ref().map(|w| json!(w).to_string()), at],
+                "INSERT INTO teams(id, task, template, cwd, worktree, state, created, updated, spec) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, ?7)",
+                params![
+                    team.id,
+                    team.task,
+                    team.template,
+                    team.cwd,
+                    team.worktree.as_ref().map(|w| json!(w).to_string()),
+                    at,
+                    team.spec.as_ref().map(Value::to_string)
+                ],
             )?;
             for (i, m) in team.members.iter().enumerate() {
                 self.insert_member(&team.id, m, i as i64)?;
@@ -353,6 +410,12 @@ impl Bus<'_> {
             Ok(())
         })?;
         self.get(&team.id)
+    }
+
+    /// Replace the snapshot of how the team works (a member joined or left).
+    pub fn set_spec(&self, team: &str, spec: &Value) -> Result<()> {
+        self.conn().execute("UPDATE teams SET spec = ?1, updated = ?2 WHERE id = ?3", params![spec.to_string(), now(), team])?;
+        Ok(())
     }
 
     pub fn add_member(&self, team: &str, m: NewMember) -> Result<Team> {
@@ -452,6 +515,29 @@ impl Bus<'_> {
     }
 
     /// Runtime bookkeeping: `working` while a turn runs, `idle` after, `error` when it failed for good.
+    /// Pause (`paused`) or resume (`active`) a member: a paused member keeps its mail
+    /// but gets no deliveries and its session is stopped.
+    pub fn set_paused(&self, team: &str, member: &str, paused: bool, by: &str) -> Result<()> {
+        self.t.tx(|| {
+            let (from, to) = if paused { ("active", "paused") } else { ("paused", "active") };
+            let n = self
+                .conn()
+                .execute("UPDATE members SET state = ?1 WHERE team = ?2 AND name = ?3 AND state = ?4", params![to, team, member, from])?;
+            if n == 0 {
+                let state: Option<String> = self
+                    .conn()
+                    .query_row("SELECT state FROM members WHERE team = ?1 AND name = ?2", params![team, member], |r| r.get(0))
+                    .optional()?;
+                return match state {
+                    None => Err(GenieError::not_found(format!("team {team} has no member {member}"))),
+                    Some(s) if s == to => Ok(()),
+                    Some(s) => Err(GenieError::invalid(format!("{member} is {s}, not {from}"))),
+                };
+            }
+            self.log(team, if paused { "member_paused" } else { "member_resumed" }, json!({ "member": member, "by": by }))
+        })
+    }
+
     pub fn set_activity(&self, team: &str, member: &str, activity: &str, runtime: Option<Value>) -> Result<()> {
         let at = now();
         self.conn().execute(
@@ -487,15 +573,43 @@ impl Bus<'_> {
         } else {
             return Err(GenieError::invalid(format!("team {} has no member \"{}\". Members: {}", team.id, m.to, names.join(", "))));
         };
+        let topic = m.topic.map(str::trim).filter(|t| !t.is_empty());
         let ids = self.t.tx(|| {
             let at = now();
             let mut ids = Vec::new();
             for to in &recipients {
+                // `urgent` stays the legacy flag for `high` only: both trackers' migrations
+                // rewrite an urgent row to `high`, which would silently demote an interrupt.
                 self.conn().execute(
-                    "INSERT INTO mail(team, at, sender, sender_role, recipient, text, urgent, level, intent, kind, task) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![team.id, at, m.from, m.from_role, to, m.text, (level == "high") as i64, level, m.intent, m.kind, team.task],
+                    "INSERT INTO mail(team, at, sender, sender_role, recipient, text, urgent, level, intent, kind, task, topic, reply_to, awaits)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    params![
+                        team.id,
+                        at,
+                        m.from,
+                        m.from_role,
+                        to,
+                        m.text,
+                        (level == "high") as i64,
+                        level,
+                        m.intent,
+                        m.kind,
+                        team.task,
+                        topic,
+                        m.reply_to,
+                        m.awaits as i64
+                    ],
                 )?;
-                ids.push(self.conn().last_insert_rowid());
+                let id = self.conn().last_insert_rowid();
+                if let Some(topic) = topic {
+                    self.conn().execute(
+                        "UPDATE mail SET delivered_at = ?1, superseded_by = ?2
+                         WHERE team = ?3 AND sender = ?4 AND recipient = ?5 AND topic = ?6 AND id <> ?2
+                           AND delivered_at IS NULL AND lease IS NULL AND delivery IS NULL",
+                        params![at, id, team.id, m.from, to, topic],
+                    )?;
+                }
+                ids.push(id);
             }
             let short: String = m.text.chars().take(500).collect();
             self.log(&team.id, "mail", json!({ "from": m.from, "to": m.to, "level": level, "intent": m.intent, "text": short }))?;
@@ -537,9 +651,12 @@ impl Bus<'_> {
     /// Unread, unleased mail for one member (or, with `team == None`, the orchestrator).
     fn unclaimed_sql(team: Option<&str>) -> String {
         match team {
-            Some(_) => "SELECT * FROM mail WHERE team = ?1 AND recipient = ?2 AND delivered_at IS NULL AND lease IS NULL ORDER BY id".into(),
+            Some(_) => {
+                "SELECT * FROM mail WHERE team = ?1 AND recipient = ?2 AND delivered_at IS NULL AND lease IS NULL AND delivery IS NULL ORDER BY id"
+                    .into()
+            }
             None => format!(
-                "SELECT * FROM mail WHERE ?1 IS NULL AND recipient = ?2 AND delivered_at IS NULL AND lease IS NULL
+                "SELECT * FROM mail WHERE ?1 IS NULL AND recipient = ?2 AND delivered_at IS NULL AND lease IS NULL AND delivery IS NULL
                  AND (team IS NULL OR team NOT IN (SELECT id FROM teams WHERE state = 'stopped' AND COALESCE(stop_reason, 'orchestrator') IN {DELIBERATE_SQL}))
                  ORDER BY id"
             ),
@@ -580,9 +697,20 @@ impl Bus<'_> {
         Ok(self.conn().execute("UPDATE mail SET lease = NULL WHERE lease = ?1 AND delivered_at IS NULL", [turn])?)
     }
 
-    /// After a restart no turn is running: every open lease is released.
+    /// After a restart no turn or session is running: every open lease and delivery is released.
     pub fn release_all_leases(&self) -> Result<usize> {
-        Ok(self.conn().execute("UPDATE mail SET lease = NULL WHERE lease IS NOT NULL AND delivered_at IS NULL", [])?)
+        self.t.tx(|| {
+            let turns = self.conn().execute("UPDATE mail SET lease = NULL WHERE lease IS NOT NULL AND delivered_at IS NULL", [])?;
+            let open: Vec<i64> = {
+                let mut stmt = self.conn().prepare("SELECT id FROM deliveries WHERE acked_at IS NULL AND released_at IS NULL")?;
+                stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+            };
+            let mut n = turns;
+            for id in open {
+                n += self.release_delivery(id)?;
+            }
+            Ok(n)
+        })
     }
 
     /// Mail addressed to a member that cannot run (removed, stopped team): drop it quietly.
@@ -602,7 +730,7 @@ impl Bus<'_> {
         let mut stmt = self.conn().prepare(
             "SELECT DISTINCT m.team, m.recipient FROM mail m JOIN members x ON x.team = m.team AND x.name = m.recipient
              JOIN teams t ON t.id = m.team
-             WHERE m.delivered_at IS NULL AND m.lease IS NULL AND t.state = 'active' AND x.state = 'active'",
+             WHERE m.delivered_at IS NULL AND m.lease IS NULL AND m.delivery IS NULL AND t.state = 'active' AND x.state = 'active'",
         )?;
         for r in stmt.query_map([], |r| Ok(Mailbox { team: r.get(0)?, recipient: r.get(1)? }))? {
             out.push(r?);
@@ -611,6 +739,163 @@ impl Bus<'_> {
             out.push(Mailbox { team: None, recipient: ORCHESTRATOR.into() });
         }
         Ok(out)
+    }
+
+    // --- live sessions: deliveries -------------------------------------------------
+
+    /// Lease a live session's pending mail for one step boundary: most urgent first,
+    /// within `budget` characters of rendered text (at least one message). `seen` are
+    /// mail ids the session already holds (injected before a crash or a lost ack):
+    /// they are settled as delivered instead of being offered again.
+    pub fn lease_delivery(&self, team: Option<&str>, recipient: &str, seen: &[i64], budget: usize) -> Result<Option<Delivery>> {
+        self.t.tx(|| {
+            let at = now();
+            for id in seen {
+                self.conn().execute(
+                    "UPDATE mail SET delivered_at = ?1 WHERE id = ?2 AND recipient = ?3 AND delivered_at IS NULL AND lease IS NULL",
+                    params![at, id, recipient],
+                )?;
+            }
+            let mut pending = self.pending(team, recipient)?;
+            if pending.is_empty() {
+                return Ok(None);
+            }
+            pending.sort_by_key(|m| (rank_mail(m), m.id));
+            let mut taken = Vec::new();
+            let mut used = 0;
+            for m in &pending {
+                let cost = render_one(m).chars().count() + 2;
+                if !taken.is_empty() && used + cost > budget {
+                    break;
+                }
+                used += cost;
+                taken.push(m.clone());
+            }
+            let more = pending.len() - taken.len();
+            let ids: Vec<i64> = taken.iter().map(|m| m.id).collect();
+            self.conn().execute(
+                "INSERT INTO deliveries(team, recipient, created, mail) VALUES (?1, ?2, ?3, ?4)",
+                params![team, recipient, at, serde_json::to_string(&ids)?],
+            )?;
+            let id = self.conn().last_insert_rowid();
+            for m in &ids {
+                self.conn().execute("UPDATE mail SET delivery = ?1 WHERE id = ?2", params![id, m])?;
+            }
+            Ok(Some(Delivery { id, mails: taken, more }))
+        })
+    }
+
+    /// The session holds the delivery (the model has seen it): its mail is delivered.
+    /// Idempotent; `recipient` must own the delivery.
+    pub fn ack_delivery(&self, id: i64, recipient: &str) -> Result<usize> {
+        self.t.tx(|| {
+            let owner: Option<String> =
+                self.conn().query_row("SELECT recipient FROM deliveries WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+            match owner {
+                None => return Err(GenieError::not_found(format!("delivery {id} not found"))),
+                Some(o) if o != recipient => return Err(GenieError::Denied(format!("delivery {id} is not yours"))),
+                _ => {}
+            }
+            let at = now();
+            self.conn().execute("UPDATE deliveries SET acked_at = COALESCE(acked_at, ?1) WHERE id = ?2", params![at, id])?;
+            Ok(self.conn().execute("UPDATE mail SET delivered_at = ?1 WHERE delivery = ?2 AND delivered_at IS NULL", params![at, id])?)
+        })
+    }
+
+    /// The delivery never reached the model: its mail is offered again.
+    pub fn release_delivery(&self, id: i64) -> Result<usize> {
+        self.t.tx(|| {
+            self.conn().execute("UPDATE deliveries SET released_at = ?1 WHERE id = ?2 AND acked_at IS NULL", params![now(), id])?;
+            Ok(self.conn().execute("UPDATE mail SET delivery = NULL WHERE delivery = ?1 AND delivered_at IS NULL", [id])?)
+        })
+    }
+
+    /// Open (neither acknowledged nor released) deliveries created before `before`.
+    pub fn open_deliveries(&self, before: &str) -> Result<Vec<OpenDelivery>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, team, recipient, created FROM deliveries WHERE acked_at IS NULL AND released_at IS NULL AND created < ?1 ORDER BY id",
+        )?;
+        Ok(stmt
+            .query_map([before], |r| Ok(OpenDelivery { id: r.get(0)?, team: r.get(1)?, recipient: r.get(2)?, created: r.get(3)? }))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Release every open delivery of one agent (its session ended).
+    pub fn release_deliveries_of(&self, team: Option<&str>, recipient: &str) -> Result<usize> {
+        let ids: Vec<i64> = {
+            let mut stmt = self
+                .conn()
+                .prepare("SELECT id FROM deliveries WHERE acked_at IS NULL AND released_at IS NULL AND recipient = ?1 AND team IS ?2")?;
+            stmt.query_map(params![recipient, team], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let mut n = 0;
+        for id in ids {
+            n += self.release_delivery(id)?;
+        }
+        Ok(n)
+    }
+
+    /// Mailboxes holding an undelivered `interrupt` not yet handed to the session.
+    pub fn interrupted_mailboxes(&self) -> Result<Vec<Mailbox>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT DISTINCT CASE WHEN recipient = 'orchestrator' THEN NULL ELSE team END, recipient FROM mail
+             WHERE level = 'interrupt' AND delivered_at IS NULL AND lease IS NULL AND delivery IS NULL",
+        )?;
+        Ok(stmt.query_map([], |r| Ok(Mailbox { team: r.get(0)?, recipient: r.get(1)? }))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Delivery latency (seconds from sending to delivery) of mail delivered since `since`, by level.
+    pub fn delivery_latencies(&self, since: &str) -> Result<Vec<(String, f64)>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT level, (julianday(delivered_at) - julianday(at)) * 86400.0 FROM mail
+             WHERE delivered_at IS NOT NULL AND delivered_at >= ?1 AND superseded_by IS NULL AND kind = 'message'",
+        )?;
+        Ok(stmt.query_map([since], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // --- asks and replies ------------------------------------------------------------
+
+    /// Answer `to_mail` (a message addressed to `from`): the reply goes back to its sender.
+    pub fn reply(&self, from: &str, from_role: &str, to_mail: i64, text: &str) -> Result<Vec<Mail>> {
+        let original = self.mail(to_mail).map_err(|_| GenieError::not_found(format!("message {to_mail} not found")))?;
+        if original.to != from {
+            return Err(GenieError::Denied(format!("message {to_mail} was not addressed to {from}")));
+        }
+        let Some(team) = original.team.clone() else {
+            return Err(GenieError::invalid(format!("message {to_mail} has no team to answer in")));
+        };
+        self.send(SendMail {
+            team: &team,
+            from,
+            from_role,
+            to: &original.from,
+            text,
+            level: Some(if original.awaits { "high" } else { "normal" }),
+            intent: (original.intent.as_deref() == Some("question")).then_some("verdict"),
+            kind: "message",
+            reply_to: Some(to_mail),
+            ..Default::default()
+        })
+    }
+
+    /// The first reply to an ask, taken by the waiting sender (marked delivered so it
+    /// is not injected into its session as well). `None` while nobody has answered.
+    pub fn take_reply(&self, ask: i64, asker: &str) -> Result<Option<Mail>> {
+        self.t.tx(|| {
+            let reply = self
+                .conn()
+                .query_row(
+                    "SELECT * FROM mail WHERE reply_to = ?1 AND recipient = ?2 AND delivered_at IS NULL AND lease IS NULL AND delivery IS NULL
+                     ORDER BY id LIMIT 1",
+                    params![ask, asker],
+                    Mail::from_row,
+                )
+                .optional()?;
+            if let Some(r) = &reply {
+                self.conn().execute("UPDATE mail SET delivered_at = ?1 WHERE id = ?2", params![now(), r.id])?;
+            }
+            Ok(reply)
+        })
     }
 }
 
@@ -649,14 +934,21 @@ pub fn display_name(name: &str) -> String {
 
 /// Pick a free name for a role; `taken` is extended.
 pub fn pick_name(role: &str, taken: &mut std::collections::HashSet<String>) -> String {
-    let pool = name_pool(role);
-    let free: Vec<&&str> = pool.iter().filter(|n| !taken.contains(**n)).collect();
+    let pool: Vec<String> = name_pool(role).iter().map(|s| s.to_string()).collect();
+    pick_from(&pool, taken)
+}
+
+/// Pick a free name from a pool (a configured role's names): a random free one,
+/// else the first with a number. `taken` is extended.
+pub fn pick_from(pool: &[String], taken: &mut std::collections::HashSet<String>) -> String {
+    let free: Vec<&String> = pool.iter().filter(|n| !taken.contains(*n)).collect();
     let name = if free.is_empty() {
-        (2..).map(|i| format!("{}{i}", pool[0])).find(|c| !taken.contains(c)).unwrap_or_default()
+        let base = pool.first().map(String::as_str).unwrap_or("agent");
+        (2..).map(|i| format!("{base}{i}")).find(|c| !taken.contains(c)).unwrap_or_default()
     } else {
         let mut b = [0u8; 2];
         getrandom::fill(&mut b).expect("OS random source");
-        free[u16::from_le_bytes(b) as usize % free.len()].to_string()
+        free[u16::from_le_bytes(b) as usize % free.len()].clone()
     };
     taken.insert(name.clone());
     name
@@ -741,6 +1033,90 @@ pub fn render_digest(mails: &[Mail]) -> String {
     out.join("\n")
 }
 
+// --- deliveries to live sessions ------------------------------------------------
+
+/// Longest message body put into a session; the rest is read with `genie agent mail <id>`.
+pub const MAX_MESSAGE_CHARS: usize = 2000;
+/// Default size budget of one delivery (rendered characters).
+pub const DELIVERY_BUDGET: usize = 8000;
+
+/// Delivery order: kickoff, interrupts, urgent and people, blockers and questions,
+/// verdicts, the rest, FYI and low last; ties keep the sending order.
+fn rank_mail(m: &Mail) -> (u8, u8) {
+    let level = match (m.kind.as_str(), m.level.as_str()) {
+        ("kickoff", _) => 0,
+        (_, "interrupt") => 1,
+        ("owner" | "system", _) | (_, "high") => 2,
+        (_, "low") => 4,
+        _ => 3,
+    };
+    (level, rank_intent(m.intent.as_deref()))
+}
+
+fn clip(text: &str, id: i64) -> String {
+    let text = text.trim();
+    if text.chars().count() <= MAX_MESSAGE_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX_MESSAGE_CHARS).collect();
+    format!("{head}…\n[cut: {} more characters — read all with `genie agent mail {id}`]", text.chars().count() - MAX_MESSAGE_CHARS)
+}
+
+/// One message as it appears in a session.
+pub fn render_one(m: &Mail) -> String {
+    let time = m.at.get(11..16).unwrap_or("");
+    let head = match m.kind.as_str() {
+        "kickoff" => format!("## Kickoff · team {}", m.team.as_deref().unwrap_or("")),
+        "system" => format!("## System note from {} · {time}", m.from),
+        "owner" => format!("## From the owner ({}) · {time}", m.from),
+        _ => {
+            let mut h = format!("## #{} from {} ({})", m.id, m.from, m.from_role);
+            if m.level == "interrupt" {
+                h.push_str(" · INTERRUPT — your previous step was stopped for this");
+            } else if m.level != "normal" {
+                h.push_str(&format!(" · {}", m.level));
+            }
+            if let Some(i) = &m.intent {
+                h.push_str(&format!(" · {i}"));
+            }
+            if let Some(r) = m.reply_to {
+                h.push_str(&format!(" · reply to #{r}"));
+            }
+            h.push_str(&format!(" · {time}"));
+            h
+        }
+    };
+    let mut out = format!("{head}\n\n{}", clip(&m.text, m.id));
+    if m.awaits {
+        out.push_str(&format!("\n\n→ {} is waiting for your answer: `genie agent reply {} \"…\"`", m.from, m.id));
+    }
+    out
+}
+
+/// A delivery as one message for a live session. The orchestrator gets the
+/// specials verbatim and team mail as a digest; a member gets every message.
+pub fn render_delivery(d: &Delivery, orchestrator: bool) -> String {
+    let mut out = vec![format!(
+        "[genie mail · {} new{}]",
+        d.mails.len(),
+        if d.more > 0 { format!(" · {} more at your next step", d.more) } else { String::new() }
+    )];
+    if orchestrator {
+        let (messages, specials): (Vec<Mail>, Vec<Mail>) =
+            d.mails.iter().cloned().partition(|m| m.kind == "message" && m.level != "interrupt" && !m.awaits && m.reply_to.is_none());
+        out.extend(specials.iter().map(render_one));
+        let digest = render_digest(&messages);
+        if !digest.is_empty() {
+            out.push(digest);
+        }
+        out.push("(Act where a decision, answer, unblock or acceptance is needed; informational updates need no reply.)".into());
+    } else {
+        out.extend(d.mails.iter().map(render_one));
+        out.push("(Handle what needs action, then carry on. Reply only when needed — `genie agent send` or `genie agent reply <id>`; no acknowledgements.)".into());
+    }
+    out.join("\n\n")
+}
+
 /// A member's batch as one message: kickoffs and system notes verbatim, then mail.
 pub fn render_batch(mails: &[Mail]) -> String {
     let mut out = Vec::new();
@@ -793,7 +1169,7 @@ mod tests {
     }
 
     fn send<'a>(from: &'a str, to: &'a str, text: &'a str) -> SendMail<'a> {
-        SendMail { team: "G-1", from, from_role: "analyst", to, text, level: None, intent: None, kind: "message" }
+        SendMail { team: "G-1", from, from_role: "analyst", to, text, kind: "message", ..Default::default() }
     }
 
     #[test]
@@ -819,6 +1195,117 @@ mod tests {
         assert!(boxes.contains(&Mailbox { team: Some("G-1".into()), recipient: "yoda".into() }));
         assert!(boxes.contains(&Mailbox { team: None, recipient: ORCHESTRATOR.into() }));
         assert!(!boxes.iter().any(|b| b.recipient == "bender"));
+    }
+
+    #[test]
+    fn deliveries_go_most_urgent_first_within_a_budget() {
+        let (_d, t) = fresh();
+        team(&t);
+        let bus = t.bus();
+        bus.send(SendMail { intent: Some("fyi"), level: Some("low"), ..send("sherlock", "bender", "fyi: notes updated") }).unwrap();
+        bus.send(send("sherlock", "bender", "plan is ready")).unwrap();
+        bus.send(SendMail { intent: Some("question"), ..send("yoda", "bender", "which API?") }).unwrap();
+        bus.send(SendMail {
+            from: ORCHESTRATOR,
+            from_role: "orchestrator",
+            level: Some("interrupt"),
+            ..send("", "bender", "stop: wrong branch")
+        })
+        .unwrap();
+        let d = bus.lease_delivery(Some("G-1"), "bender", &[], DELIVERY_BUDGET).unwrap().unwrap();
+        let order: Vec<&str> = d.mails.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(order, vec!["stop: wrong branch", "which API?", "plan is ready", "fyi: notes updated"]);
+        assert_eq!(d.more, 0);
+        assert_eq!(d.mails[0].level, "interrupt", "an interrupt is not demoted by the legacy urgent flag");
+        assert!(bus.pending(Some("G-1"), "bender").unwrap().is_empty(), "leased mail is not offered twice");
+        assert!(bus.lease_delivery(Some("G-1"), "bender", &[], DELIVERY_BUDGET).unwrap().is_none());
+        let text = render_delivery(&d, false);
+        assert!(text.starts_with("[genie mail · 4 new]") && text.contains("INTERRUPT"), "{text}");
+
+        // A tight budget leaves the rest for the next boundary (always at least one message).
+        let long = "x".repeat(3000);
+        for _ in 0..3 {
+            bus.send(send("sherlock", "yoda", &long)).unwrap();
+        }
+        let first = bus.lease_delivery(Some("G-1"), "yoda", &[], 2500).unwrap().unwrap();
+        assert_eq!((first.mails.len(), first.more), (1, 2));
+        assert!(render_one(&first.mails[0]).contains("read all with `genie agent mail"), "long messages are clipped");
+        let rest = bus.lease_delivery(Some("G-1"), "yoda", &[], DELIVERY_BUDGET).unwrap().unwrap();
+        assert_eq!(rest.mails.len(), 2);
+    }
+
+    #[test]
+    fn deliveries_are_acknowledged_released_and_never_injected_twice() {
+        let (_d, t) = fresh();
+        team(&t);
+        let bus = t.bus();
+        bus.send(send("sherlock", "bender", "one")).unwrap();
+        let d = bus.lease_delivery(Some("G-1"), "bender", &[], DELIVERY_BUDGET).unwrap().unwrap();
+        assert!(bus.ack_delivery(d.id, "yoda").is_err(), "only the recipient acknowledges");
+        assert_eq!(bus.release_delivery(d.id).unwrap(), 1);
+        assert_eq!(bus.pending(Some("G-1"), "bender").unwrap().len(), 1, "a released delivery is offered again");
+
+        let d = bus.lease_delivery(Some("G-1"), "bender", &[], DELIVERY_BUDGET).unwrap().unwrap();
+        assert_eq!(bus.ack_delivery(d.id, "bender").unwrap(), 1);
+        assert_eq!(bus.ack_delivery(d.id, "bender").unwrap(), 0, "acknowledging twice is harmless");
+        assert!(bus.mail(d.mails[0].id).unwrap().delivered_at.is_some());
+
+        // The session injected a delivery but its ack was lost; the delivery was released
+        // as stale. The next lease names the id as seen: settled, not injected again.
+        bus.send(send("sherlock", "bender", "two")).unwrap();
+        let d = bus.lease_delivery(Some("G-1"), "bender", &[], DELIVERY_BUDGET).unwrap().unwrap();
+        let stale = bus.open_deliveries("9999").unwrap();
+        assert_eq!(stale.iter().map(|o| o.id).collect::<Vec<_>>(), vec![d.id]);
+        bus.release_delivery(d.id).unwrap();
+        assert!(bus.lease_delivery(Some("G-1"), "bender", &[d.mails[0].id], DELIVERY_BUDGET).unwrap().is_none());
+        assert!(bus.mail(d.mails[0].id).unwrap().delivered_at.is_some());
+
+        // A restart releases every open delivery.
+        bus.send(send("sherlock", "yoda", "three")).unwrap();
+        bus.lease_delivery(Some("G-1"), "yoda", &[], DELIVERY_BUDGET).unwrap().unwrap();
+        assert!(bus.pending(Some("G-1"), "yoda").unwrap().is_empty());
+        assert_eq!(bus.release_all_leases().unwrap(), 1);
+        assert_eq!(bus.pending(Some("G-1"), "yoda").unwrap().len(), 1);
+        assert!(bus.mailboxes_with_mail().unwrap().contains(&Mailbox { team: Some("G-1".into()), recipient: "yoda".into() }));
+    }
+
+    #[test]
+    fn topics_supersede_and_asks_get_replies() {
+        let (_d, t) = fresh();
+        team(&t);
+        let bus = t.bus();
+        bus.send(SendMail { topic: Some("build"), ..send("bender", "yoda", "build 30%") }).unwrap();
+        bus.send(SendMail { topic: Some("build"), ..send("bender", "yoda", "build 60%") }).unwrap();
+        bus.send(SendMail { topic: Some("build"), ..send("sherlock", "yoda", "my build 10%") }).unwrap();
+        let pending: Vec<String> = bus.pending(Some("G-1"), "yoda").unwrap().into_iter().map(|m| m.text).collect();
+        assert_eq!(pending, vec!["build 60%", "my build 10%"], "a newer message on a topic replaces the sender's older one");
+
+        let ask =
+            bus.send(SendMail { intent: Some("question"), awaits: true, ..send("bender", "sherlock", "CSV or XLSX?") }).unwrap().remove(0);
+        assert!(render_one(&ask).contains(&format!("genie agent reply {}", ask.id)));
+        assert!(bus.take_reply(ask.id, "bender").unwrap().is_none());
+        assert!(bus.reply("yoda", "reviewer", ask.id, "not mine").is_err(), "only the addressee answers");
+        let reply = bus.reply("sherlock", "analyst", ask.id, "CSV").unwrap().remove(0);
+        assert_eq!((reply.to.as_str(), reply.reply_to, reply.level.as_str()), ("bender", Some(ask.id), "high"));
+        let taken = bus.take_reply(ask.id, "bender").unwrap().unwrap();
+        assert_eq!(taken.text, "CSV");
+        assert!(bus.pending(Some("G-1"), "bender").unwrap().is_empty(), "the waiting sender took it: not injected again");
+        assert!(bus.take_reply(ask.id, "bender").unwrap().is_none());
+    }
+
+    #[test]
+    fn interrupts_are_found_and_orchestrator_deliveries_digest_the_rest() {
+        let (_d, t) = fresh();
+        team(&t);
+        let bus = t.bus();
+        bus.send(SendMail { level: Some("interrupt"), from: ORCHESTRATOR, from_role: "orchestrator", ..send("", "yoda", "stop") }).unwrap();
+        assert_eq!(bus.interrupted_mailboxes().unwrap(), vec![Mailbox { team: Some("G-1".into()), recipient: "yoda".into() }]);
+        bus.send(SendMail { intent: Some("done"), ..send("bender", "orchestrator", "implemented") }).unwrap();
+        bus.send(SendMail { intent: Some("question"), awaits: true, ..send("sherlock", "orchestrator", "scope?") }).unwrap();
+        let d = bus.lease_delivery(None, ORCHESTRATOR, &[], DELIVERY_BUDGET).unwrap().unwrap();
+        let text = render_delivery(&d, true);
+        assert!(text.contains("[genie digest") && text.contains("implemented"), "{text}");
+        assert!(text.contains("is waiting for your answer"), "an ask stays verbatim with its reply hint:\n{text}");
     }
 
     #[test]
@@ -851,8 +1338,7 @@ mod tests {
             level: "normal".into(),
             intent: intent.map(str::to_string),
             kind: "message".into(),
-            task: None,
-            delivered_at: None,
+            ..Default::default()
         };
         let d = render_digest(&[
             mail(1, "G-1", "bender", Some("done"), "old"),

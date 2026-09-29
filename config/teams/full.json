@@ -1,0 +1,24 @@
+{
+  "title": "Полная",
+  "description": "Larger code change: analyst, executor, tester and reviewer; the documenter joins after approval.",
+  "stage": "delivery",
+  "workspace": "worktree",
+  "members": [
+    {"role": "analyst"},
+    {"role": "executor"},
+    {"role": "tester"},
+    {"role": "reviewer"},
+    {"role": "documenter"}
+  ],
+  "relations": [
+    {"from": "analyst", "to": "executor", "type": "handoff", "note": "the plan is ready"},
+    {"from": "executor", "to": ["tester", "reviewer"], "type": "handoff", "on": "review", "note": "the work is submitted for review"},
+    {"from": "tester", "to": "reviewer", "type": "handoff", "note": "the test report"},
+    {"from": "tester", "to": "executor", "type": "returns", "note": "failing tests"},
+    {"from": "reviewer", "to": "executor", "type": "returns", "on": "changes_requested", "note": "review findings"},
+    {"from": "reviewer", "to": "documenter", "type": "handoff", "on": "approved", "note": "the work is approved"},
+    {"from": "reviewer", "to": "orchestrator", "type": "reports", "note": "the verdict"},
+    {"from": "documenter", "to": "orchestrator", "type": "reports", "note": "the documentation is ready"},
+    {"from": "executor", "to": "analyst", "type": "consults", "note": "questions about the plan"}
+  ]
+}

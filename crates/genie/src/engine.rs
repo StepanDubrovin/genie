@@ -9,6 +9,8 @@
 //!    stored; steps that wait (agent jobs, questionnaires, teams, pauses) are
 //!    polled, so runs survive restarts.
 //! 4. **Notify**: tell people about decisions they owe, closed tasks, proposals.
+//! 5. **Team flow**: handoffs bound to a status in a team's relations (`on`) are
+//!    delivered by genie itself when the task enters that status.
 //!
 //! Protections: no rule triggers itself, cascades stop at depth 3, per-rule
 //! concurrency and hourly limits, dry-run mode.
@@ -30,6 +32,7 @@ use crate::state::{App, AppError, AppResult};
 
 const CURSOR: &str = "automations";
 const NOTIFY_CURSOR: &str = "notifier";
+const FLOW_CURSOR: &str = "team-flow";
 
 pub fn start(app: &Arc<App>) {
     let app = app.clone();
@@ -55,6 +58,9 @@ pub fn tick(app: &App) -> AppResult<()> {
         }
         if let Err(e) = notify_intake(app, &p.slug) {
             eprintln!("genie notifier: {}: {e}", p.slug);
+        }
+        if let Err(e) = flow_intake(app, &p.slug) {
+            eprintln!("genie team flow: {}: {e}", p.slug);
         }
     }
     schedules(app)?;
@@ -392,6 +398,10 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
         }
         "agent" => {
             let role = input["role"].as_str().unwrap_or("analyst").to_string();
+            let def = app.agents().role_for(project, &role)?.clone();
+            if def.class == Role::Orchestrator {
+                return Err(invalid("agent: the orchestrator does not run one-shot jobs"));
+            }
             let goal = input["goal"].as_str().unwrap_or_default().to_string();
             let job = app.with_server(|db| {
                 db.create_job(NewJob {
@@ -416,6 +426,7 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
                 task: task.clone(),
                 template: input["template"].as_str().map(str::to_string),
                 members: serde_json::from_value(input["members"].clone()).unwrap_or_default(),
+                models: serde_json::from_value(input["models"].clone()).unwrap_or_default(),
                 note: input["note"].as_str().map(str::to_string),
                 by: actor.clone(),
             };
@@ -594,6 +605,71 @@ fn poll(app: &App, run: &Run, step: &Value, state: &StepState) -> AppResult<Outc
         return Ok(if past(&wait["until"]) { Outcome::Done(json!({})) } else { Outcome::Wait(wait) });
     }
     Err(invalid("the step waits for nothing"))
+}
+
+// --- team flow ------------------------------------------------------------------------
+
+/// Handoffs bound to a status (`on` in a team's relations): when a task enters
+/// the status, genie tells the members the relation names, so the flow does
+/// not depend on an agent remembering to write.
+fn flow_intake(app: &App, project: &str) -> AppResult<()> {
+    use crate::agent_config::{RelKind, TeamSpec};
+    let cursor = app.with_tracker(project, |t| t.event_cursor(FLOW_CURSOR))?;
+    let events = app.with_tracker(project, |t| t.events_after(cursor, 200))?;
+    let Some(last) = events.last().map(|e| e.id) else { return Ok(()) };
+    let mut sent = false;
+    for e in events.iter().filter(|e| e.kind == "task.status_changed") {
+        let (Some(task_id), Some(to)) = (e.subject.as_deref(), e.payload["to"].as_str().and_then(|s| s.parse::<Status>().ok())) else {
+            continue;
+        };
+        let note = e.payload["note"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(|n| format!(": “{n}”")).unwrap_or_default();
+        sent |= app.with_tracker(project, |t| {
+            let Some(team_id) = t.get(task_id)?.team else { return Ok(false) };
+            let team = t.bus().get(&team_id)?;
+            // Teams assembled before relations were stored keep their old kickoffs.
+            let Some(spec) = team.spec.as_ref().and_then(TeamSpec::from_value) else { return Ok(false) };
+            if team.state != "active" || e.at < team.created {
+                return Ok(false);
+            }
+            let actor = spec.by_name(&e.actor).map(|m| genie_core::team::display_name(&m.name)).unwrap_or_else(|| e.actor.clone());
+            let mut any = false;
+            for r in spec.relations.iter().filter(|r| r.on == Some(to)) {
+                let from = spec.by_key(&r.from).map(|m| genie_core::team::display_name(&m.name)).unwrap_or_else(|| r.from.clone());
+                let what = r.note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default();
+                for key in &r.to {
+                    let Some(m) = spec.by_key(key) else { continue };
+                    let active = team.members.iter().any(|x| x.name == m.name && x.state == "active");
+                    if !active || m.name == e.actor {
+                        continue;
+                    }
+                    let text = match r.kind {
+                        RelKind::Returns => format!(
+                            "{actor} moved {task_id} to {to}{note}. {from} returns the work to you{what}: read the findings (the latest review or test-report artifact and the comments), fix them and hand the work over again."
+                        ),
+                        _ => format!("{actor} moved {task_id} to {to}{note}. {from} hands over to you{what}: your step starts now."),
+                    };
+                    t.bus().send(genie_core::team::SendMail {
+                        team: &team_id,
+                        from: "genie",
+                        from_role: "system",
+                        to: &m.name,
+                        text: &text,
+                        level: Some("normal"),
+                        intent: None,
+                        kind: "system",
+                        ..Default::default()
+                    })?;
+                    any = true;
+                }
+            }
+            Ok(any)
+        })?;
+    }
+    app.with_tracker(project, |t| t.ack_events(FLOW_CURSOR, last))?;
+    if sent {
+        app.wake_runtime.notify_one();
+    }
+    Ok(())
 }
 
 // --- built-in notifications ------------------------------------------------------------

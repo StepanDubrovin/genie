@@ -137,9 +137,52 @@ pub enum AgentCmd {
         level: Option<String>,
         #[arg(long)]
         intent: Option<String>,
+        /// Replace your undelivered message to the same recipient on this topic.
+        #[arg(long)]
+        topic: Option<String>,
         #[arg(long)]
         team: Option<String>,
     },
+    /// Ask a teammate (or the orchestrator) and wait for the answer.
+    Ask {
+        to: String,
+        #[arg(allow_hyphen_values = true)]
+        question: String,
+        /// Seconds to wait (default: the server's runtime.askTimeoutSecs).
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(long)]
+        team: Option<String>,
+    },
+    /// Answer message `id` (the asker gets it at once if still waiting).
+    Reply {
+        id: i64,
+        #[arg(allow_hyphen_values = true)]
+        text: String,
+    },
+    /// Full text of message `id`.
+    Mail { id: i64 },
+    /// What a teammate is doing now (`--deep`: its latest conversation too).
+    Peek {
+        member: String,
+        #[arg(long)]
+        deep: bool,
+        #[arg(long)]
+        team: Option<String>,
+    },
+    /// Every agent of the project: state, current step, waiting mail.
+    Board,
+    /// Stop an agent's current step and give it new instructions (orchestrator).
+    Interrupt {
+        team: String,
+        member: String,
+        #[arg(allow_hyphen_values = true)]
+        text: String,
+    },
+    /// Hold an agent: its session stops, its mail waits (orchestrator).
+    Pause { team: String, member: String },
+    /// Let a paused agent work again (orchestrator).
+    Resume { team: String, member: String },
     /// Team roster and recent mail.
     Team { team: Option<String> },
     /// Your short status line in the team card.
@@ -149,9 +192,27 @@ pub enum AgentCmd {
         task: String,
         #[arg(long)]
         template: Option<String>,
+        /// A member by role instead of the template's roster, `role` or `role:model` (repeatable).
+        #[arg(long = "member")]
+        members: Vec<String>,
         #[arg(long, allow_hyphen_values = true)]
         note: Option<String>,
     },
+    /// Add a member to a running team (orchestrator).
+    AddMember {
+        team: String,
+        role: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        instructions: Option<String>,
+    },
+    /// Team templates available in this project.
+    Templates,
+    /// Roles available in this project.
+    Roles,
     /// Stop a team (orchestrator).
     StopTeam { team: String },
     /// Let a member in error work again (orchestrator).
@@ -342,6 +403,77 @@ fn render_list(v: &Value) -> String {
         .join("\n")
 }
 
+/// A live session as text: state, current step, last words, recent activity.
+fn render_session(s: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let state = s["state"].as_str().unwrap_or("?");
+    let since = s["since"].as_str().and_then(|t| t.get(11..19)).unwrap_or("");
+    let mut head = format!("session {state} since {since}");
+    if let Some(t) = s["tool"].as_object() {
+        head.push_str(&format!(
+            " · running {}: {}",
+            t.get("name").and_then(Value::as_str).unwrap_or("tool"),
+            t.get("args").and_then(Value::as_str).unwrap_or_default()
+        ));
+    }
+    if let Some(n) = s["contextTokens"].as_u64() {
+        head.push_str(&format!(" · context {}k tokens", n / 1000));
+    }
+    if s["failures"].as_u64().unwrap_or(0) > 0 {
+        head.push_str(&format!(" · {} failed runs ({})", s["failures"], s["lastError"].as_str().unwrap_or_default()));
+    }
+    out.push(head);
+    if let Some(t) = s["lastThinking"].as_str() {
+        out.push(format!("thinking: {t}"));
+    }
+    if let Some(t) = s["lastText"].as_str() {
+        out.push(format!("said: {t}"));
+    }
+    out
+}
+
+fn render_peek(v: &Value) -> String {
+    let agent = v["agent"].as_str().unwrap_or_default();
+    if v["session"].is_null() {
+        return format!("{agent}: no live session (idle and stopped, or not started yet)");
+    }
+    let mut out = vec![format!("# {agent}")];
+    out.extend(render_session(&v["session"]));
+    if let Some(recent) = v["session"]["recent"].as_array().filter(|r| !r.is_empty()) {
+        out.push("\nRecent activity:".into());
+        out.extend(recent.iter().filter_map(Value::as_str).map(|l| format!("  {l}")));
+    }
+    if let Some(conv) = v["conversation"].as_array() {
+        out.push("\nLatest conversation:".into());
+        for m in conv {
+            out.push(format!("[{}] {}", m["role"].as_str().unwrap_or("?"), m["text"].as_str().unwrap_or_default()));
+        }
+    }
+    out.join("\n")
+}
+
+fn render_board(v: &Value) -> String {
+    let mut out = vec![format!("agents ({} mode)", v["mode"].as_str().unwrap_or("?"))];
+    for a in v["agents"].as_array().cloned().unwrap_or_default() {
+        let mut line = format!("- {} ({})", a["agent"].as_str().unwrap_or_default(), a["role"].as_str().unwrap_or_default());
+        if let Some(state) = a["state"].as_str().filter(|s| *s != "active") {
+            line.push_str(&format!(" · {state}"));
+        }
+        let pending = a["pending"].as_u64().unwrap_or(0);
+        if pending > 0 {
+            line.push_str(&format!(" · {pending} waiting"));
+        }
+        if let Some(st) = a["status"].as_str().filter(|s| !s.is_empty()) {
+            line.push_str(&format!(" · \"{st}\""));
+        }
+        out.push(line);
+        if a["session"].is_object() {
+            out.extend(render_session(&a["session"]).into_iter().map(|l| format!("    {l}")));
+        }
+    }
+    out.join("\n")
+}
+
 fn summary(v: &Value) -> String {
     format!(
         "{} — {} · status {}",
@@ -486,15 +618,68 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
             c.call("DELETE", &format!("/tasks/{}/block", enc(&my_task(task)?)), None).await?;
             "unblocked".into()
         }
-        AgentCmd::Send { to, text, level, intent, team } => {
+        AgentCmd::Send { to, text, level, intent, topic, team } => {
             let team = my_team(team)?;
             c.call(
                 "POST",
                 &format!("/teams/{}/mail", enc(&team)),
-                Some(json!({ "to": to, "text": text, "level": level, "intent": intent })),
+                Some(json!({ "to": to, "text": text, "level": level, "intent": intent, "topic": topic })),
             )
             .await?;
             format!("sent to {to}")
+        }
+        AgentCmd::Ask { to, question, timeout, team } => {
+            let team = team.or_else(|| std::env::var("GENIE_TEAM").ok().filter(|s| !s.is_empty()));
+            let v = c.call("POST", "/agent/ask", Some(json!({ "to": to, "text": question, "team": team, "timeout": timeout }))).await?;
+            match v["reply"].as_object() {
+                Some(r) => format!(
+                    "{} answered (#{}):\n{}",
+                    r.get("from").and_then(Value::as_str).unwrap_or(&to),
+                    r.get("id").and_then(Value::as_i64).unwrap_or_default(),
+                    r.get("text").and_then(Value::as_str).unwrap_or_default()
+                ),
+                None => format!(
+                    "No answer from {to} within {:.0}s (question #{}). Carry on with what you can; the answer will arrive as mail.",
+                    v["waited"].as_f64().unwrap_or_default(),
+                    v["asked"]
+                ),
+            }
+        }
+        AgentCmd::Reply { id, text } => {
+            c.call("POST", "/agent/reply", Some(json!({ "id": id, "text": text }))).await?;
+            format!("answered #{id}")
+        }
+        AgentCmd::Mail { id } => {
+            let m = c.call("GET", &format!("/agent/mail/{id}"), None).await?;
+            format!(
+                "#{id} from {} ({}) to {} · {} · {}\n\n{}",
+                m["from"].as_str().unwrap_or_default(),
+                m["fromRole"].as_str().unwrap_or_default(),
+                m["to"].as_str().unwrap_or_default(),
+                m["level"].as_str().unwrap_or_default(),
+                m["at"].as_str().unwrap_or_default(),
+                m["text"].as_str().unwrap_or_default()
+            )
+        }
+        AgentCmd::Peek { member, deep, team } => {
+            let team = if member == "orchestrator" { "orchestrator".to_string() } else { my_team(team)? };
+            let v =
+                c.call("GET", &format!("/agents/{}/{}/peek{}", enc(&team), enc(&member), if deep { "?deep=1" } else { "" }), None).await?;
+            render_peek(&v)
+        }
+        AgentCmd::Board => render_board(&c.call("GET", "/agents", None).await?),
+        AgentCmd::Interrupt { team, member, text } => {
+            c.call("POST", &format!("/teams/{}/mail", enc(&team)), Some(json!({ "to": member, "text": text, "level": "interrupt" })))
+                .await?;
+            format!("{member} is interrupted: its current step stops and your message comes first")
+        }
+        AgentCmd::Pause { team, member } => {
+            c.call("POST", &format!("/agents/{}/{}/pause", enc(&team), enc(&member)), Some(json!({}))).await?;
+            format!("{member} paused; its mail waits until `genie agent resume {team} {member}`")
+        }
+        AgentCmd::Resume { team, member } => {
+            c.call("POST", &format!("/agents/{}/{}/resume", enc(&team), enc(&member)), Some(json!({}))).await?;
+            format!("{member} resumed")
         }
         AgentCmd::Team { team } => {
             let v = c.call("GET", &format!("/teams/{}", enc(&my_team(team)?)), None).await?;
@@ -524,8 +709,15 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
             c.call("POST", "/agent/status", Some(json!({ "text": text }))).await?;
             "status set".into()
         }
-        AgentCmd::Spawn { task, template, note } => {
-            let v = c.call("POST", "/teams", Some(json!({ "task": task, "template": template, "note": note }))).await?;
+        AgentCmd::Spawn { task, template, members, note } => {
+            let members: Vec<Value> = members
+                .iter()
+                .map(|m| match m.split_once(':') {
+                    Some((role, model)) => json!({ "role": role, "model": model }),
+                    None => json!({ "role": m }),
+                })
+                .collect();
+            let v = c.call("POST", "/teams", Some(json!({ "task": task, "template": template, "members": members, "note": note }))).await?;
             let members: Vec<String> = v["members"]
                 .as_array()
                 .cloned()
@@ -539,6 +731,77 @@ pub async fn run(cmd: AgentCmd) -> Result<(), String> {
                 v["task"].as_str().unwrap_or_default(),
                 members.join(", ")
             )
+        }
+        AgentCmd::AddMember { team, role, name, model, instructions } => {
+            let v = c
+                .call(
+                    "POST",
+                    &format!("/teams/{}/members", enc(&team)),
+                    Some(json!({ "role": role, "name": name, "model": model, "instructions": instructions })),
+                )
+                .await?;
+            let m = v.as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null);
+            format!("{} ({}) joined team {team}", m["name"].as_str().unwrap_or_default(), m["role"].as_str().unwrap_or_default())
+        }
+        AgentCmd::Templates => {
+            let v = c.call("GET", "/agent-config", None).await?;
+            let mut out = Vec::new();
+            for t in v["teams"].as_array().cloned().unwrap_or_default() {
+                let roles: Vec<&str> =
+                    t["members"].as_array().map(|m| m.iter().filter_map(|x| x["role"].as_str()).collect()).unwrap_or_default();
+                out.push(format!(
+                    "{} — {}
+    {} · {} · {}",
+                    t["id"].as_str().unwrap_or_default(),
+                    t["description"].as_str().unwrap_or_default(),
+                    t["stage"].as_str().unwrap_or_default(),
+                    t["workspace"].as_str().unwrap_or_default(),
+                    roles.join(", ")
+                ));
+                for r in t["relations"].as_array().cloned().unwrap_or_default() {
+                    let to: Vec<&str> = r["to"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                    out.push(format!(
+                        "    {} {} {}{}{}",
+                        r["from"].as_str().unwrap_or_default(),
+                        r["type"].as_str().unwrap_or_default(),
+                        to.join(", "),
+                        r["on"].as_str().map(|s| format!(" on {s}")).unwrap_or_default(),
+                        r["note"].as_str().map(|n| format!(" — {n}")).unwrap_or_default()
+                    ));
+                }
+            }
+            out.join(
+                "
+",
+            )
+        }
+        AgentCmd::Roles => {
+            let v = c.call("GET", "/agent-config", None).await?;
+            v["roles"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter(|r| r["class"] != json!("orchestrator"))
+                .map(|r| {
+                    let class = r["class"].as_str().unwrap_or_default();
+                    let id = r["id"].as_str().unwrap_or_default();
+                    let stages: Vec<&str> =
+                        r["stages"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                    format!(
+                        "{id}{} — {}
+    stages: {} · files: {}",
+                        if class == id { String::new() } else { format!(" ({class})") },
+                        r["description"].as_str().unwrap_or_default(),
+                        stages.join(", "),
+                        r["files"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                )
         }
         AgentCmd::StopTeam { team } => {
             let v = c.call("POST", &format!("/teams/{}/stop", enc(&team)), Some(json!({}))).await?;

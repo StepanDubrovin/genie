@@ -110,6 +110,12 @@ const FIELD_RU: Record<string, string> = {
   dependencies: "зависимости",
 };
 
+/** A status change's note as the tracker stores it in a comment: `[in_progress → review] text`. */
+export function statusNote(text: string): { from: string; to: string; note: string } | undefined {
+  const m = /^\[([a-z_]+) → ([a-z_]+)\]\s*([\s\S]*)$/.exec(text.trim());
+  return m ? { from: m[1], to: m[2], note: m[3] } : undefined;
+}
+
 /** History entry in words for the UI; the tracker records it in English for the agents. */
 export function historyText(h: Task["history"][number], epic = false): string {
   const note = h.note ? ` — ${h.note.replace(/^work started on (.+)$/, "команда взяла $1").replace(/^split into (.+)$/, "разбита на $1")}` : "";

@@ -1,16 +1,21 @@
 import { useState } from "react";
+import { useAgentConfig } from "@/entities/agent-config";
 import { ROLE_TITLE_RU } from "@/entities/member";
 import { useMeta } from "@/entities/project";
 import { useAddMember } from "@/entities/team";
 import { Icon, Modal, useToast } from "@/shared/ui";
 
-const ROLES = ["analyst", "executor", "reviewer", "tester", "documenter"];
+/** The classic five, for a server without configurable roles. */
+const CLASSIC = ["analyst", "executor", "reviewer", "tester", "documenter"].map((id) => ({ id, title: ROLE_TITLE_RU[id] ?? id, description: "" }));
 
 export function AddMemberDialog({ team, onClose }: { team: string; onClose: () => void }) {
   const meta = useMeta().data;
+  const cfg = useAgentConfig().data;
   const add = useAddMember();
   const toast = useToast();
+  const roles = cfg ? cfg.roles.filter((r) => r.class !== "orchestrator") : CLASSIC;
   const [role, setRole] = useState("tester");
+  const described = roles.find((r) => r.id === role)?.description;
   const [name, setName] = useState("");
   const [model, setModel] = useState("");
   const [instructions, setInstructions] = useState("");
@@ -49,13 +54,15 @@ export function AddMemberDialog({ team, onClose }: { team: string; onClose: () =
           <label className="field">
             Роль
             <select value={role} onChange={(e) => setRole(e.target.value)} autoFocus>
-              {ROLES.map((r) => (
-                <option key={r} value={r}>
-                  {ROLE_TITLE_RU[r]}
+              {roles.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.title}
+                  {cfg ? ` (${r.id})` : ""}
                 </option>
               ))}
             </select>
           </label>
+          {described && <p className="muted" style={{ margin: 0 }}>{described}</p>}
           <label className="field">
             Имя — латиницей, необязательно (иначе подберётся само)
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="например, murphy" pattern="[a-zA-Z][a-zA-Z0-9_-]*" />

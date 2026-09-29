@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   user INTEGER REFERENCES users(id) ON DELETE CASCADE,
   project TEXT,
   agent_role TEXT,
+  role_id TEXT,
   team TEXT,
   member TEXT,
   job INTEGER,
@@ -252,7 +253,23 @@ CREATE TABLE IF NOT EXISTS locks (
   holder TEXT NOT NULL,
   expires TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS config_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  user TEXT NOT NULL,
+  item TEXT NOT NULL,
+  path TEXT NOT NULL,
+  before TEXT,
+  after TEXT
+);
+CREATE INDEX IF NOT EXISTS config_changes_item ON config_changes(item, id);
 "#;
+
+/// Columns added after the first server release; applied to existing databases on open.
+const SERVER_COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
+    // Agent tokens name the configured role the agent acts in.
+    ("api_tokens", "role_id", "ALTER TABLE api_tokens ADD COLUMN role_id TEXT"),
+];
 
 pub const SESSION_DAYS: i64 = 30;
 
@@ -347,6 +364,22 @@ impl Project {
     }
 }
 
+/// An edit of the agent configuration made through the server (roles, templates, skills, MCP).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigChange {
+    pub id: i64,
+    pub at: String,
+    pub user: String,
+    /// `role:<id>`, `team:<id>`, `skill:<name>` or `mcp`.
+    pub item: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
 /// Who an API token speaks for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -354,7 +387,8 @@ pub enum Principal {
     /// A person, via session cookie or personal token.
     User { user: User },
     /// An agent: orchestrator, team member or one-shot job, bound to one project.
-    Agent { project: String, role: Role, name: String, team: Option<String>, job: Option<i64> },
+    /// `role` is the class; `role_id` the configured role it acts in.
+    Agent { project: String, role: Role, role_id: Option<String>, name: String, team: Option<String>, job: Option<i64> },
 }
 
 /// Random secret: 32 bytes, hex.
@@ -406,6 +440,20 @@ impl ServerDb {
         }
         let db = Db::open_with_schema(path, SERVER_SCHEMA)?;
         db.conn().execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', '1')", [])?;
+        for (table, column, ddl) in SERVER_COLUMN_MIGRATIONS {
+            let has = db
+                .conn()
+                .prepare(&format!("PRAGMA table_info({table})"))?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .filter_map(|c| c.ok())
+                .any(|c| c == *column);
+            if !has
+                && let Err(e) = db.conn().execute_batch(ddl)
+                && !e.to_string().contains("duplicate column")
+            {
+                return Err(e.into());
+            }
+        }
         Ok(ServerDb { db })
     }
 
@@ -559,7 +607,6 @@ impl ServerDb {
     }
 
     /// Token for an agent run: bound to a project and a workflow role; expires.
-    #[allow(clippy::too_many_arguments)]
     pub fn create_agent_token(
         &self,
         project: &str,
@@ -569,25 +616,40 @@ impl ServerDb {
         job: Option<i64>,
         ttl: ChronoDuration,
     ) -> Result<String> {
+        self.create_role_token(project, role, None, name, team, job, ttl)
+    }
+
+    /// Token for an agent acting in a configured role (`role_id`) of class `role`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_role_token(
+        &self,
+        project: &str,
+        role: Role,
+        role_id: Option<&str>,
+        name: &str,
+        team: Option<&str>,
+        job: Option<i64>,
+        ttl: ChronoDuration,
+    ) -> Result<String> {
         let secret = new_secret();
         self.conn().execute(
-            "INSERT INTO api_tokens(token_hash, kind, project, agent_role, team, member, job, label, created, expires)
-             VALUES (?1, 'agent', ?2, ?3, ?4, ?5, ?6, ?5, ?7, ?8)",
-            params![hash_secret(&secret), project, role, team, name, job, now(), time_in(ttl)],
+            "INSERT INTO api_tokens(token_hash, kind, project, agent_role, role_id, team, member, job, label, created, expires)
+             VALUES (?1, 'agent', ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, ?9)",
+            params![hash_secret(&secret), project, role, role_id, team, name, job, now(), time_in(ttl)],
         )?;
         Ok(format!("gna_{secret}"))
     }
 
     pub fn resolve_token(&self, token: &str) -> Result<Option<Principal>> {
         let secret = token.strip_prefix("gnu_").or_else(|| token.strip_prefix("gna_")).unwrap_or(token);
-        type Row = (String, Option<i64>, Option<String>, Option<Role>, Option<String>, Option<String>, Option<i64>);
+        type Row = (String, Option<i64>, Option<String>, Option<Role>, Option<String>, Option<String>, Option<i64>, Option<String>);
         let row: Option<Row> = self
             .conn()
             .query_row(
-                "SELECT kind, user, project, agent_role, team, member, job FROM api_tokens
+                "SELECT kind, user, project, agent_role, team, member, job, role_id FROM api_tokens
                  WHERE token_hash = ?1 AND revoked = 0 AND (expires IS NULL OR expires > ?2)",
                 params![hash_secret(secret), now()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
             )
             .optional()?;
         Ok(match row {
@@ -595,8 +657,8 @@ impl ServerDb {
                 let u = self.user(user)?;
                 (!u.disabled).then_some(Principal::User { user: u })
             }
-            Some((kind, _, Some(project), Some(role), team, Some(name), job)) if kind == "agent" => {
-                Some(Principal::Agent { project, role, name, team, job })
+            Some((kind, _, Some(project), Some(role), team, Some(name), job, role_id)) if kind == "agent" => {
+                Some(Principal::Agent { project, role, role_id, name, team, job })
             }
             _ => None,
         })
@@ -745,6 +807,35 @@ impl ServerDb {
         .collect()
     }
 
+    // --- agent configuration history ------------------------------------------
+
+    pub fn record_config_change(&self, user: &str, item: &str, path: &str, before: Option<&str>, after: Option<&str>) -> Result<i64> {
+        self.conn().execute(
+            "INSERT INTO config_changes(at, user, item, path, before, after) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now(), user, item, path, before, after],
+        )?;
+        Ok(self.conn().last_insert_rowid())
+    }
+
+    /// Newest first; `item` narrows to one role, template, skill or `mcp`.
+    pub fn config_changes(&self, item: Option<&str>, limit: i64) -> Result<Vec<ConfigChange>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, at, user, item, path, before, after FROM config_changes WHERE (?1 IS NULL OR item = ?1) ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![item, limit], |r| {
+            Ok(ConfigChange {
+                id: r.get(0)?,
+                at: r.get(1)?,
+                user: r.get(2)?,
+                item: r.get(3)?,
+                path: r.get(4)?,
+                before: r.get(5)?,
+                after: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // --- leases --------------------------------------------------------------
 
     /// Take or renew a named lease (e.g. the orchestrator of a project). Returns
@@ -811,7 +902,7 @@ mod tests {
         db.create_project("shop", "Shop", "/tmp/x", None, None).unwrap();
         let agent = db.create_agent_token("shop", Role::Executor, "bender", Some("G-1"), None, ChronoDuration::hours(1)).unwrap();
         match db.resolve_token(&agent).unwrap() {
-            Some(Principal::Agent { project, role, name, team, job }) => {
+            Some(Principal::Agent { project, role, name, team, job, .. }) => {
                 assert_eq!(
                     (project.as_str(), role, name.as_str(), team.as_deref(), job),
                     ("shop", Role::Executor, "bender", Some("G-1"), None)

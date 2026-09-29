@@ -278,7 +278,7 @@ function EpicTasks({ epic, tasks, all, teams, onNew }: { epic: Task; tasks: Task
                 {t.needsOwner && <span className="q">{t.needsOwner.question}</span>}
                 {!isClosed && t.openDeps.length > 0 && <span className="w">ждёт {t.openDeps.join(", ")}</span>}
               </span>
-              <span className="tm">{team ? <Avatars members={team.members} /> : <span className="muted">—</span>}</span>
+              <span className="tm">{team ? <Avatars members={team.members} max={4} /> : null}</span>
               <span className={`st${t.status === "needs_owner" ? " amber" : ""}`}>{STATUS_NAME[t.status]}</span>
             </button>
           );
@@ -349,7 +349,7 @@ function EpicProps({ epic, tasks, teams }: { epic: Task; tasks: TaskSummary[]; t
         </select>
       </span>
       <span className="k">Метки</span>
-      <span>{epic.labels.length ? <Labels labels={epic.labels} /> : <span className="muted">—</span>}</span>
+      <span>{epic.labels.length ? <Labels labels={epic.labels} /> : <span className="muted">нет</span>}</span>
       <span className="k">Команды</span>
       <span style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
         {active.length ? (

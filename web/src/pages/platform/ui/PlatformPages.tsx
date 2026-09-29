@@ -5,12 +5,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
+import { useAgentConfig } from "@/entities/agent-config";
 import { useSession } from "@/entities/session";
 import {
   type Automation,
   type Notification,
   RUN_STATUS,
-  TRIGGER_NAME,
   useAutomations,
   useChannels,
   useNotifications,
@@ -22,7 +22,8 @@ import {
 } from "@/entities/platform";
 import { request } from "@/shared/api";
 import { timeAgo, useTick } from "@/shared/lib";
-import { Icon, Markdown, useToast } from "@/shared/ui";
+import { Icon, Markdown, Modal, useToast } from "@/shared/ui";
+import { describeStep, describeTrigger } from "../model/describe.ts";
 
 function useAction() {
   const qc = useQueryClient();
@@ -296,7 +297,9 @@ export function ProfilePage() {
             </section>
             <section>
               <h2>Токен для CLI</h2>
-              <p className="muted">Для `genie agent …` и скриптов: GENIE_URL и GENIE_TOKEN.</p>
+              <p className="muted">
+                Для <code>genie agent …</code> и скриптов: переменные <code>GENIE_URL</code> и <code>GENIE_TOKEN</code>.
+              </p>
               <button
                 type="button"
                 className="btn"
@@ -326,6 +329,7 @@ export function AutomationsPage() {
   const playbooks = usePlaybooks();
   const [sp, setSp] = useSearchParams();
   const [editing, setEditing] = useState<{ id?: number; text: string }>();
+  const [showPlaybooks, setShowPlaybooks] = useState(false);
   const act = useAction();
   const installed = new Set((rules.data ?? []).map((r) => r.name));
   const selected = Number(sp.get("rule") ?? "") || rules.data?.[0]?.id;
@@ -334,8 +338,12 @@ export function AutomationsPage() {
     <main className="main">
       <header className="topbar">
         <h1>Автоматизации</h1>
-        <span className="sub d-only">правила запускают агентов, уведомления и вопросы людям</span>
         <span className="grow" />
+        {!!playbooks.data?.length && (
+          <button type="button" className="btn" onClick={() => setShowPlaybooks(true)}>
+            Плейбуки
+          </button>
+        )}
         <button type="button" className="btn primary" onClick={() => setEditing({ text: JSON.stringify(EMPTY_RULE, null, 2) })}>
           <Icon.plus size={13} />
           <span className="d-only">Новое правило</span>
@@ -349,28 +357,17 @@ export function AutomationsPage() {
                 <span className={`state-dot ${r.enabled ? "ok" : "off"}`} />
                 <span>{r.name}</span>
               </span>
-              <span className="s">{describeTrigger(r)}</span>
+              <span className="s">{describeTrigger(r.spec, r.enabled, r.dryRun)}</span>
               <span className="s">
-                {r.lastRun ? `последний запуск ${timeAgo(r.lastRun.started)} · ${RUN_STATUS[r.lastRun.status] ?? r.lastRun.status}` : "ещё не запускалось"}
+                {r.lastRun ? `последний запуск ${timeAgo(r.lastRun.started)} · ${(RUN_STATUS[r.lastRun.status] ?? r.lastRun.status).toLowerCase()}` : "ещё не запускалось"}
               </span>
             </button>
           ))}
-          {rules.isSuccess && !rules.data.length && <p className="muted" style={{ margin: 0, padding: "4px 14px 8px" }}>Правил пока нет — начните с плейбука.</p>}
-          {!!playbooks.data?.length && <span className="label">Плейбуки</span>}
-          {playbooks.data?.map((p) => {
-            const name = String((p.spec as { name?: string }).name ?? "");
-            const added = installed.has(name);
-            return (
-              <div key={p.id} className="pick plain playbook">
-                <span className="s">{p.title}</span>
-                <span>
-                  <button type="button" className="btn" disabled={added} onClick={() => void act(() => request("POST", `/api/automations/playbooks/${p.id}`), "Правило добавлено")}>
-                    {added ? "Добавлен" : "Добавить"}
-                  </button>
-                </span>
-              </div>
-            );
-          })}
+          {rules.isSuccess && !rules.data.length && (
+            <p className="muted" style={{ margin: 0, padding: "4px 14px 8px" }}>
+              Правил пока нет — начните с плейбука: готового правила для частого случая.
+            </p>
+          )}
         </section>
         <section className="split-main" aria-label="Правило">
           {current ? (
@@ -384,6 +381,35 @@ export function AutomationsPage() {
         </section>
       </div>
       {editing && <RuleEditor initial={editing} onClose={() => setEditing(undefined)} />}
+      {showPlaybooks && (
+        <Modal label="Плейбуки" onClose={() => setShowPlaybooks(false)}>
+          <div className="mh">
+            Плейбуки — готовые правила для частых случаев
+            <span className="grow" />
+            <button type="button" className="icon-btn" onClick={() => setShowPlaybooks(false)} aria-label="Закрыть">
+              <Icon.close />
+            </button>
+          </div>
+          <ul className="mb playbooks">
+            {playbooks.data?.map((p) => {
+              const added = installed.has(String((p.spec as { name?: string }).name ?? ""));
+              return (
+                <li key={p.id}>
+                  <span className="t">{p.title}</span>
+                  <span className="s">{describeTrigger(p.spec)}</span>
+                  {added ? (
+                    <span className="muted">добавлен</span>
+                  ) : (
+                    <button type="button" className="btn" onClick={() => void act(() => request("POST", `/api/automations/playbooks/${p.id}`), "Правило добавлено")}>
+                      Добавить
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </Modal>
+      )}
     </main>
   );
 }
@@ -395,89 +421,22 @@ const EMPTY_RULE = {
 };
 
 type Spec = { on?: Record<string, unknown>; steps?: Record<string, unknown>[] };
-const STEP_FIELDS = new Set(["id", "if", "retry", "timeout", "onError"]);
-
-function describeTrigger(rule: Automation): string {
-  const on = (rule.spec as Spec).on ?? {};
-  const where = on.where && typeof on.where === "object" ? Object.entries(on.where as Record<string, unknown>).map(([k, v]) => condition(k, v)) : [];
-  let text: string;
-  if (typeof on.event === "string") text = `Событие ${on.event}${where.length ? `, ${where.join(", ")}` : ""}`;
-  else if (typeof on.schedule === "string") text = `Расписание ${on.schedule}${typeof on.tz === "string" ? `, ${on.tz}` : ""}`;
-  else if (on.webhook) text = "Webhook";
-  else text = "Вручную";
-  if (!rule.enabled) text += " · выключено";
-  if (rule.dryRun) text += " · пробный режим";
-  return text;
-}
-
-function condition(key: string, v: unknown): string {
-  if (Array.isArray(v)) return `${key} ∈ ${v.map(String).join(", ")}`;
-  if (v && typeof v === "object") {
-    const [op, arg] = Object.entries(v as Record<string, unknown>)[0] ?? ["", ""];
-    const val = Array.isArray(arg) ? arg.map(String).join(", ") : String(arg);
-    const ops: Record<string, string> = { not: "≠", contains: "содержит", not_contains: "без", gt: ">", lt: "<", prefix: "начинается с" };
-    if (op === "exists") return arg ? `есть ${key}` : `нет ${key}`;
-    return `${key} ${ops[op] ?? op} ${val}`;
-  }
-  return `${key} = ${String(v)}`;
-}
-
-/** `{{ event.task.id }}` reads as ‹task.id› in step summaries. */
-function untemplate(text: string): string {
-  return text.replace(/\{\{\s*([^}|]+?)\s*(\|[^}]*)?\}\}/g, (_, path: string) => `‹${path.replace(/^event\./, "").replace(/^steps\.[^.]+\.output\./, "")}›`);
-}
-
-function describeStep(step: Record<string, unknown>): { kind: string; text: string } {
-  const kind = Object.keys(step).find((k) => !STEP_FIELDS.has(k)) ?? "?";
-  const body = (step[kind] ?? {}) as Record<string, unknown>;
-  const pick = (...keys: string[]) => {
-    const v = keys.map((k) => body[k]).find((x) => typeof x === "string" && x) as string | undefined;
-    return v && untemplate(v);
-  };
-  const to = (v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : String(v ?? ""));
-  let text: string;
-  switch (kind) {
-    case "agent":
-      text = `${String(body.role ?? "агент")}: ${short(pick("goal") ?? "", 90)}`;
-      break;
-    case "notify":
-      text = `${short(pick("title") ?? "уведомление", 70)} → ${to(body.to)}`;
-      break;
-    case "ask":
-      text = `Вопросы → ${to(body.to)}`;
-      break;
-    case "task.status":
-      text = `Статус → ${String(body.to ?? "")}`;
-      break;
-    case "changelog.add":
-      text = `Запись в чейнджлог: ${untemplate(String(body.group ?? "changed"))}`;
-      break;
-    case "wait":
-      text = `Пауза ${String(body.for ?? "")}`;
-      break;
-    case "team":
-      text = `Команда ${String(body.template ?? "")}`;
-      break;
-    default:
-      text = short(pick("text", "title", "version", "url") ?? body, 90);
-  }
-  return { kind, text };
-}
-
-function short(v: unknown, n: number): string {
-  const s = typeof v === "string" ? v : JSON.stringify(v);
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
-}
 
 function RuleView({ rule, onEdit }: { rule: Automation; onEdit: () => void }) {
   const act = useAction();
-  const steps = ((rule.spec as Spec).steps ?? []).map(describeStep);
+  const cfg = useAgentConfig().data;
+  const steps = ((rule.spec as Spec).steps ?? []).map((st) =>
+    describeStep(st, {
+      role: (id) => cfg?.roles.find((r) => r.id === id)?.title,
+      template: (id) => cfg?.teams.find((t) => t.id === id)?.title,
+    }),
+  );
   return (
     <>
       <div className="pane-head">
         <div className="ttl">
           <h2>{rule.name}</h2>
-          <span className="sub">{describeTrigger(rule)}</span>
+          <span className="sub">{describeTrigger(rule.spec, rule.enabled, rule.dryRun)}</span>
         </div>
         <label className="toggle">
           <input type="checkbox" checked={rule.enabled} onChange={(e) => void act(() => request("POST", `/api/automations/${rule.id}/enabled`, { enabled: e.target.checked }))} />
@@ -496,9 +455,10 @@ function RuleView({ rule, onEdit }: { rule: Automation; onEdit: () => void }) {
         {steps.length > 0 && (
           <ol className="steps" aria-label="Шаги">
             {steps.map((st, i) => (
-              <li key={i}>
+              <li key={i} title={st.hint}>
                 <span className="k">{st.kind}</span>
-                <span className="d">{st.text}</span>
+                <span className="d">{st.title}</span>
+                {st.note && <span className="n">{st.note}</span>}
               </li>
             ))}
           </ol>
@@ -510,6 +470,7 @@ function RuleView({ rule, onEdit }: { rule: Automation; onEdit: () => void }) {
 }
 
 function RuleEditor({ initial, onClose }: { initial: { id?: number; text: string }; onClose: () => void }) {
+  const agents = useAgentConfig().data;
   const [text, setText] = useState(initial.text);
   const [error, setError] = useState<string>();
   const qc = useQueryClient();
@@ -546,6 +507,16 @@ function RuleEditor({ initial, onClose }: { initial: { id?: number; text: string
             task.update, task.get, notify, agent, team, ask, wait, wake_orchestrator, changelog.add, release, http. Подстановки: <code>{"{{ event.task.id }}"}</code>,{" "}
             <code>{"{{ steps.<id>.output.… }}"}</code>.
           </p>
+          {agents && (
+            <p className="muted" style={{ margin: 0 }}>
+              Шаблоны для <code>team.template</code>: {agents.teams.map((t) => t.id).join(", ")}. Роли для <code>agent.role</code>:{" "}
+              {agents.roles
+                .filter((r) => r.class !== "orchestrator")
+                .map((r) => r.id)
+                .join(", ")}
+              .
+            </p>
+          )}
           <textarea className="mono code-edit" rows={22} value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
           {error && <div className="auth-error">{error}</div>}
         </div>

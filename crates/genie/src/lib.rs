@@ -4,15 +4,18 @@
 //! engine and the delivery channels in one process. See docs/platform/backend.md.
 
 pub mod agent_cli;
+pub mod agent_config;
 pub mod channels;
 pub mod cli;
 pub mod config;
 pub mod engine;
 pub mod http;
 pub mod knowledge;
+pub mod mcp_gateway;
 pub mod notify;
 pub mod questions;
 pub mod runtime;
+pub mod sessions;
 pub mod state;
 
 use std::net::SocketAddr;

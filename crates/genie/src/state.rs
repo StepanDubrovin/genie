@@ -9,6 +9,7 @@ use genie_core::vault::Vault;
 use genie_core::{GenieError, Tracker};
 use tokio::sync::Notify;
 
+use crate::agent_config::AgentConfig;
 use crate::config::Config;
 
 /// Error from a blocking database call made on behalf of async code.
@@ -56,6 +57,12 @@ pub struct App {
     pub wake_outbox: Notify,
     /// Path of the running `genie` binary, given to agents so they can call back.
     pub exe: PathBuf,
+    /// Live agent sessions (long-running harness processes).
+    pub sessions: crate::sessions::Registry,
+    /// Roles, team templates, skills and MCP connections (reloaded when their files change).
+    agents: RwLock<Arc<AgentConfig>>,
+    /// The agents' connections through the MCP gateway.
+    pub mcp: crate::mcp_gateway::Gateway,
 }
 
 impl App {
@@ -66,6 +73,15 @@ impl App {
         let mut vault = Vault::open(&cfg.vault_path(data), &data.join("vault-index.db"), cfg.vault.commit.unwrap_or(true))?;
         for p in server.projects()? {
             vault.ensure_space(&p.slug, p.repo.as_deref().map(Path::new))?;
+        }
+        let agents = AgentConfig::load(data, &cfg, None);
+        for p in agents.errors() {
+            eprintln!(
+                "genie: agent configuration: {}{}: {}",
+                p.item,
+                p.path.as_deref().map(|x| format!(" ({x})")).unwrap_or_default(),
+                p.message
+            );
         }
         Ok(Arc::new(App {
             data: data.to_path_buf(),
@@ -78,7 +94,28 @@ impl App {
             wake_engine: Notify::new(),
             wake_outbox: Notify::new(),
             exe,
+            sessions: Default::default(),
+            agents: RwLock::new(Arc::new(agents)),
+            mcp: Default::default(),
         }))
+    }
+
+    /// The current agent configuration (a snapshot: cheap to clone, never torn).
+    pub fn agents(&self) -> Arc<AgentConfig> {
+        self.agents.read().map(|a| a.clone()).unwrap_or_else(|e| e.into_inner().clone())
+    }
+
+    /// Re-read the agent configuration from its files; broken items keep their last
+    /// valid version. Running agents get their new guard rules at once.
+    pub fn reload_agents(&self) -> Arc<AgentConfig> {
+        let previous = self.agents();
+        let fresh = Arc::new(AgentConfig::load(&self.data, &self.cfg, Some(&previous)));
+        match self.agents.write() {
+            Ok(mut a) => *a = fresh.clone(),
+            Err(e) => *e.into_inner() = fresh.clone(),
+        }
+        crate::sessions::refresh_policies(self);
+        fresh
     }
 
     /// Synchronous access to the server database (call from blocking contexts only).

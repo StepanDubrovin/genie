@@ -4,7 +4,7 @@
 
 import { useMemo, useState } from "react";
 import type { DocPage } from "../model.ts";
-import { docStatusText, DocLegend, DocMarks, DocTypeBadge } from "./DocBadges.tsx";
+import { docStatusText, DocLegend, DocMarks } from "./DocBadges.tsx";
 import { CaretIcon, DocFileIcon, FolderIcon, FolderOpenIcon } from "./icons.tsx";
 
 interface Folder {
@@ -65,7 +65,6 @@ function Row({ page, selected, onSelect, flat }: { page: DocPage; selected: stri
     >
       {!flat && <DocFileIcon size={13} className="doc-row-ic" />}
       <span className="nm">{page.title || page.path}</span>
-      {!flat && <DocTypeBadge type={page.type} />}
       {flat ? <span className={`doc-flat-status ${status!.cls}`}>{status!.text}</span> : <DocMarks page={page} />}
     </button>
   );

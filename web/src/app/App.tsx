@@ -4,6 +4,7 @@ import { useTasks, type ViewId } from "@/entities/task";
 import { useTeamMap } from "@/entities/team";
 import { CommandPalette, type PaletteActions } from "@/features/command-palette";
 import { NewTaskDialog, type NewTaskPreset } from "@/features/create-task";
+import { AgentsPage } from "@/pages/agents";
 import { EpicPage } from "@/pages/epic";
 import { EpicsPage } from "@/pages/epics";
 import { DocsPage } from "@/pages/docs";
@@ -33,7 +34,7 @@ function Shell() {
   const tasks = useTasks().data;
   const teamRoute = location.pathname.startsWith("/team/");
   const docsRoute = location.pathname.startsWith("/docs");
-  const platformRoute = ["/automations", "/notifications", "/profile"].some((p) => location.pathname.startsWith(p));
+  const platformRoute = ["/automations", "/agents", "/notifications", "/profile"].some((p) => location.pathname.startsWith(p));
   // Pages without a task list: palette actions that need one go to "active".
   const ownPage = teamRoute || location.pathname.startsWith("/epic") || docsRoute || platformRoute;
   const openTaskId = teamRoute ? undefined : (sp.get("task") ?? undefined);
@@ -175,6 +176,7 @@ export const router = createBrowserRouter([
       { path: "docs/edit", element: <DocsPage /> },
       { path: "docs/proposals", element: <ProposalsPage /> },
       { path: "automations", element: <AutomationsPage /> },
+      { path: "agents", element: <AgentsPage /> },
       { path: "notifications", element: <NotificationsPage /> },
       { path: "profile", element: <ProfilePage /> },
       { path: ":view", element: <TasksRoute /> },

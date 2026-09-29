@@ -105,4 +105,3 @@ export const RUN_STATUS: Record<string, string> = {
   pending: "ожидает",
 };
 
-export const TRIGGER_NAME: Record<string, string> = { event: "событие", schedule: "расписание", manual: "вручную", webhook: "webhook" };

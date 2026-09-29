@@ -7,10 +7,13 @@
 //! (cross-site forms cannot send it), no CORS.
 
 pub mod account;
+pub mod agent_config;
+pub mod agents;
 pub mod automations;
 pub mod ctx;
 pub mod docs;
 pub mod live;
+pub mod mcp_gateway;
 pub mod tasks;
 pub mod teams;
 
@@ -79,8 +82,11 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(account::routes())
         .merge(tasks::routes())
         .merge(teams::routes())
+        .merge(agents::routes())
         .merge(docs::routes())
         .merge(automations::routes())
+        .merge(agent_config::routes())
+        .merge(mcp_gateway::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
     let index = app.web_root.join("index.html");

@@ -87,14 +87,12 @@ export function TasksPage({ onNew, searchRef }: { onNew: (preset?: NewTaskPreset
         <span className="muted d-only" style={{ fontSize: 12 }}>
           {(layout === "board" ? matches : inView).length} {plural((layout === "board" ? matches : inView).length, "задача", "задачи", "задач")}
         </span>
-        <div className="seg" role="group" aria-label="Представление">
-          <button type="button" className={layout === "list" ? "on" : ""} aria-pressed={layout === "list"} onClick={() => setLayout("list")}>
+        <div className="seg icons" role="group" aria-label="Представление">
+          <button type="button" className={layout === "list" ? "on" : ""} aria-pressed={layout === "list"} aria-label="Список" title="Список" onClick={() => setLayout("list")}>
             <Icon.list size={13} />
-            Список
           </button>
-          <button type="button" className={layout === "board" ? "on" : ""} aria-pressed={layout === "board"} onClick={() => setLayout("board")}>
+          <button type="button" className={layout === "board" ? "on" : ""} aria-pressed={layout === "board"} aria-label="Доска" title="Доска" onClick={() => setLayout("board")}>
             <Icon.board size={13} />
-            Доска
           </button>
         </div>
         <span className="grow" />

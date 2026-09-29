@@ -207,3 +207,23 @@ export function slugify(title: string): string {
   return slug || "page";
 }
 
+
+/** The body as read under the page's title: a first `# heading` that repeats the title is dropped. */
+export function bodyUnderTitle(content: string, title: string): string {
+  const m = /^\s*#\s+(.+?)\s*#*\s*(?:\r?\n|$)/.exec(content);
+  return m && m[1].trim() === title.trim() ? content.slice(m[0].length).replace(/^\s*\n/, "") : content;
+}
+
+/** The first paragraph of a body (what a page's summary falls back to), as the server takes it. */
+export function firstParagraph(body: string): string | undefined {
+  const parts: string[] = [];
+  for (const line of body.split(/\r?\n/)) {
+    if (!line.trim()) {
+      if (parts.length) break;
+      continue;
+    }
+    if (!parts.length && /^\s*(#{1,6}\s|```|~~~)/.test(line)) continue;
+    parts.push(line.trim());
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim() || undefined;
+}
