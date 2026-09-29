@@ -22,7 +22,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/meta", get(meta))
         .route("/tasks", get(list).post(create))
-        .route("/tasks/{id}", get(show).patch(update))
+        .route("/tasks/{id}", get(show).patch(update).delete(delete_task))
         .route("/tasks/{id}/status", post(status))
         .route("/tasks/{id}/comments", post(comment))
         .route("/tasks/{id}/acceptance/{n}", post(check))
@@ -324,6 +324,55 @@ fn mentioned(app: &App, project: &str, text: &str) -> crate::state::AppResult<Ve
         }
         Ok(out)
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DeleteQuery {
+    /// Delete the subtasks together with the task (otherwise a task with subtasks is refused).
+    cascade: Option<String>,
+}
+
+/// Delete a task for good: teams working on it are stopped and removed (with their
+/// worktrees; the branches stay), queued jobs are cancelled, notifications about it go.
+/// Project admins only — agents, the orchestrator included, never delete tasks.
+async fn delete_task(
+    State(app): State<Arc<App>>,
+    ctx: Ctx,
+    Path(id): Path<String>,
+    Query(q): Query<DeleteQuery>,
+) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    access.admin()?;
+    let cascade = q.cascade.as_deref() == Some("1");
+    let (slug, actor) = (access.project.clone(), access.actor.clone());
+    let (plan, report) = app
+        .blocking(move |app| {
+            let plan = app.with_tracker(&slug, |t| t.delete_plan(&id, cascade))?;
+            let mut report = Vec::new();
+            for team in &plan.teams {
+                if app.with_tracker(&slug, |t| Ok(t.bus().get(team)?.state == "active"))? {
+                    report.extend(crate::runtime::stop_team(app, &slug, team, "owner", &actor.name)?);
+                }
+                report.push(super::teams::remove_worktree(app, &slug, team));
+                app.with_tracker(&slug, |t| t.bus().delete(team))?;
+            }
+            let plan = app.with_tracker(&slug, |t| t.delete_tasks(&actor, &id, cascade))?;
+            app.with_server(|db| {
+                for (task, _) in &plan.tasks {
+                    db.conn().execute(
+                        "UPDATE agent_jobs SET status = 'cancelled', finished = ?1 WHERE project = ?2 AND task = ?3 AND status IN ('queued', 'running')",
+                        rusqlite::params![genie_core::db::now(), slug, task],
+                    )?;
+                    db.conn().execute("DELETE FROM notifications WHERE project = ?1 AND task = ?2", rusqlite::params![slug, task])?;
+                }
+                Ok(())
+            })?;
+            Ok((plan, report))
+        })
+        .await?;
+    changed(&app);
+    let ids: Vec<&String> = plan.tasks.iter().map(|(id, _)| id).collect();
+    Ok(Json(json!({ "ok": true, "deleted": ids, "report": report })))
 }
 
 async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<Json<Value>> {

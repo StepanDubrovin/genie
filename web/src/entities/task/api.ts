@@ -52,6 +52,19 @@ export const usePatchTask = () =>
   );
 export const useCreateTask = () =>
   useInvalidating((v: { title: string; description?: string; acceptance?: string[]; priority?: number; labels?: string[]; type?: string; parent?: string }) => request<Task>("POST", "/api/tasks", v));
+/** Delete a task for good; `cascade` takes its subtasks along (the server refuses otherwise). */
+export function useDeleteTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; cascade?: boolean }) =>
+      request<{ ok: boolean; deleted: string[] }>("DELETE", `/api/tasks/${encodeURIComponent(v.id)}${v.cascade ? "?cascade=1" : ""}`),
+    onSuccess: (r) => {
+      // Drop the deleted tasks first: refetching one of them would only fail.
+      for (const id of r.deleted) qc.removeQueries({ queryKey: keys.task(id) });
+    },
+    onSettled: () => qc.invalidateQueries(),
+  });
+}
 export const useAddArtifact = () =>
   useInvalidating((v: { id: string; name: string; kind: string; text: string; note?: string }) =>
     request<Task>("POST", `/api/tasks/${encodeURIComponent(v.id)}/artifacts`, { name: v.name, kind: v.kind, text: v.text, note: v.note }),

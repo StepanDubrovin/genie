@@ -186,7 +186,7 @@ async fn stop(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, bod
     Ok(Json(json!({ "ok": true, "report": report })))
 }
 
-fn remove_worktree(app: &App, slug: &str, team: &str) -> String {
+pub(super) fn remove_worktree(app: &App, slug: &str, team: &str) -> String {
     let Ok(Some(w)) = app.with_tracker(slug, |t| Ok(t.bus().get(team)?.worktree)) else { return "no worktree".into() };
     let out = std::process::Command::new("git").args(["-C", &w.path, "worktree", "remove", "--force", &w.path]).output();
     match out {
