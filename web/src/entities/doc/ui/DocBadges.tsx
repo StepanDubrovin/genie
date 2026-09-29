@@ -4,10 +4,12 @@ import type { DocPage, DocStatus } from "../model.ts";
 import { DOC_STATUS_NAME, DOC_TYPE_NAME, DOC_TYPE_SHORT } from "../model.ts";
 import { DeprecatedIcon, DiagIcon, DraftIcon, OkIcon, StaleIcon, UnknownIcon } from "./icons.tsx";
 
+/** The page's type when the frontmatter sets one (a plain page shows nothing). */
 export function DocTypeBadge({ type, long }: { type: DocPage["type"]; long?: boolean }) {
+  if (!type) return null;
   return (
-    <span className={`doc-type${type ? ` t-${type}` : ""}`} title={type ? `Тип: ${DOC_TYPE_NAME[type]}` : "Тип во frontmatter не указан"}>
-      {type ? (long ? type : DOC_TYPE_SHORT[type]) : "md"}
+    <span className={`doc-type t-${type}`} title={`Тип: ${DOC_TYPE_NAME[type]}`}>
+      {long ? DOC_TYPE_NAME[type].toLowerCase() : DOC_TYPE_SHORT[type]}
     </span>
   );
 }
@@ -39,7 +41,7 @@ export function DocDiagIcon({ size = 12 }: { size?: number }) {
 
 export function DocStaleBadge({ count }: { count?: number }) {
   return (
-    <span className="doc-status s-stale" title="Файлы кода под `paths` менялись после даты `verified`">
+    <span className="doc-status s-stale" title="Код, который описывает страница, менялся после её проверки">
       <DocStaleIcon />
       Возможно устарела{count && count > 1 ? ` · ${count}` : ""}
     </span>
@@ -59,7 +61,7 @@ export function DocDiagBadge({ count }: { count?: number }) {
 export function DocMarks({ page, size = 12 }: { page: Pick<DocPage, "status" | "stale" | "diagnostics">; size?: number }) {
   return (
     <span className="doc-marks">
-      <DocStatusIcon status={page.status} size={size} />
+      {page.status && <DocStatusIcon status={page.status} size={size} />}
       {page.stale && <DocStaleIcon size={size} />}
       {page.diagnostics.length > 0 && <DocDiagIcon size={size} />}
     </span>
@@ -76,10 +78,12 @@ export function docStatusText(page: Pick<DocPage, "status" | "stale" | "diagnost
   return { text: "без статуса", cls: "none" };
 }
 
-/** The four-item legend pinned to the bottom of the tree column. */
+/** The four-item legend at the bottom of the tree column, folded until asked for. */
 export function DocLegend() {
   return (
-    <div className="doc-legend">
+    <details className="doc-legend-wrap">
+      <summary>Обозначения</summary>
+      <div className="doc-legend">
       <span className="doc-status s-current">
         <DocStatusIcon status="current" /> {DOC_STATUS_NAME.current}
       </span>
@@ -98,6 +102,7 @@ export function DocLegend() {
         <DocDiagIcon />
         Ошибка frontmatter
       </span>
-    </div>
+      </div>
+    </details>
   );
 }

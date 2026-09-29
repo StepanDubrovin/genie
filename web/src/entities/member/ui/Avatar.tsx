@@ -11,12 +11,20 @@ export function Avatar({ role, name, activity, state, size }: { role: string; na
   );
 }
 
-export function Avatars({ members }: { members: Member[] }) {
+/** Overlapping avatars; past `max` the rest are counted (`+2`). */
+export function Avatars({ members, max }: { members: Member[]; max?: number }) {
+  const shown = max && members.length > max ? members.slice(0, max - 1) : members;
+  const rest = members.length - shown.length;
   return (
     <span className="avatars">
-      {members.map((m) => (
+      {shown.map((m) => (
         <Avatar key={m.name} role={m.role} name={m.name} activity={m.activity} state={m.state} />
       ))}
+      {rest > 0 && (
+        <span className="av more" title={members.slice(shown.length).map((m) => m.name).join(", ")}>
+          +{rest}
+        </span>
+      )}
     </span>
   );
 }

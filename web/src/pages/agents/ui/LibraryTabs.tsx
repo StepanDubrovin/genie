@@ -17,6 +17,7 @@ import {
   useSkillFile,
   useSkillFiles,
 } from "@/entities/agent-config";
+import { displayName } from "@/entities/member";
 import { bytes, plural, timeAgo } from "@/shared/lib";
 import { ConfirmDialog, Icon, Markdown, Modal } from "@/shared/ui";
 import { Badge, FileEditor, History, Problems, Section, useAction } from "./common.tsx";
@@ -28,12 +29,11 @@ export function SkillsTab({ cfg, selected, onSelect }: { cfg: Catalogue; selecte
     <div className="split">
       <section className="split-list" aria-label="Навыки">
         {cfg.skills.map((s) => (
-          <button type="button" key={s.name} className={`pick${s.name === current ? " on" : ""}`} onClick={() => onSelect(s.name)} aria-current={s.name === current}>
+          <button type="button" key={s.name} className={`pick plain${s.name === current ? " on" : ""}`} onClick={() => onSelect(s.name)} aria-current={s.name === current}>
             <span className="t">
               <span className="mono">{s.name}</span>
             </span>
-            <span className="s">{s.description}</span>
-            <span className="s">{users(s.name).length ? `роли: ${users(s.name).map((r) => r.id).join(", ")}` : "роли его не перечисляют"}</span>
+            <span className="s">{users(s.name).length ? users(s.name).map((r) => r.title).join(", ") : "все роли без своего списка навыков"}</span>
           </button>
         ))}
         {!cfg.skills.length && (
@@ -64,8 +64,8 @@ function SkillPane({ name, cfg }: { name: string; cfg: Catalogue }) {
       <div className="pane-head">
         <div className="ttl">
           <h2 className="mono">{d.skill.name}</h2>
-          <span className="sub">{d.skill.description}</span>
           <span className="sub mono">{d.skill.dir}</span>
+          {d.skill.description && <p className="desc">{d.skill.description}</p>}
         </div>
         {d.admin && d.editable && (
           <>
@@ -82,27 +82,30 @@ function SkillPane({ name, cfg }: { name: string; cfg: Catalogue }) {
       </div>
       <div className="pane-body">
         {d.admin && !d.editable && <p className="muted ag-note">Навык из каталога skills.paths: его меняют там, где он лежит (например, в клоне репозитория с навыками).</p>}
-        <Section title="Кто пользуется">
-          {d.usedBy.length ? (
-            <ul className="ag-links">
-              {d.usedBy.map((r) => (
-                <li key={r}>
-                  <Link to={`/agents?tab=roles&id=${r}`}>{cfg.roles.find((x) => x.id === r)?.title ?? r}</Link>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="muted ag-empty">Роли его не перечисляют; его получают роли без своего списка навыков, если он установлен и для pi.</p>
-          )}
-        </Section>
         <Section title="Инструкции">
           <div className="ag-skill-body">
             <Markdown text={body} />
           </div>
         </Section>
         <SkillFiles name={d.skill.name} files={d.files} canEdit={d.admin && d.editable} />
+        <p className="ag-used">
+          {d.usedBy.length ? (
+            <>
+              Используют роли:{" "}
+              {d.usedBy.map((r, i) => (
+                <Fragment key={r}>
+                  {i > 0 && ", "}
+                  <Link to={`/agents?tab=roles&id=${r}`}>{cfg.roles.find((x) => x.id === r)?.title ?? r}</Link>
+                </Fragment>
+              ))}
+              .
+            </>
+          ) : (
+            "Роли его не перечисляют: он достаётся ролям без своего списка навыков, если установлен и для pi."
+          )}
+        </p>
         {d.admin && (
-          <Section title="История">
+          <Section title="История изменений">
             <History item={`skill:${d.skill.name}`} admin={d.admin} />
           </Section>
         )}
@@ -263,24 +266,19 @@ export function McpTab({ cfg }: { cfg: Catalogue }) {
   const cols = d?.admin ? 5 : 4;
   return (
     <div className="ag-page">
-      {!cfg.mcpAdapter && (
-        <p className="ag-warn">
-          pi-mcp-adapter не найден в настройках pi: агенты работают без MCP. Установите его: <span className="mono">pi install npm:pi-mcp-adapter</span> (или задайте{" "}
-          <span className="mono">runtime.mcpAdapter</span>).
-        </p>
-      )}
       <div className="ag-page-head">
-        <p className="muted">
-          Подключения описаны в <span className="mono">&lt;data&gt;/mcp.json</span> (формат mcpServers). Агент получает только подключения своей роли; секреты — ссылками{" "}
-          <span className="mono">{"${env:ИМЯ}"}</span> на окружение сервера.{" "}
-          {cfg.mcpGateway ? (
-            <>Агенты ходят в них через шлюз genie: секреты остаются на сервере, каждый вызов инструмента попадает в журнал проекта.</>
-          ) : (
-            <>
-              Шлюз genie выключен (<span className="mono">runtime.mcpGateway</span>): харнесс получает подключения вместе с секретами.
-            </>
+        <div className="ag-intro">
+          <p>
+            {cfg.mcpGateway
+              ? "Агенты ходят в подключения через шлюз genie: секреты остаются на сервере, агент видит только выданные его роли инструменты, каждый вызов попадает в журнал проекта. Подключение, которое харнесс открывает сам, помечено «напрямую»."
+              : "Шлюз genie выключен (runtime.mcpGateway): харнесс получает подключения вместе с секретами, вызовы genie не видит."}
+          </p>
+          {!cfg.mcpAdapter && (
+            <p className="ag-warn-line" title="Установите на сервере: pi install npm:pi-mcp-adapter (или задайте runtime.mcpAdapter)">
+              Не установлен pi-mcp-adapter: пока его нет, агенты работают без MCP.
+            </p>
           )}
-        </p>
+        </div>
         {d?.admin && (
           <button type="button" className="btn" onClick={() => setEditing(true)}>
             <Icon.file size={13} />
@@ -324,10 +322,10 @@ export function McpTab({ cfg }: { cfg: Catalogue }) {
                       {users(s.id).map((r, i) => (
                         <span key={r.id}>
                           {i > 0 && ", "}
-                          <Link to={`/agents?tab=roles&id=${r.id}`}>{r.id}</Link>
+                          <Link to={`/agents?tab=roles&id=${r.id}`}>{r.title}</Link>
                         </span>
                       ))}
-                      {!users(s.id).length && <span className="muted">—</span>}
+                      {!users(s.id).length && <span className="muted">ни одной роли</span>}
                     </td>
                     {d?.admin && (
                       <td className="ag-cell-action">
@@ -357,9 +355,9 @@ export function McpTab({ cfg }: { cfg: Catalogue }) {
           </tbody>
         </table>
       </div>
-      {cfg.mcpGateway && <Calls project={cfg.project} />}
+      {cfg.mcpGateway && <Calls project={cfg.project} roles={cfg.roles} />}
       {d?.admin && (
-        <Section title="История">
+        <Section title="История изменений">
           <History item="mcp" admin />
         </Section>
       )}
@@ -423,7 +421,8 @@ function CheckResult({ server, result, roles }: { server: string; result: McpChe
 }
 
 /** The project's tool calls through the gateway, newest first. */
-function Calls({ project }: { project: string }) {
+function Calls({ project, roles }: { project: string; roles: RoleDef[] }) {
+  const roleTitle = (id: string) => roles.find((r) => r.id === id)?.title ?? id;
   const calls = useMcpCalls(project);
   const [server, setServer] = useState("");
   const all = calls.data ?? [];
@@ -463,16 +462,14 @@ function Calls({ project }: { project: string }) {
                   <tr key={c.id}>
                     <td title={c.at}>{timeAgo(c.at)}</td>
                     <td>
-                      {c.actor}
+                      {p.job ? `Задание ${p.job}` : displayName(c.actor)}
                       <div className="muted">
-                        {p.role}
+                        {roleTitle(p.role).toLowerCase()}
                         {c.subject ? (
                           <>
                             {" · "}
                             <Link to={`/team/${c.subject}`}>{c.subject}</Link>
                           </>
-                        ) : p.job ? (
-                          ` · задание ${p.job}`
                         ) : null}
                       </div>
                     </td>
@@ -484,7 +481,13 @@ function Calls({ project }: { project: string }) {
                         <Badge tone={p.refused ? "red" : p.ok ? "green" : "amber"}>{p.refused ? "отказано" : p.ok ? "ок" : "ошибка"}</Badge>
                         <span className="muted">{p.ms} мс</span>
                       </div>
-                      {p.error && <div className="muted ag-call-error">{p.error}</div>}
+                      {p.refused ? (
+                        <div className="muted ag-call-error" title={p.error}>
+                          роли не выдан этот инструмент
+                        </div>
+                      ) : (
+                        p.error && <div className="muted ag-call-error">{p.error}</div>
+                      )}
                     </td>
                     <td className="mono ag-args">{p.args}</td>
                   </tr>

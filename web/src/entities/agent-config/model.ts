@@ -237,18 +237,27 @@ export const WORKSPACE_TITLE: Record<Workspace, string> = { worktree: "свой 
 export const MAIL_TITLE: Record<MailMode, string> = { open: "пишут кому угодно", flow: "по связям шаблона" };
 export const RELATION_TITLE: Record<RelKind, string> = { handoff: "передаёт работу", returns: "возвращает", reports: "докладывает", consults: "советуется" };
 export const ON_STATUSES = ["refining", "ready", "in_progress", "review", "changes_requested", "approved"];
+/** A relation's task status as a label: when the handoff happens. */
+export const ON_TITLE: Record<string, string> = {
+  refining: "уточнение",
+  ready: "готово к работе",
+  in_progress: "в работе",
+  review: "на ревью",
+  changes_requested: "доработка",
+  approved: "одобрено",
+};
 
 /** Permission groups with what each permission gives. */
 export const PERMISSION_GROUPS: { title: string; items: { id: string; text: string }[] }[] = [
   {
     title: "Статусы задачи",
     items: [
-      { id: "status.refine", text: "draft → refining" },
-      { id: "status.start", text: "ready → in_progress" },
-      { id: "status.rework", text: "changes_requested → in_progress" },
-      { id: "status.submit", text: "in_progress → review" },
-      { id: "status.approve", text: "review → approved" },
-      { id: "status.return", text: "review → changes_requested" },
+      { id: "status.refine", text: "черновик → уточнение" },
+      { id: "status.start", text: "готово к работе → в работе" },
+      { id: "status.rework", text: "доработка → в работе" },
+      { id: "status.submit", text: "в работе → на ревью" },
+      { id: "status.approve", text: "на ревью → одобрено" },
+      { id: "status.return", text: "на ревью → доработка" },
     ],
   },
   {
@@ -257,22 +266,22 @@ export const PERMISSION_GROUPS: { title: string; items: { id: string; text: stri
       { id: "task.scope", text: "название, тип, описание, критерии, зависимости, эпик" },
       { id: "task.plan", text: "план реализации" },
       { id: "task.check", text: "отмечать критерии приёмки" },
-      { id: "task.create", text: "создавать подзадачи своей задачи" },
-      { id: "task.block", text: "block и unblock" },
+      { id: "task.create", text: "подзадачи своей задачи" },
+      { id: "task.block", text: "блокировать и снимать блок" },
     ],
   },
   {
     title: "Знания",
     items: [
       { id: "docs.read", text: "поиск и чтение базы знаний" },
-      { id: "docs.write", text: "запись страниц (по политике раздела)" },
+      { id: "docs.write", text: "запись страниц по политике раздела" },
     ],
   },
   {
     title: "Общение",
     items: [
-      { id: "mail.team", text: "письма и вопросы участникам команды" },
-      { id: "mail.orchestrator", text: "письма оркестратору в обход «голоса команды»" },
+      { id: "mail.team", text: "письма и вопросы команде" },
+      { id: "mail.orchestrator", text: "письма оркестратору напрямую, в обход «голоса команды»" },
       { id: "team.peek", text: "смотреть, чем занят сосед" },
     ],
   },
@@ -280,7 +289,7 @@ export const PERMISSION_GROUPS: { title: string; items: { id: string; text: stri
 
 /** What stays with the orchestrator and people whatever the role says. */
 export const FIXED_PERMISSIONS =
-  "Переходы в draft, ready, needs_owner, done и cancelled, нарезка задач, приоритет, стратегия интеграции, исполнители, прерывание и пауза агентов — только у оркестратора и людей. Сдавший работу не может сам её одобрить.";
+  "Всегда только у оркестратора и людей: статусы «черновик», «готово к работе», «нужно решение», «готово» и «отменено», нарезка задач, приоритет, стратегия интеграции, исполнители, прерывание и пауза агентов. Сдавший работу не может сам её одобрить.";
 
 // ------------------------------------------------------------------ permissions
 
@@ -423,23 +432,26 @@ export interface GraphEdge {
   ly: number;
 }
 
-export const NODE_W = 150;
-export const NODE_H = 46;
+export const NODE_H = 48;
+const ORCH_W = 150;
 
 /**
- * Lay out a team: the orchestrator on top, members in a row. Forward handoffs
- * arc above the row, returns below it, reports go straight up.
+ * Lay out a team: the orchestrator on top, members in a row. Relations to the
+ * right arc above the row (work moves on), to the left below it (work comes
+ * back, questions), reports go straight up. Nodes narrow as the team grows so
+ * that five members fit a regular page.
  */
 export function layoutTeam(
   members: { key: string; label: string; sub: string }[],
   relations: Relation[],
   problems: string[] = [],
-): { width: number; height: number; nodes: GraphNode[]; edges: GraphEdge[] } {
+): { width: number; height: number; nodeW: number; nodes: GraphNode[]; edges: GraphEdge[] } {
   const n = members.length;
-  const step = NODE_W + 56;
-  const width = Math.max(420, n * step + 40);
-  const orchY = 34;
-  const rowY = 178;
+  const nodeW = n <= 3 ? 164 : n === 4 ? 160 : 140;
+  const step = nodeW + (n <= 4 ? 28 : 12);
+  const width = Math.max(420, n * step + 48);
+  const orchY = 12 + NODE_H / 2;
+  const rowY = orchY + NODE_H + 86;
   const x0 = width / 2 - ((n - 1) * step) / 2;
   const flagged = (key: string) => problems.some((p) => p.includes(`\`${key}\``));
   const nodes: GraphNode[] = [
@@ -449,33 +461,34 @@ export function layoutTeam(
   const at = new Map(nodes.map((nd) => [nd.key, nd]));
   const index = new Map(members.map((m, i) => [m.key, i]));
   const edges: GraphEdge[] = [];
-  let maxDepth = 0;
+  let below = 0;
   for (const r of relations) {
     for (const to of r.to) {
       const a = at.get(r.from);
       const b = at.get(to);
       if (!a || !b || a === b) continue;
       const base = { from: r.from, to, type: r.type, on: r.on, note: r.note };
-      if (b.orchestrator) {
-        const sx = a.x + (a.x < b.x ? 18 : a.x > b.x ? -18 : 0);
-        const ex = b.x + Math.max(-NODE_W / 2 + 12, Math.min(NODE_W / 2 - 12, (a.x - b.x) / 3));
-        const [y1, y2] = [a.y - NODE_H / 2, b.y + NODE_H / 2 + 2];
-        edges.push({ ...base, d: `M ${sx} ${y1} L ${ex} ${y2}`, lx: (sx + ex) / 2, ly: (y1 + y2) / 2 });
+      if (a.orchestrator || b.orchestrator) {
+        const [m, o] = a.orchestrator ? [b, a] : [a, b];
+        const mx = m.x + (m.x < o.x ? 12 : m.x > o.x ? -12 : 0);
+        const ox = o.x + Math.max(-ORCH_W / 2 + 14, Math.min(ORCH_W / 2 - 14, (m.x - o.x) / 3));
+        const [my, oy] = [m.y - NODE_H / 2, o.y + NODE_H / 2 + 1];
+        const d = a.orchestrator ? `M ${ox} ${oy} L ${mx} ${my}` : `M ${mx} ${my} L ${ox} ${oy}`;
+        edges.push({ ...base, d, lx: (mx + ox) / 2, ly: (my + oy) / 2 });
         continue;
       }
       const span = Math.abs((index.get(to) ?? 0) - (index.get(r.from) ?? 0));
       const forward = b.x > a.x;
-      const dir = forward ? -1 : 1;
+      const shift = forward ? 10 : -10;
+      const [x1, x2] = [a.x + shift, b.x - shift];
       const y = forward ? a.y - NODE_H / 2 : a.y + NODE_H / 2;
-      const depth = 30 + 16 * (span - 1);
-      maxDepth = Math.max(maxDepth, forward ? 0 : depth);
-      const sx = a.x + (forward ? 22 : -22);
-      const ex = b.x + (forward ? -22 : 22);
-      const cy = y + dir * depth * 2;
-      edges.push({ ...base, d: `M ${sx} ${y} Q ${(sx + ex) / 2} ${cy} ${ex} ${y + (dir > 0 ? 2 : -2)}`, lx: (sx + ex) / 2, ly: y + dir * depth });
+      const lift = 26 + 28 * span;
+      const qy = forward ? y - lift : y + lift;
+      if (!forward) below = Math.max(below, lift / 2);
+      edges.push({ ...base, d: `M ${x1} ${y} Q ${(x1 + x2) / 2} ${qy} ${x2} ${y}`, lx: (x1 + x2) / 2, ly: (y + qy) / 2 });
     }
   }
-  return { width, height: rowY + NODE_H / 2 + maxDepth + 34, nodes, edges };
+  return { width, height: rowY + NODE_H / 2 + below + 22, nodeW, nodes, edges };
 }
 
 // ------------------------------------------------------------------ what a template needs
@@ -533,15 +546,17 @@ export function reached(current: string, status: string): boolean {
 /**
  * Who in a running team works, who waits and for whom: a member not working
  * waits for a handoff whose status the task has not reached yet. `pending`
- * holds those handoffs as `from->to` member keys.
+ * holds those handoffs as `from->to` member keys, `done` the relations whose
+ * status the task has reached (the handoff has happened).
  */
 export function liveTeam(
   spec: TeamSpecView,
   members: { name: string; activity?: string; state?: string; status?: string }[],
   taskStatus: string,
   teamActive: boolean,
-): { live: Record<string, { state: LiveState; note?: string }>; pending: string[] } {
-  const nameOf = (key: string) => capitalized(spec.members.find((m) => m.key === key)?.name ?? key);
+  display: (name: string) => string = capitalized,
+): { live: Record<string, { state: LiveState; note?: string }>; pending: string[]; done: string[] } {
+  const nameOf = (key: string) => display(spec.members.find((m) => m.key === key)?.name ?? key);
   const live: Record<string, { state: LiveState; note?: string }> = {};
   const pending: string[] = [];
   for (const sm of spec.members) {
@@ -559,5 +574,6 @@ export function liveTeam(
     }
     live[sm.key] = { state, note };
   }
-  return { live, pending };
+  const done = spec.relations.filter((r) => r.on && reached(taskStatus, r.on)).flatMap((r) => r.to.map((to) => `${r.from}->${to}`));
+  return { live, pending, done };
 }

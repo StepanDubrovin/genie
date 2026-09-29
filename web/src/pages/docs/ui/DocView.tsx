@@ -7,6 +7,7 @@ import { useRef } from "react";
 import { Link } from "react-router";
 import type { DocPage, DocReadResult } from "@/entities/doc";
 import {
+  bodyUnderTitle,
   diagnosticText,
   docAgo,
   docCrumbs,
@@ -16,6 +17,7 @@ import {
   DocStaleBadge,
   DocStatusBadge,
   DocTypeBadge,
+  firstParagraph,
   staleReasonText,
 } from "@/entities/doc";
 import { BacklinkIcon, DiagIcon, OkIcon, PathsIcon, StaleIcon } from "@/entities/doc";
@@ -54,6 +56,11 @@ export function DocView({
   };
 
   const staleNote = page.staleReasons.length ? page.staleReasons.map(staleReasonText).join("; ") : "";
+  // The title and the summary are shown once: not again as the body's heading and first paragraph.
+  const body = bodyUnderTitle(page.content, page.title);
+  const summary = page.summary && page.summary !== firstParagraph(page.content) ? page.summary : undefined;
+  const headings = page.headings.filter((h) => h !== page.title);
+  const badVerified = page.diagnostics.some((d) => d.includes('"verified"'));
 
   return (
     <>
@@ -84,21 +91,21 @@ export function DocView({
             <h2 className="doc-title">
               {page.title}
               <DocTypeBadge type={page.type} long />
-              <DocStatusBadge status={page.status} />
+              {page.status && <DocStatusBadge status={page.status} />}
               {page.stale && <DocStaleBadge count={page.staleReasons.length} />}
               {page.diagnostics.length > 0 && <DocDiagBadge count={page.diagnostics.length} />}
             </h2>
             <div className="doc-meta">
               <span>Обновлена {docAgo(page.updated)}</span>
-              <span className={page.verified ? "ok" : "warn"}>
-                {page.verified ? (
-                  <>
-                    <OkIcon size={12} /> Проверена {page.verified}
-                  </>
-                ) : (
-                  "Проверена — не распознана"
-                )}
-              </span>
+              {page.verified ? (
+                <span className="ok">
+                  <OkIcon size={12} /> Проверена {page.verified}
+                </span>
+              ) : badVerified ? (
+                <span className="warn">Дата проверки не распознана</span>
+              ) : (
+                <span>Не проверялась</span>
+              )}
               {page.related.length > 0 && (
                 <span className="doc-related">
                   Задачи
@@ -152,9 +159,9 @@ export function DocView({
             </div>
           )}
 
-          {page.summary && <div className="doc-summary">{page.summary}</div>}
+          {summary && <div className="doc-summary">{summary}</div>}
 
-          <DocBody text={page.content} links={page.links} onOpen={onOpen} empty="Страница пуста" />
+          <DocBody text={body} links={page.links} onOpen={onOpen} empty="Страница пуста" />
         </div>
       </div>
 
@@ -194,7 +201,9 @@ export function DocView({
                 ))}
               </ul>
             ) : (
-              <p className="doc-hint">Не привязана к коду: `paths` пусто, поэтому genie не следит за устареванием этой страницы.</p>
+              <p className="doc-hint">
+                Не привязана к коду: поле <code>paths</code> пусто, поэтому genie не следит, устарела ли страница.
+              </p>
             )}
             {page.paths && page.paths.length > 0 && (
               <p className={`doc-note${page.stale ? " stale" : ""}`}>{page.stale ? `Изменено после проверки: ${staleNote}` : "Без изменений после проверки"}</p>
@@ -216,11 +225,11 @@ export function DocView({
             </section>
           )}
 
-          {page.headings.length > 0 && (
+          {headings.length > 0 && (
             <section className="docs-sec">
               <h3>На странице</h3>
               <ul className="doc-toc">
-                {page.headings.map((heading) => (
+                {headings.map((heading) => (
                   <li key={heading}>
                     <button type="button" onClick={() => scrollToHeading(heading)}>
                       {heading}

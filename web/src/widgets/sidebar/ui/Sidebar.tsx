@@ -41,13 +41,13 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
 
   return (
     <nav className="sidebar" aria-label="Навигация">
-      <div className={`project${many ? " switch" : ""}`}>
+      <div className={`project${many ? " switch" : ""}`} title={project ? (project.hasRepo ? "Проект с репозиторием кода" : "Проект без кода") : undefined}>
         <span className="logo-mark">
           <Icon.mark size={15} />
         </span>
         <span className="txt">
           <span className="name">{project?.name ?? meta?.project ?? "genie"}</span>
-          <span className="sub">{project ? `${ROLE_NAME[project.role] ?? project.role} · ${project.hasRepo ? "с репозиторием" : "без кода"}` : "genie"}</span>
+          <span className="sub">{project ? `${project.slug} · ${ROLE_NAME[project.role] ?? project.role}` : "genie"}</span>
         </span>
         {many && session && (
           <>

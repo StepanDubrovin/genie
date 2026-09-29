@@ -14,6 +14,7 @@ import {
   type Status,
   STATUS_NAME,
   StatusIcon,
+  statusNote,
   type Task,
   useArtifactViewer,
   useCheck,
@@ -28,7 +29,7 @@ import {
 import { useAgentConfig } from "@/entities/agent-config";
 import type { Team } from "@/entities/team";
 import { SpawnTeamDialog } from "@/features/spawn-team";
-import { timeAgo, useTick } from "@/shared/lib";
+import { plural, timeAgo, useTick } from "@/shared/lib";
 import { Icon, Markdown, useToast } from "@/shared/ui";
 
 const KIND_NAME: Record<string, string> = { note: "заметка", progress: "прогресс", question: "вопрос", decision: "решение", review: "ревью", handoff: "передача", owner: "владелец" };
@@ -86,9 +87,17 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
     );
   };
 
+  // A status change's note is also a comment (`[in_progress → review] …`): the history
+  // line already says it, so the comment is left out of the activity.
+  const moves = new Set(t.history.filter((h) => h.event === "status").map((h) => `${h.from}>${h.to}`));
   const activity = [
     ...t.history.map((h) => ({ kind: "event" as const, at: h.at, h })),
-    ...t.comments.map((c) => ({ kind: "comment" as const, at: c.at, c })),
+    ...t.comments
+      .filter((c) => {
+        const n = statusNote(c.text);
+        return !(n && moves.has(`${n.from}>${n.to}`));
+      })
+      .map((c) => ({ kind: "comment" as const, at: c.at, c })),
   ].sort((a, b) => a.at.localeCompare(b.at));
 
   return (
@@ -109,7 +118,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
         <span className="grow" />
         {team && (
           <Link to={`/team/${encodeURIComponent(team.id)}`} style={{ fontSize: 12 }}>
-            Чат команды {team.id}
+            Команда {team.id}
           </Link>
         )}
         <button type="button" className="icon-btn d-only" onClick={onClose} aria-label="Закрыть">
@@ -156,17 +165,18 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
             </select>
           </span>
           <span className="k">Команда</span>
-          <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span className="wide team-cell">
             {team ? (
               <>
-                <Avatars members={team.members} />
-                <span className="muted">{team.state === "active" ? `${team.id} · ${team.members.filter((m) => m.activity === "working").length} работают` : `${team.id} · остановлена`}</span>
+                <Avatars members={team.members} max={6} />
+                <Link to={`/team/${encodeURIComponent(team.id)}`}>{team.id}</Link>
+                <span className="muted">{team.state === "active" ? workingText(team.members.filter((m) => m.activity === "working").length) : "остановлена"}</span>
               </>
             ) : (
-              <span className="muted">не назначена</span>
+              <span className="muted">не собрана</span>
             )}
             {canSpawn && (
-              <button type="button" className="btn ghost" style={{ height: 24 }} onClick={() => setSpawning(true)}>
+              <button type="button" className="btn ghost" style={{ height: 26 }} onClick={() => setSpawning(true)}>
                 <Icon.userPlus size={12} />
                 Собрать команду
               </button>
@@ -198,23 +208,23 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
             </>
           )}
           <span className="k">Метки</span>
-          <span className="wide">{t.labels.length ? <Labels labels={t.labels} /> : <span className="muted">—</span>}</span>
+          <span className={isEpic ? "wide" : undefined}>{t.labels.length ? <Labels labels={t.labels} /> : <span className="muted">нет</span>}</span>
           <span className="k">Интеграция</span>
           <span className="wide">
             <input
               key={`${t.id}-merge-${t.mergeStrategy}`}
               aria-label="Интеграция"
+              title="Как результат попадёт в систему: договоритесь с оркестратором"
               defaultValue={t.mergeStrategy}
-              placeholder="как результат попадёт в систему — договоритесь с оркестратором"
+              placeholder="не задана"
               onBlur={(e) => e.target.value !== t.mergeStrategy && patch.mutate({ id: t.id, patch: { mergeStrategy: e.target.value } }, { onError: fail })}
             />
           </span>
           {t.worktree && (
             <>
-              <span className="k">Worktree</span>
-              <span className="wide mono" style={{ fontSize: 12 }}>
-                {t.worktree.branch ? `⎇ ${t.worktree.branch} · ` : ""}
-                {t.worktree.path}
+              <span className="k">Ветка</span>
+              <span className="wide mono" style={{ fontSize: 12 }} title={t.worktree.path}>
+                {t.worktree.branch ?? t.worktree.path}
               </span>
             </>
           )}
@@ -540,4 +550,9 @@ function EpicBox({ id, onArtifact }: { id: string; onArtifact: (task: string, n:
       )}
     </section>
   );
+}
+
+/** How many members of a running team work right now, in words. */
+function workingText(n: number): string {
+  return n ? `${n} ${plural(n, "работает", "работают", "работают")}` : "сейчас никто не работает";
 }

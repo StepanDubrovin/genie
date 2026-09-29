@@ -134,6 +134,13 @@ test("the template graph puts the orchestrator on top and flags members named by
   const back = g.edges.find((e) => e.type === "returns")!;
   assert.ok(handoff.ly < exec.y && back.ly > exec.y, "forward above the row, returns below");
   assert.ok(g.height > back.ly);
+  const five = layoutTeam(
+    ["a", "b", "c", "d", "e"].map((key) => ({ key, label: key, sub: "" })),
+    [{ from: "a", to: ["e"], type: "handoff" }],
+  );
+  assert.equal(five.nodeW, 140, "five members get narrower nodes");
+  assert.ok(five.width <= 820, "five members fit a regular page");
+  assert.ok(five.edges[0].ly < five.nodes[1].y - 30, "a long handoff arcs higher");
 });
 
 test("a task before ready gets refinement templates, a ready one delivery templates", () => {
@@ -180,9 +187,12 @@ test("a running team shows who works and who waits for whose handoff", () => {
   assert.deepEqual(now.live.reviewer, { state: "waiting", note: "ждёт Bender" });
   assert.equal(now.live.tester.state, "error", "an error shows whatever the flow");
   assert.deepEqual(now.pending, ["executor->reviewer"]);
+  assert.deepEqual(now.done, [], "nothing has been handed over yet");
+  assert.deepEqual(liveTeam(spec, members, "in_progress", true, (n) => n.toUpperCase()).live.reviewer.note, "ждёт BENDER");
   const inReview = liveTeam(spec, members, "review", true);
   assert.equal(inReview.live.reviewer.state, "idle", "the handoff has happened");
   assert.deepEqual(inReview.pending, []);
+  assert.deepEqual(inReview.done, ["executor->reviewer", "executor->tester"], "the handoff on review has happened");
   assert.equal(liveTeam(spec, members, "review", false).live.executor.state, "stopped");
   assert.ok(reached("approved", "review") && !reached("changes_requested", "review") && reached("changes_requested", "in_progress"));
 });

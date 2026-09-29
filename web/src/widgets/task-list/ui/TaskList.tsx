@@ -57,11 +57,9 @@ export function TaskList({
                 onMouseEnter={() => onFocus(t.id)}
                 onClick={() => onOpen(t.id)}
               >
-                <StatusIcon status={t.status} />
                 <span className="id">{t.id}</span>
-                <span className="prio">
-                  <PriorityIcon priority={t.priority} />
-                </span>
+                {/* Only urgent and high priority earn a mark: the rest is the default. */}
+                <span className="prio">{t.priority <= 1 && <PriorityIcon priority={t.priority} />}</span>
                 <button type="button" className="title" onClick={(e) => { e.stopPropagation(); onOpen(t.id); }}>
                   {t.type === "epic" && (
                     <span className="epic-mark">
@@ -78,7 +76,7 @@ export function TaskList({
                   <EpicChip id={t.parent} />
                   <Labels labels={t.labels} />
                 </span>
-                {team ? <Avatars members={team.members} /> : <span className="muted" style={{ fontSize: 12 }}>{t.status === "inbox" ? "ждёт оркестратора" : "без команды"}</span>}
+                <span className="who">{team ? <Avatars members={team.members} max={4} /> : t.status === "inbox" ? "ждёт оркестратора" : "без команды"}</span>
                 <span className="when">{timeAgo(t.updated)}</span>
               </div>
             );

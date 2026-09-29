@@ -2,13 +2,14 @@
 // a graph, what each member gets) and the structured editor over the template's
 // JSON file (`<data>/teams/<id>.json`).
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Link } from "react-router";
 import {
   type Catalogue,
   MAIL_TITLE,
   type MemberDef,
   ON_STATUSES,
+  ON_TITLE,
   ORIGIN_TITLE,
   type Relation,
   RELATION_TITLE,
@@ -23,6 +24,8 @@ import {
   useTemplate,
   WORKSPACE_TITLE,
 } from "@/entities/agent-config";
+import { displayName } from "@/entities/member";
+import { plural } from "@/shared/lib";
 import { ConfirmDialog, Icon, Modal, useToast } from "@/shared/ui";
 import { Badge, FileEditor, History, Problems, Section, useAction } from "./common.tsx";
 
@@ -35,11 +38,11 @@ export function TemplatesTab({ cfg, selected, onSelect }: { cfg: Catalogue; sele
           <button type="button" key={t.id} className={`pick${t.id === current ? " on" : ""}`} onClick={() => onSelect(t.id)} aria-current={t.id === current}>
             <span className="t">
               <span className="ag-avatars" aria-hidden="true">
-                {t.members.slice(0, 4).map((m) => {
-                  const cls = cfg.roles.find((r) => r.id === m.role)?.class ?? "executor";
+                {t.members.slice(0, 5).map((m) => {
+                  const role = cfg.roles.find((r) => r.id === m.role);
                   return (
-                    <span key={m.key} className={`ag-class c-${cls}`}>
-                      {cls[0].toUpperCase()}
+                    <span key={m.key} className={`ag-class c-${role?.class ?? "executor"}`}>
+                      {(role?.title ?? m.role).slice(0, 1).toUpperCase()}
                     </span>
                   );
                 })}
@@ -48,18 +51,10 @@ export function TemplatesTab({ cfg, selected, onSelect }: { cfg: Catalogue; sele
               {t.origin !== "builtin" && <Badge tone={t.origin === "custom" ? "accent" : "amber"}>{ORIGIN_TITLE[t.origin]}</Badge>}
             </span>
             <span className="s">
-              {[
-                t.id,
-                STAGE_TITLE[t.stage],
-                WORKSPACE_TITLE[t.workspace],
-                `участников: ${t.members.length}`,
-                t.projects ? `проекты: ${t.projects.join(", ")}` : "",
-                cfg.automations?.templates[t.id] ? `автоматизаций: ${cfg.automations.templates[t.id]}` : "",
-              ]
+              {[STAGE_TITLE[t.stage], WORKSPACE_TITLE[t.workspace], `${t.members.length} ${plural(t.members.length, "участник", "участника", "участников")}`, t.projects ? t.projects.join(", ") : ""]
                 .filter(Boolean)
                 .join(" · ")}
             </span>
-            {t.description && <span className="s">{t.description}</span>}
           </button>
         ))}
       </section>
@@ -81,20 +76,30 @@ function TemplatePane({ id, cfg }: { id: string; cfg: Catalogue }) {
   const t = d.template;
   const hasFile = d.file.content !== null && d.file.path.startsWith("teams/");
   const roleTitle = (id: string) => cfg.roles.find((r) => r.id === id)?.title ?? id;
+  const title = (key: string) => {
+    if (key === "orchestrator") return "Оркестратор";
+    const m = t.members.find((x) => x.key === key);
+    return m ? (m.name ? `${m.name[0].toUpperCase()}${m.name.slice(1)}` : roleTitle(m.role)) : key;
+  };
+  const used = d.usedBy.automations.map((a) => (
+    <Link key={a.id} to={`/automations?rule=${a.id}`}>
+      автоматизация «{a.name}»{a.project ? ` (${a.project})` : ""}
+    </Link>
+  ));
   return (
     <>
       <div className="pane-head">
         <div className="ttl">
           <h2>{t.title}</h2>
           <span className="sub">
-            <span className="mono">{t.id}</span> · {STAGE_TITLE[t.stage]} · {WORKSPACE_TITLE[t.workspace]} · почта: {MAIL_TITLE[t.mail]} · {ORIGIN_TITLE[t.origin]}
+            <span className="mono">{t.id}</span> · {ORIGIN_TITLE[t.origin]} · стадия «{STAGE_TITLE[t.stage]}» · {WORKSPACE_TITLE[t.workspace]} · почта {t.mail === "flow" ? "по связям шаблона" : "свободная"}
             {t.path ? ` · ${t.path}` : ""}
           </span>
-          {t.description && <span className="sub">{t.description}</span>}
+          {t.description && <p className="desc">{t.description}</p>}
         </div>
         {d.admin && (
           <>
-            <button type="button" className="btn primary" onClick={() => setMode("form")}>
+            <button type="button" className="btn" onClick={() => setMode("form")}>
               Изменить
             </button>
             <button type="button" className="btn" onClick={() => setMode("file")}>
@@ -111,92 +116,81 @@ function TemplatePane({ id, cfg }: { id: string; cfg: Catalogue }) {
       </div>
       <div className="pane-body">
         <Problems items={d.problems} />
-        <Section title="Состав и связи">
-          <TemplateGraph members={t.members} relations={t.relations} roles={cfg.roles} problems={[...t.warnings, ...d.problems.map((p) => p.message)]} />
-          {t.relationsDerived && <p className="muted ag-note">Связей в шаблоне нет: они выведены из классов участников.</p>}
-          {t.warnings.length > 0 && (
-            <ul className="ag-warn-list">
-              {t.warnings.map((w) => (
-                <li key={w}>{w}</li>
-              ))}
+        <TemplateGraph members={t.members} relations={t.relations} roles={cfg.roles} problems={[...t.warnings, ...d.problems.map((p) => p.message)]} />
+        {(t.relationsDerived || t.warnings.length > 0) && (
+          <div className="ag-graph-notes">
+            {t.relationsDerived && <p className="muted ag-note">Связей в шаблоне нет: они выведены из классов участников.</p>}
+            {t.warnings.map((w) => (
+              <p key={w} className="ag-warn-line">
+                {w}
+              </p>
+            ))}
+          </div>
+        )}
+        <div className="ag-two">
+          <Section title="Участники">
+            <ul className="ag-members">
+              {t.members.map((m) => {
+                const role = cfg.roles.find((r) => r.id === m.role);
+                return (
+                  <li key={m.key} title={m.instructions ? `Особенности: ${m.instructions}` : undefined}>
+                    <span className={`ag-class c-${role?.class ?? "executor"}`} aria-hidden="true">
+                      {(role?.title ?? m.role).slice(0, 1).toUpperCase()}
+                    </span>
+                    <Link to={`/agents?tab=roles&id=${m.role}`}>{m.name ? `${title(m.key)} — ${roleTitle(m.role).toLowerCase()}` : roleTitle(m.role)}</Link>
+                    {m.key !== m.role && <span className="mono muted">{m.key}</span>}
+                    {m.instructions && <span className="ag-tag plus">особенности</span>}
+                    <span className="grow" />
+                    {m.model && <span className="muted">{m.model.replace(/^[^/]+\//, "")}</span>}
+                  </li>
+                );
+              })}
             </ul>
-          )}
-          <div className="ag-table-wrap">
-            <table className="ag-table">
-              <thead>
-                <tr>
-                  <th>Участник</th>
-                  <th>Роль</th>
-                  <th>Модель</th>
-                  <th>Инструкции</th>
-                </tr>
-              </thead>
-              <tbody>
-                {t.members.map((m) => (
-                  <tr key={m.key}>
-                    <td className="mono">
-                      {m.key}
-                      {m.name ? ` (${m.name})` : ""}
-                    </td>
-                    <td>
-                      <Link to={`/agents?tab=roles&id=${m.role}`}>{roleTitle(m.role)}</Link>
-                    </td>
-                    <td className="mono">{m.model ?? "—"}</td>
-                    <td>{m.instructions ?? "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="ag-table-wrap">
-            <table className="ag-table">
-              <thead>
-                <tr>
-                  <th>Кто</th>
-                  <th>Кому</th>
-                  <th>Что</th>
-                  <th>Когда</th>
-                  <th>Заметка</th>
-                </tr>
-              </thead>
-              <tbody>
-                {t.relations.map((r, i) => (
-                  <tr key={i}>
-                    <td className="mono">{r.from}</td>
-                    <td className="mono">{r.to.join(", ")}</td>
-                    <td>
-                      <span className={`ag-rel ${r.type}`}>{RELATION_TITLE[r.type]}</span>
-                    </td>
-                    <td>{r.on ? <span className="mono">{r.on}</span> : "—"}</td>
-                    <td>{r.note ?? "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Section>
+          </Section>
+          <Section title="Связи">
+            <ul className="ag-relations">
+              {t.relations.flatMap((r, i) =>
+                r.to.map((to) => (
+                  <li key={`${i}-${to}`}>
+                    <span className="who">
+                      {title(r.from)} → {title(to)}
+                    </span>
+                    <span className={`ag-rel ${r.type}`}>
+                      {RELATION_TITLE[r.type]}
+                      {r.on ? ` · ${ON_TITLE[r.on] ?? r.on}` : ""}
+                    </span>
+                    <span className="muted note">{r.note}</span>
+                  </li>
+                )),
+              )}
+              {!t.relations.length && <li className="muted">Связей нет.</li>}
+            </ul>
+          </Section>
+        </div>
         {t.charter && (
           <Section title="Общие правила команды">
             <p className="ag-charter">{t.charter}</p>
           </Section>
         )}
-        <KickoffPreview template={t.id} />
-        <Section title="Где используется">
-          {d.usedBy.automations.length ? (
-            <ul className="ag-links">
-              {d.usedBy.automations.map((a) => (
-                <li key={a.id}>
-                  автоматизация <Link to={`/automations?rule=${a.id}`}>{a.name}</Link>
-                  {a.project ? <span className="muted"> · {a.project}</span> : null}
-                </li>
+        <KickoffPreview template={t.id} roles={cfg.roles} />
+        <p className="ag-used">
+          {used.length ? (
+            <>
+              Используется:{" "}
+              {used.map((x, i) => (
+                <Fragment key={i}>
+                  {i > 0 && ", "}
+                  {x}
+                </Fragment>
               ))}
-            </ul>
+              . Оркестратор и люди собирают по нему команды.
+            </>
           ) : (
-            <p className="muted ag-empty">Автоматизации его не используют; оркестратор и люди собирают по нему команды.</p>
+            "Автоматизации его не используют; оркестратор и люди собирают по нему команды."
           )}
-        </Section>
+        </p>
         {d.admin && (
-          <Section title="История">
+          <Section title="История изменений">
             <History item={`team:${t.id}`} admin={d.admin} />
           </Section>
         )}
@@ -247,7 +241,7 @@ function templateJson(t: TeamDef): Record<string, unknown> {
   };
 }
 
-function KickoffPreview({ template }: { template: string }) {
+function KickoffPreview({ template, roles }: { template: string; roles: Catalogue["roles"] }) {
   const [task, setTask] = useState("");
   const [asked, setAsked] = useState<string>();
   const preview = usePreview(template, asked);
@@ -269,7 +263,7 @@ function KickoffPreview({ template }: { template: string }) {
       {preview.data?.members.map((m) => (
         <details key={m.key} className="ag-kickoff">
           <summary>
-            <span className="mono">{m.name}</span> <span className="muted">· {m.role}</span>
+            {displayName(m.name)} <span className="muted">· {(roles.find((r) => r.id === m.role)?.title ?? m.role).toLowerCase()}</span>
           </summary>
           <pre className="view">{m.kickoff}</pre>
         </details>
@@ -442,7 +436,7 @@ function TemplateForm({ detail, cfg, onClose }: { detail: TemplateDetail; cfg: C
                     <option value="">без статуса</option>
                     {ON_STATUSES.map((s) => (
                       <option key={s} value={s}>
-                        когда {s}
+                        когда «{ON_TITLE[s] ?? s}»
                       </option>
                     ))}
                   </select>
