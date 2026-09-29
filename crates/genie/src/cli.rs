@@ -41,6 +41,18 @@ enum Command {
         #[arg(long)]
         no_agents: bool,
     },
+    /// Your pi session becomes the orchestrator of the project (--project) on the running server; the server's orchestrator waits until pi ends.
+    Orchestrate {
+        /// Take the console from whoever holds it.
+        #[arg(long)]
+        force: bool,
+        /// The pi command (default: $GENIE_PI, else pi).
+        #[arg(long)]
+        pi: Option<String>,
+        /// More arguments for pi, after `--`.
+        #[arg(last = true)]
+        pi_args: Vec<String>,
+    },
     /// Give a user a role in a project (viewer, member, admin, owner).
     Member { project: String, login: String, role: String },
     /// Print an invitation link for a project.
@@ -173,6 +185,17 @@ pub async fn run() -> Result<(), String> {
             app.print_agent_errors();
             crate::runtime::start(&app);
             crate::serve(app).await?;
+        }
+        Command::Orchestrate { force, pi, pi_args } => {
+            let cx = op_context(&data, project.clone(), false)?;
+            let url =
+                env("GENIE_URL").unwrap_or_else(|| format!("http://127.0.0.1:{}", Config::load(&data).map(|c| c.port).unwrap_or(7420)));
+            let pi = pi.or_else(|| env("GENIE_PI")).unwrap_or_else(|| "pi".into());
+            let run = crate::orchestrate::Orchestrate { api: cx.api, url: url.trim_end_matches('/').to_string(), force, pi, pi_args };
+            let code = crate::orchestrate::run(run).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         Command::Member { project: slug, login, role } => {
             let args = serde_json::json!({ "project": slug, "login": login, "role": role });

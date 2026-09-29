@@ -109,7 +109,7 @@ case "$cmd" in
     log "starting: genie ${args[*]} $* (data $GENIE_DATA, uid $(id -u))"
     exec "$GENIE_BIN" "${args[@]}" "$@"
     ;;
-  task | team | mail | docs | job | project | user | server | member | invite | backup | stats | doctor | vault | agents | agent | init | help | -h | --help | -V | --version)
+  task | team | mail | docs | job | automation | agents | project | user | me | server | orchestrate | member | invite | backup | stats | doctor | vault | agent | init | help | -h | --help | -V | --version)
     exec "$GENIE_BIN" "$cmd" "$@"
     ;;
   *)

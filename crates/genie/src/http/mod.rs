@@ -10,6 +10,7 @@ pub mod account;
 pub mod agent_config;
 pub mod agents;
 pub mod automations;
+pub mod console;
 pub mod ctx;
 pub mod docs;
 pub mod live;
@@ -86,6 +87,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(agents::routes())
         .merge(docs::routes())
         .merge(automations::routes())
+        .merge(console::routes())
         .merge(agent_config::routes())
         .merge(mcp_gateway::routes())
         .merge(live::routes())

@@ -168,7 +168,9 @@ async fn schedule(app: &Arc<App>, slots: &Arc<Semaphore>) -> AppResult<()> {
                 };
                 for b in boxes {
                     match b.team {
-                        None if p.autonomy != "manual" => out.push(AgentKey::Orchestrator { project: p.slug.clone() }),
+                        None if p.autonomy != "manual" && !console_held(app, &p.slug) => {
+                            out.push(AgentKey::Orchestrator { project: p.slug.clone() })
+                        }
                         None => {}
                         Some(team) => out.push(AgentKey::Member { project: p.slug.clone(), team, member: b.recipient }),
                     }
@@ -905,13 +907,41 @@ impl Spec {
     }
 }
 
+/// Whether someone's own session holds the orchestrator console of a project
+/// (`genie orchestrate`): the server's orchestrator waits meanwhile.
+fn console_held(app: &App, slug: &str) -> bool {
+    app.with_server(|db| db.console(slug)).ok().flatten().is_some()
+}
+
+/// What a person's session at the orchestrator console gets: the orchestrator's
+/// configured role, prompt and model.
+pub(crate) struct ConsoleSpec {
+    pub role_id: String,
+    pub prompt: String,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+}
+
+pub(crate) fn console_spec(app: &App, slug: &str, user: &str) -> AppResult<ConsoleSpec> {
+    let project = project_of(app, slug)?;
+    let agents = app.agents();
+    let def = orchestrator_role(&agents)?;
+    let (model, thinking) = role_model(app, &def, None, None);
+    let mut prompt = agent_prompt(app, &agents, &project, &def, None, true, AgentKind::Orchestrator);
+    prompt.push_str(&format!(
+        "\n## The console\n\nYou run in the pi session of @{user} at the orchestrator console of the project: they talk to you directly and see your work. Team mail arrives in this conversation as `[genie mail]` blocks — between your steps, or on its own when you are idle. The server's orchestrator waits while this session holds the console.\n"
+    ));
+    Ok(ConsoleSpec { role_id: def.id.clone(), prompt, model, thinking })
+}
+
 /// The live session of an agent, or `None` when it should not run now (team
-/// stopped, member removed or in error, orchestrator in manual mode, a job).
+/// stopped, member removed or in error, orchestrator in manual mode or at a
+/// person's console, a job).
 pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>> {
     let project = project_of(app, key.project())?;
     match key {
         AgentKey::Orchestrator { project: slug } => {
-            if project.autonomy == "manual" {
+            if project.autonomy == "manual" || console_held(app, slug) {
                 return Ok(None);
             }
             let agents = app.agents();

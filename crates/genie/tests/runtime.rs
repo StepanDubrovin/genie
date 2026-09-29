@@ -125,6 +125,31 @@ async fn a_crashed_turn_gives_its_mail_back_and_is_retried() {
     assert!(retried >= 1, "the same agent ran again and succeeded");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_servers_orchestrator_waits_while_a_person_holds_the_console() {
+    let l = live(&[]).await;
+    let ttl = chrono::Duration::seconds(120);
+    let (_, token) = l.app.with_server(|db| db.take_console("shop", "anna", None, ttl, false)).unwrap();
+    l.app
+        .with_tracker("shop", |t| {
+            t.create(
+                &Actor::new("anna", Role::Human),
+                CreateInput { title: "CSV export".into(), status: Some(Status::Inbox), ..Default::default() },
+            )
+        })
+        .unwrap();
+    l.app.wake_runtime.notify_one();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let turns = l.app.with_server(|db| db.turns("shop", Some("orchestrator"), 10)).unwrap();
+    assert!(turns.is_empty(), "no server orchestrator while the console is held: {turns:?}");
+    assert_eq!(status(&l.app), Status::Inbox);
+
+    // Given back: the server's orchestrator takes the mail that came meanwhile.
+    l.app.with_server(|db| db.release_console("shop", Some(&token))).unwrap();
+    l.app.wake_runtime.notify_one();
+    wait_for(&l.app, "the orchestrator refines the task", Duration::from_secs(60), |app| status(app) != Status::Inbox).await;
+}
+
 #[test]
 fn recovery_stops_only_verified_stray_agent_processes() {
     let dir = tempfile::tempdir().unwrap();

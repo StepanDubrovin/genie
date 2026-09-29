@@ -14,6 +14,7 @@ pub mod knowledge;
 pub mod mcp_gateway;
 pub mod notify;
 pub mod ops;
+pub mod orchestrate;
 pub mod questions;
 pub mod runtime;
 pub mod sandbox;
