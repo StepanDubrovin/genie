@@ -25,6 +25,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/docs/tree", get(tree))
         .route("/docs/search", get(search))
         .route("/docs/page", get(read).post(write))
+        .route("/docs/note", post(note))
         .route("/docs/proposals", get(proposals))
         .route("/docs/proposals/{id}", get(proposal))
         .route("/docs/proposals/{id}/approve", post(approve))
@@ -190,6 +191,65 @@ async fn write(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<WriteBody>) 
             }
         })??;
     Ok((result.0, Json(result.1)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteBody {
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    related: Vec<String>,
+    task: Option<String>,
+}
+
+/// A draft note in the inbox of the caller's project space (the vault's `inbox/`
+/// when the project has none); never replaces a page.
+async fn note(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<NoteBody>) -> ApiResult<impl IntoResponse> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    access.can(Capability::DocsWrite)?;
+    let title = b.title.trim().to_string();
+    if title.is_empty() {
+        return Err(ApiError::bad("a note needs a title"));
+    }
+    let (name, login, kind) = author_of(&access);
+    let project = access.project.clone();
+    let task = b.task.filter(|t| !t.is_empty());
+    let content = knowledge::note_page(&title, &b.body, &b.tags, &b.related);
+    let (status, v) = app
+        .blocking(move |app| {
+            let path = app.with_vault(|v| {
+                let mut spaces = v.spaces_of(&project);
+                spaces.sort();
+                let dir = spaces.first().map(|s| format!("{s}/inbox")).unwrap_or_else(|| "inbox".into());
+                let base = format!("{dir}/{}-{}", chrono::Utc::now().format("%Y-%m-%d"), knowledge::slug(&title));
+                let mut path = format!("{base}.md");
+                let mut n = 2;
+                while v.current_hash(&path)?.is_some() {
+                    path = format!("{base}-{n}.md");
+                    n += 1;
+                }
+                Ok(path)
+            })?;
+            let author = Author { name: &name, login: &login, kind };
+            let out = knowledge::write_doc(app, &path, &content, author, Some(""), &format!("note: {title}"), task.as_deref())?;
+            Ok(match out {
+                DocWrite::Saved { .. } => (
+                    StatusCode::CREATED,
+                    json!({ "path": path, "title": title, "type": "note", "status": "draft", "tags": b.tags, "related": b.related }),
+                ),
+                DocWrite::Proposed(p) => (
+                    StatusCode::ACCEPTED,
+                    json!({ "path": path, "title": title, "proposal": p.id, "proposalUrl": format!("{}/docs?proposal={}", app.cfg.public_url(), p.id) }),
+                ),
+            })
+        })
+        .await?;
+    Ok((status, Json(v)))
 }
 
 #[derive(Deserialize, Default)]

@@ -26,6 +26,8 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/session/project", post(select_project))
         .route("/users", get(list_users).post(create_user))
         .route("/users/{id}", patch(update_user))
+        .route("/users/{id}/password", post(set_user_password))
+        .route("/users/{id}/tokens", post(create_user_token))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{slug}", patch(update_project))
         .route("/projects/{slug}/members", get(list_members))
@@ -235,6 +237,49 @@ async fn update_user(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>,
     Ok(Json(json!(user)))
 }
 
+#[derive(Deserialize)]
+struct NewPassword {
+    password: String,
+}
+
+/// A server admin sets someone's password; their sessions close.
+async fn set_user_password(
+    State(app): State<Arc<App>>,
+    ctx: Ctx,
+    Path(id): Path<i64>,
+    Json(b): Json<NewPassword>,
+) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    app.blocking(move |app| {
+        app.with_server(|db| {
+            db.user(id)?;
+            db.set_password(id, &b.password)
+        })
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// A personal token for the command line and MCP: for oneself, or — by the
+/// operator of the server's machine — for anyone.
+async fn create_user_token(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>, Json(b): Json<TokenBody>) -> ApiResult<Json<Value>> {
+    let operator = matches!(&ctx.who, Who::User { user, local: true } if user.is_admin);
+    if ctx.user()?.id != id && !operator {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "a token is issued to its owner, or by the operator on the server's machine"));
+    }
+    let token = app
+        .blocking(move |app| {
+            app.with_server(|db| {
+                if db.user(id)?.disabled {
+                    return Err(genie_core::GenieError::invalid("the user is disabled"));
+                }
+                db.create_user_token(id, if b.label.is_empty() { "cli" } else { &b.label })
+            })
+        })
+        .await?;
+    Ok(Json(json!({ "token": token })))
+}
+
 async fn list_projects(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
     let user = ctx.user()?.clone();
     let out = app
@@ -262,6 +307,8 @@ struct NewProject {
     #[serde(default)]
     name: String,
     repo: Option<String>,
+    /// An existing tracker directory to register in place.
+    tracker: Option<String>,
     prefix: Option<String>,
 }
 
@@ -271,7 +318,11 @@ async fn create_project(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<New
         .blocking(move |app| {
             let repo = b.repo.filter(|r| !r.trim().is_empty());
             // A repository that already has a genie tracker keeps its tasks.
-            let tracker = repo.as_ref().map(|r| std::path::Path::new(r).join(".genie")).filter(|d| d.join("genie.db").exists());
+            let tracker = b
+                .tracker
+                .filter(|t| !t.trim().is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(|| repo.as_ref().map(|r| std::path::Path::new(r).join(".genie")).filter(|d| d.join("genie.db").exists()));
             app.create_project(&b.slug, &b.name, repo.as_deref(), tracker.as_ref().and_then(|t| t.to_str()), b.prefix.as_deref())
         })
         .await?;

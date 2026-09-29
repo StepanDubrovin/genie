@@ -77,6 +77,37 @@ pub fn write_doc(
     }
 }
 
+/// A file name from a title: its letters and digits, a dash between words, at most 60 characters.
+pub fn slug(title: &str) -> String {
+    let mut out = String::new();
+    for c in title.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out: String = out.chars().take(60).collect();
+    let out = out.trim_matches('-');
+    if out.is_empty() { "note".into() } else { out.to_string() }
+}
+
+/// A draft note (`genie docs note`): frontmatter, then the body.
+pub fn note_page(title: &str, body: &str, tags: &[String], related: &[String]) -> String {
+    let quoted = |s: &str| serde_json::to_string(s).unwrap_or_default();
+    let list = |items: &[String]| format!("[{}]", items.iter().map(|s| quoted(s)).collect::<Vec<_>>().join(", "));
+    let mut lines = vec!["---".to_string(), format!("title: {}", quoted(title)), "type: note".into(), "status: draft".into()];
+    if !tags.is_empty() {
+        lines.push(format!("tags: {}", list(tags)));
+    }
+    if !related.is_empty() {
+        lines.push(format!("related: {}", list(related)));
+    }
+    lines.push("---".into());
+    let body = body.trim();
+    format!("{}\n\n{}", lines.join("\n"), if body.is_empty() { String::new() } else { format!("{body}\n") })
+}
+
 /// Apply or reject a proposal. Applying writes as the proposal's author.
 pub fn decide(app: &App, id: i64, approve: bool, by: &str, note: Option<&str>, force: bool) -> AppResult<Proposal> {
     let p = app.with_server(|db| db.proposal(id))?;
@@ -384,7 +415,18 @@ pub fn docs_impact(app: &App, project: &str, id: &str) -> AppResult<DocsImpact> 
 
 #[cfg(test)]
 mod tests {
-    use super::glob_matches;
+    use super::{glob_matches, note_page, slug};
+
+    #[test]
+    fn notes_get_readable_file_names_and_a_draft_frontmatter() {
+        assert_eq!(slug("Как считать возвраты?"), "как-считать-возвраты");
+        assert_eq!(slug("  --  "), "note");
+        assert_eq!(slug(&"a".repeat(80)).len(), 60);
+        assert_eq!(
+            note_page("Returns \"v2\"", "  body\n", &["billing".into()], &[]),
+            "---\ntitle: \"Returns \\\"v2\\\"\"\ntype: note\nstatus: draft\ntags: [\"billing\"]\n---\n\nbody\n"
+        );
+    }
 
     #[test]
     fn globs_follow_the_docs_paths_contract() {

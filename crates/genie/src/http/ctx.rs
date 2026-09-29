@@ -46,6 +46,8 @@ pub struct Ctx {
     pub who: Who,
     /// Project named by the `X-Genie-Project` header, `?project=` or the project cookie.
     pub project_hint: Option<String>,
+    /// The hint is the only project to act in (the command line and MCP ask for this).
+    pub project_strict: bool,
     /// Raw session secret, for logout.
     pub session: Option<String>,
 }
@@ -126,6 +128,13 @@ impl FromRequestParts<Arc<App>> for Ctx {
             .or_else(|| query_param(parts, "project"))
             .or_else(|| cookie(parts, PROJECT_COOKIE))
             .filter(|p| !p.is_empty());
+        let project_strict = project_hint.is_some() && parts.headers.contains_key(crate::ops::api::STRICT);
+        // The operator on the server's machine (the command line without a token).
+        if parts.extensions.get::<crate::ops::api::OperatorAccess>().is_some() {
+            let login = std::env::var("USER").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "operator".into());
+            let user = User { id: 0, name: login.clone(), login, email: None, is_admin: true, disabled: false, created: String::new() };
+            return Ok(Ctx { who: Who::User { user, local: true }, project_hint, project_strict, session: None });
+        }
         let (bearer2, session2) = (bearer.clone(), session.clone());
         let who = app
             .blocking(move |app| {
@@ -164,7 +173,7 @@ impl FromRequestParts<Arc<App>> for Ctx {
         if bearer.is_some() && matches!(who, Who::Anonymous) {
             return Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid or expired token"));
         }
-        Ok(Ctx { who, project_hint, session })
+        Ok(Ctx { who, project_hint, project_strict, session })
     }
 }
 
@@ -184,7 +193,7 @@ impl Ctx {
 
     /// Resolve the project and the caller's rights in it. `explicit` wins over the hint.
     pub async fn access(&self, app: &Arc<App>, explicit: Option<&str>) -> Result<Access, ApiError> {
-        let strict = explicit.is_some();
+        let strict = explicit.is_some() || self.project_strict;
         let wanted = explicit.map(str::to_string).or_else(|| self.project_hint.clone());
         match &self.who {
             Who::Anonymous => Err(ApiError::unauthorized()),
@@ -240,7 +249,7 @@ impl Ctx {
                     })
                 })
                 .await?
-                .ok_or_else(|| match (strict, explicit) {
+                .ok_or_else(|| match (strict, explicit.map(str::to_string).or_else(|| self.project_hint.clone())) {
                     (true, Some(p)) => ApiError::new(StatusCode::FORBIDDEN, format!("no access to project {p}")),
                     _ => ApiError::new(StatusCode::NOT_FOUND, "no accessible project; create one or ask for an invitation"),
                 })
