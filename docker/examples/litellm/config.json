@@ -1,0 +1,11 @@
+{
+  "roleModels": {
+    "orchestrator": { "model": "litellm/gpt-6-sol", "thinking": "high" },
+    "analyst": { "model": "litellm/gpt-6-sol", "thinking": "high" },
+    "researcher": { "model": "litellm/gpt-6-sol", "thinking": "high" },
+    "reviewer": { "model": "litellm/gpt-6-sol", "thinking": "high" },
+    "executor": { "model": "litellm/gpt-6-luna", "thinking": "high" },
+    "tester": { "model": "litellm/gpt-6-luna", "thinking": "medium" },
+    "documenter": { "model": "litellm/gpt-6-luna", "thinking": "low" }
+  }
+}

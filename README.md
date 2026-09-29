@@ -16,6 +16,15 @@ npm install -g @earendil-works/pi-coding-agent && pi          # pi и /login у 
 
 Откройте веб на этой же машине: сервер без проектов предложит создать первый, на странице «Проект и люди» — учётную запись администратора и ссылки-приглашения для коллег. `./target/release/genie doctor` скажет, чего ещё не хватает (модели ролей, песочница, каналы, сеть).
 
+**В Docker** (сервер одним образом: genie + веб + pi + git):
+
+```bash
+cp .env.example .env && docker compose up -d --build
+echo 'пароль' | docker compose exec -T genie genie user add admin --admin --password-stdin
+```
+
+Тома, репозитории, ключи моделей, git-доступ, прокси, готовый образ из GHCR и бэкапы — [docs/platform/docker.md](docs/platform/docker.md).
+
 ## Документация
 
 - [Запуск и эксплуатация](docs/platform/getting-started.md) — люди, агенты, песочница, роли и шаблоны, Telegram и почта, знания и Obsidian, резервные копии, systemd, `genie doctor`.

@@ -25,6 +25,7 @@ pub mod vault_sync;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use state::App;
 
@@ -37,15 +38,41 @@ pub fn default_data_dir() -> PathBuf {
     home.join(".local/share/genie")
 }
 
-/// Run the server until Ctrl-C.
+/// How long open requests get to finish after a stop signal.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// Run the server until Ctrl-C or SIGTERM.
 pub async fn serve(app: Arc<App>) -> Result<(), String> {
     let addr: SocketAddr = format!("{}:{}", app.cfg.bind, app.cfg.port).parse().map_err(|e| format!("bind address: {e}"))?;
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("{addr}: {e}"))?;
     println!("genie serve: http://{addr} (data {})", app.data.display());
-    serve_on(app, listener, async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-    .await
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = serve_on(app, listener, async {
+        let _ = stopped.await;
+    });
+    tokio::pin!(server);
+    tokio::select! {
+        done = &mut server => done,
+        () = stop_signal() => {
+            let _ = stop.send(());
+            // A graceful shutdown waits for every open connection, and a browser tab holds its live
+            // stream (SSE) open for hours: give requests a moment, then stop anyway.
+            tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await.unwrap_or(Ok(()))
+        }
+    }
+}
+
+/// Completes on Ctrl-C (SIGINT) or, where the platform has it, SIGTERM (`docker stop`, systemd).
+async fn stop_signal() {
+    #[cfg(unix)]
+    if let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        return;
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Serve on an already bound listener until `shutdown` completes.

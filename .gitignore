@@ -5,3 +5,5 @@ web/dist/
 docs/migration.md
 migration/
 /target/
+secrets/
+.env

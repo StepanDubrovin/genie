@@ -1,0 +1,80 @@
+# Genie server. Guide: docs/platform/docker.md
+#
+#   cp .env.example .env      # model keys, public URL, …
+#   docker compose up -d --build
+#   docker compose exec genie genie user add admin --admin --password-stdin   # BEFORE exposing the port
+#
+# Settings come from .env (optional file) — see .env.example for every variable.
+
+name: genie
+
+services:
+  genie:
+    image: ${GENIE_IMAGE:-genie:latest}
+    build:
+      context: .
+      args:
+        EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
+    restart: unless-stopped
+
+    # The port is published on the loopback interface only; put a TLS reverse proxy in front for
+    # anything else (GENIE_HOST_BIND=0.0.0.0 publishes it on all interfaces). The host port must equal
+    # the container port: the server compares the Host header with its own port.
+    ports:
+      - "${GENIE_HOST_BIND:-127.0.0.1}:${GENIE_PORT:-7420}:${GENIE_PORT:-7420}"
+
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GENIE_PORT: ${GENIE_PORT:-7420}
+      GENIE_UID: ${GENIE_UID:-1000}
+      GENIE_GID: ${GENIE_GID:-1000}
+      GENIE_PUBLIC_URL: ${GENIE_PUBLIC_URL:-}
+      GENIE_ALLOW_HOSTS: ${GENIE_ALLOW_HOSTS:-}
+      # off: agents run without the sandbox, on purpose (docker-compose.sandbox.yml switches it on)
+      GENIE_SANDBOX: ${GENIE_SANDBOX:-off}
+      TZ: ${TZ:-UTC}
+
+    # A LiteLLM (or any service) running on the Docker host is reachable as host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      - genie-data:/data
+      - genie-workspace:/workspace
+      # Existing repositories can be mounted instead of cloned into the volume; mount the PARENT
+      # directory (team worktrees are created next to a repository), owned by GENIE_UID:
+      # - ${HOME}/code:/workspace/code
+
+    # The server stops on SIGINT/SIGTERM within seconds (open web streams get 5 s); the rest is headroom.
+    stop_signal: SIGINT
+    stop_grace_period: 20s
+
+    # Agents run shell commands: keep the container itself small in privilege.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Only the start-up phase (root) uses these: it fixes the volumes' owner and switches to the service user.
+    # The server and every agent run as that user, without capabilities.
+    cap_add:
+      - CHOWN # take ownership of fresh volumes
+      - DAC_OVERRIDE # …and create/enter directories owned by another uid
+      - FOWNER
+      - SETUID # switch from root to the service user
+      - SETGID
+    pids_limit: ${GENIE_PIDS_LIMIT:-4096}
+    # Every live agent session is a Node process of a few hundred MB; size this for runtime.maxSessions
+    # (12 by default) or lower it: mem_limit: 8g
+    mem_limit: ${GENIE_MEM_LIMIT:-0}
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  genie-data:
+  genie-workspace:

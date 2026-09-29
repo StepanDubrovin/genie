@@ -13,6 +13,8 @@ verified: 2026-09-29
 
 Архитектура и решения — [[platform/vision]], [[platform/backend]]; автоматизации — [[platform/automations]]; знания — [[platform/knowledge-vault]]; как провести пилот с командой — [[platform/pilot]].
 
+Запуск в контейнере — [[platform/docker]].
+
 ## Что это
 
 Один процесс `genie serve` на машине команды:
