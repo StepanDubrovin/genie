@@ -24,21 +24,10 @@ export GENIE_WORKSPACE="${GENIE_WORKSPACE:-/workspace}"
 case "$GENIE_PORT" in '' | *[!0-9]*) die "GENIE_PORT must be a number, got '$GENIE_PORT'" ;; esac
 
 # --- secrets: NAME_FILE=/run/secrets/x  →  NAME=<contents of the file> ---------------------------------
-# Docker/Compose secrets are files; provider keys and tokens are read from environment variables. Done
-# first, as root, so files readable only by root work too. An explicitly set NAME wins over NAME_FILE.
-# Everything the server exports reaches the agents it starts (LITELLM_API_KEY_FILE → LITELLM_API_KEY).
-for var in $(compgen -e); do
-  case "$var" in
-    AWS_WEB_IDENTITY_TOKEN_FILE) continue ;; # a standard AWS variable that already means "a file"
-    [A-Z]*_API_KEY_FILE | [A-Z]*_TOKEN_FILE | [A-Z]*_PASSWORD_FILE | [A-Z]*_SECRET_FILE) ;;
-    *) continue ;;
-  esac
-  base="${var%_FILE}"
-  [ -z "${!base:-}" ] || continue
-  file="${!var}"
-  [ -f "$file" ] && [ -r "$file" ] || die "$var points to '$file', which is not a readable file"
-  export "$base=$(<"$file")"
-done
+# Done first, as root, so files readable only by root work too.
+# shellcheck source=docker/load-secrets.sh
+. /usr/local/lib/genie/load-secrets.sh
+load_secrets strict || exit 1
 
 # --- as root: users, ownership, privilege drop ----------------------------------------------------
 

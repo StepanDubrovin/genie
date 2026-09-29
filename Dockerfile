@@ -54,12 +54,13 @@ ARG EXTRA_APT_PACKAGES=""
 #   tini            PID 1 (after the privilege drop): reaps processes agents leave behind, forwards signals
 #   git, ssh        worktrees, commits, pushes; the vault is a git repository
 #   ripgrep         pi's search tool
+#   bubblewrap      the agent sandbox (needs docker-compose.sandbox.yml, see docs/platform/docker.md)
 #   procps          `kill`, used by the server to stop agent processes
 #   curl, jq        health check; everyday shell tooling for agents
 #   ca-certificates TLS to model providers, Telegram, SMTP, MCP servers
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git jq less openssh-client procps ripgrep tini tzdata ${EXTRA_APT_PACKAGES} \
+      bash bubblewrap ca-certificates curl git jq less openssh-client procps ripgrep tini tzdata ${EXTRA_APT_PACKAGES} \
  && rm -rf /var/lib/apt/lists/*
 
 # The service user. Its ids are remapped at start (GENIE_UID / GENIE_GID) to match mounted repositories.
@@ -79,7 +80,7 @@ RUN npm install -g --ignore-scripts --no-audit --no-fund "@earendil-works/pi-cod
 COPY docker/gitconfig /etc/gitconfig
 RUN printf 'Host *\n    StrictHostKeyChecking accept-new\n    BatchMode yes\n' > /etc/ssh/ssh_config.d/genie.conf
 
-COPY docker/configure.mjs /usr/local/lib/genie/configure.mjs
+COPY docker/configure.mjs docker/load-secrets.sh /usr/local/lib/genie/
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker/genie-cli.sh /usr/local/bin/genie
 COPY --from=server /out/genie /opt/genie/bin/genie

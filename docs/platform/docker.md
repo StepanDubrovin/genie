@@ -74,10 +74,11 @@ docker compose pull && docker compose up -d
 | `GENIE_ALLOW_HOSTS` | другие имена и адреса, по которым открывают UI (`192.168.1.20,genie.lan`) |
 | `GENIE_UID`, `GENIE_GID` | uid/gid сервера; ставьте владельца смонтированных репозиториев (`id -u`) |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, … | ключи провайдеров для pi |
+| `GENIE_SANDBOX` | `off` (по умолчанию в compose), `auto` или `bwrap`: песочница агентов, см. ниже |
 | `GITHUB_TOKEN` | HTTPS-доступ агентов к github.com |
 | `EXTRA_APT_PACKAGES` | пакеты, добавляемые в образ при сборке (компиляторы, python…) |
 
-Переменные `GENIE_BIND`, `GENIE_PUBLIC_URL` и `GENIE_ALLOW_HOSTS` при каждом старте записываются в `/data/config.json` (только эти ключи; `allowHosts` дополняется, ничего не удаляется). Остальное содержимое `config.json` — ваше: модели ролей, лимиты, Telegram, SMTP — см. [[platform/getting-started]]. Сервер читает настройки только из этого файла, поэтому править его удобно так:
+Переменные `GENIE_BIND`, `GENIE_PUBLIC_URL`, `GENIE_ALLOW_HOSTS` и `GENIE_SANDBOX` (пишется в `runtime.sandbox.mode`) при каждом старте записываются в `/data/config.json` (только эти ключи; `allowHosts` дополняется, ничего не удаляется). Остальное содержимое `config.json` — ваше: модели ролей, лимиты, Telegram, SMTP — см. [[platform/getting-started]]. Сервер читает настройки только из этого файла, поэтому править его удобно так:
 
 ```bash
 docker compose exec genie sh -c 'cat /data/config.json'
@@ -141,9 +142,30 @@ docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
 
 Для любой переменной вида `*_API_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET` работает суффикс `_FILE`: `GITHUB_TOKEN_FILE=/run/secrets/github` превращается в `GITHUB_TOKEN`, прочитанный из файла (пробельный хвост отбрасывается). Явно заданная переменная приоритетнее файла. Файл читается на старте от root, поэтому права `0400` не мешают. Так же передаются секреты MCP-серверов из `mcp.json` (`${env:JIRA_API_TOKEN}` → `JIRA_API_TOKEN_FILE`): сервер держит их у себя, а агентам не отдаёт, если подключение идёт через шлюз (см. [[platform/getting-started]]).
 
+После настройки запустите `docker compose exec genie genie doctor --web /opt/genie/web`: он сверяет модели ролей с тем, что доступно pi (`litellm/gpt-6-sol: available`), и сразу покажет, если в `roleModels` остались недоступные (`openai-codex/…`).
+
 Проверено сквозным тестом с поддельным LiteLLM на хосте: оркестратор стартует на `litellm/gpt-6-sol`, запрос уходит на `host.docker.internal` с `Authorization: Bearer <ключ из файла>`, ответ доходит до сессии.
 
 Локальную обёртку с Bitwarden Secrets Manager в образ переносить не нужно: `secret-tool` и keyring в контейнере нет. Секрет достаёт инфраструктура (Docker secret, оркестратор, `bws run -- docker compose up`), а контейнер получает готовое значение.
+
+## Песочница агентов (bubblewrap)
+
+Сервер запускает каждого агента в песочнице [bubblewrap](https://github.com/containers/bubblewrap): система для него только для чтения, писать можно в свой рабочий каталог, а каталога данных сервера (`/data`), других проектов и их worktree агент не видит (см. [[platform/getting-started]], «Песочница агентов»). Образ содержит `bubblewrap`, но внутри контейнера песочнице нужны пространства имён пользователя и свой `/proc`, а стандартный профиль Docker их запрещает. Проверено: работает только при `seccomp=unconfined` и `systempaths=unconfined` (плюс `apparmor=unconfined` на хостах с AppArmor); `cap_drop: ALL` и `no-new-privileges` ей не мешают.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up -d
+docker compose exec -u genie genie genie agents check     # sandbox: agents run in a bubblewrap sandbox
+```
+
+Это компромисс, и решать его вам. В compose по умолчанию `GENIE_SANDBOX=off`: отсутствие песочницы выбрано осознанно, `genie doctor` показывает предупреждение, а не ошибку. Оверлей ставит `GENIE_SANDBOX=bwrap`: если песочницу не удалось создать, агенты не запускаются, тихого отката нет (`GENIE_SANDBOX=auto` разрешает откат).
+
+| | Без оверлея (по умолчанию) | С `docker-compose.sandbox.yml` |
+|---|---|---|
+| Данные сервера для агентов | читаются (`/data`, токены каналов, другие проекты) | скрыты |
+| Защита хоста от кода в контейнере | стандартный seccomp и замаскированный `/proc` | seccomp выключен, `/proc` не замаскирован |
+| `genie doctor` | предупреждение «sandbox off» | «agents run in a bubblewrap sandbox» |
+
+Выбирайте оверлей, когда на сервере несколько проектов и людей и данные сервера ценнее, чем запас прочности контейнера (агенты выполняют команды, которые придумала модель). Если ядро хоста запрещает пространства имён пользователя, песочница не заработает и с оверлеем: агенты не запустятся, `genie doctor` объяснит причину (на Ubuntu 24.04 и новее см. `kernel.apparmor_restrict_unprivileged_userns`). Проверка готовности сервера в целом: `docker compose exec genie genie doctor --web /opt/genie/web` (без `-u`: обёртка сама понижает права и подставляет ключи из `*_FILE`).
 
 ## Репозитории проектов
 
@@ -231,7 +253,7 @@ docker compose up -d --build
 
 ## Что нужно знать о безопасности
 
-- Агенты выполняют произвольные shell-команды и работают под тем же пользователем, что и сервер: они **могут прочитать `/data`**, включая `server.db` и `config.json` (токен Telegram, пароль SMTP). Контейнер — граница между агентами и хостом, но не между агентами и сервером. Не храните в `/data` ничего, что нельзя доверить агентам; для GitHub используйте токен с минимальными правами.
+- Агенты выполняют произвольные shell-команды. **Без песочницы** (по умолчанию в контейнере) они работают под тем же пользователем, что и сервер, и могут прочитать `/data`: `server.db`, `config.json` (токен Telegram, пароль SMTP), vault и чужие проекты. Контейнер отделяет их от хоста, но не от сервера. Включите песочницу (следующий раздел) или не храните в `/data` ничего, что нельзя доверить агентам; для GitHub используйте токен с минимальными правами.
 - Ключи провайдеров в `.env` попадают в окружение агентов. Используйте ключи с лимитом расходов.
 - Контейнер запущен с `no-new-privileges`, `cap_drop: ALL` и пятью capabilities только для стартового этапа от root (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`): сервер и агенты работают без capabilities (`CapEff` = 0), плюс лимит процессов. Ограничьте память (`GENIE_MEM_LIMIT`): каждая живая сессия агента — процесс Node на сотни мегабайт (`runtime.maxSessions`, по умолчанию 12).
 - Не публикуйте порт на `0.0.0.0` без TLS-прокси и без созданного администратора.

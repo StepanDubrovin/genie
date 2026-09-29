@@ -6,6 +6,7 @@
 //   GENIE_BIND         bind address        (default 0.0.0.0 — a loopback bind is unreachable through published ports)
 //   GENIE_PUBLIC_URL   base URL of links in mail and Telegram; its host is also added to allowHosts
 //   GENIE_ALLOW_HOSTS  comma-separated Host header values accepted besides localhost:<port>
+//   GENIE_SANDBOX      runtime.sandbox.mode: auto | bwrap | off (see docker-compose.sandbox.yml)
 //
 // Everything else in config.json is left alone. The script also registers pi-mcp-adapter
 // (shipped in the image) in pi's settings so roles with MCP connections work; opt out with
@@ -73,6 +74,17 @@ if (publicUrl) {
   hosts.add(url.hostname);
 }
 if (hosts.size > 0) config.allowHosts = [...hosts];
+
+const sandbox = (env.GENIE_SANDBOX || "").trim();
+if (sandbox) {
+  if (!["auto", "bwrap", "off"].includes(sandbox)) {
+    log(`error: GENIE_SANDBOX must be auto, bwrap or off, got '${sandbox}'`);
+    process.exit(1);
+  }
+  const runtime = config.runtime && typeof config.runtime === "object" ? config.runtime : {};
+  const box = runtime.sandbox && typeof runtime.sandbox === "object" ? runtime.sandbox : {};
+  config.runtime = { ...runtime, sandbox: { ...box, mode: sandbox } };
+}
 
 if (JSON.stringify(config) !== before || fresh) {
   writeJson(configPath, config, 0o600);

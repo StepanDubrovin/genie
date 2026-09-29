@@ -32,6 +32,8 @@ services:
       GENIE_GID: ${GENIE_GID:-1000}
       GENIE_PUBLIC_URL: ${GENIE_PUBLIC_URL:-}
       GENIE_ALLOW_HOSTS: ${GENIE_ALLOW_HOSTS:-}
+      # off: agents run without the sandbox, on purpose (docker-compose.sandbox.yml switches it on)
+      GENIE_SANDBOX: ${GENIE_SANDBOX:-off}
       TZ: ${TZ:-UTC}
 
     # A LiteLLM (or any service) running on the Docker host is reachable as host.docker.internal.

@@ -8,6 +8,12 @@ set -euo pipefail
 
 real=/opt/genie/bin/genie
 
+# The server got its keys from NAME_FILE secrets at start; give the CLI the same environment
+# (`genie doctor` checks that the models of the roles are available to pi).
+# shellcheck source=docker/load-secrets.sh
+. /usr/local/lib/genie/load-secrets.sh
+load_secrets
+
 if [ "$(id -u)" = 0 ]; then
   user=genie
   home="$(getent passwd "$user" | cut -d: -f6)"

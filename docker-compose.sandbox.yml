@@ -1,0 +1,21 @@
+# Overlay: lets the agent sandbox (bubblewrap) work inside the container.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up -d
+#
+# With the sandbox every agent sees the system read-only and does NOT see /data (databases, config.json
+# with the Telegram and SMTP secrets, the vault) or other projects. bubblewrap needs user namespaces and a
+# fresh /proc, which Docker's default seccomp profile and masked /proc forbid, so this overlay switches
+# both off for the container. That is a real trade-off: it protects the server's data from the agents and
+# weakens the container's protection of the host from everything inside it. Without this overlay agents
+# run without the sandbox (genie says so in its log and in `genie doctor`). See docs/platform/docker.md.
+
+services:
+  genie:
+    environment:
+      # Agents do not start where the sandbox cannot be made: no silent fallback. Use auto to allow it.
+      GENIE_SANDBOX: ${GENIE_SANDBOX:-bwrap}
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+      # A host with AppArmor (Ubuntu) blocks the mounts bubblewrap makes under Docker's default profile.
+      - apparmor=unconfined

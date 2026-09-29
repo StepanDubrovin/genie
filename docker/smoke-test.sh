@@ -43,4 +43,25 @@ for _ in $(seq 1 20); do
 done
 [ "$(docker inspect -f '{{.State.Running}}' "$name")" = false ] || fail "did not stop within 20 s"
 [ "$(docker inspect -f '{{.State.ExitCode}}' "$name")" = 0 ] || fail "exit code $(docker inspect -f '{{.State.ExitCode}}' "$name") on SIGINT"
+
+# The agent sandbox (bubblewrap) needs seccomp and /proc unconfined (docker-compose.sandbox.yml). Whether
+# the host's kernel allows it varies, so this only fails the test when SMOKE_REQUIRE_SANDBOX=1.
+sandbox_name="$name-sandbox"
+trap 'docker rm -f -v "$name" "$sandbox_name" >/dev/null 2>&1 || true' EXIT
+docker run -d --name "$sandbox_name" \
+  --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETUID --cap-add SETGID \
+  --security-opt no-new-privileges:true --security-opt seccomp=unconfined --security-opt systempaths=unconfined \
+  --security-opt apparmor=unconfined "$image" >/dev/null
+for _ in $(seq 1 30); do
+  [ "$(docker inspect -f '{{.State.Health.Status}}' "$sandbox_name")" = healthy ] && break
+  sleep 2
+done
+if docker exec -u genie "$sandbox_name" genie agents check 2>&1 | grep -q 'agents run in a bubblewrap sandbox'; then
+  echo "sandbox: works with the docker-compose.sandbox.yml options"
+elif [ "${SMOKE_REQUIRE_SANDBOX:-0}" = 1 ]; then
+  fail "the agent sandbox does not work with the docker-compose.sandbox.yml options: $(docker exec -u genie "$sandbox_name" genie agents check 2>&1 | grep -i sandbox)"
+else
+  echo "sandbox: NOT working on this host (not required): $(docker exec -u genie "$sandbox_name" genie agents check 2>&1 | grep -i sandbox)"
+fi
+
 echo "smoke test passed: $image"
