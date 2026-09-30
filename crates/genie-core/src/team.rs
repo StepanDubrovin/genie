@@ -58,8 +58,8 @@ pub struct Member {
     pub instructions: Option<String>,
     pub status: String,
     pub status_at: String,
-    /// `active` | `stopped` | `error`
-    #[ts(type = r#""active" | "stopped" | "error""#)]
+    /// `active` | `paused` | `stopped` | `error`
+    #[ts(type = r#""active" | "paused" | "stopped" | "error""#)]
     pub state: String,
     /// `idle` | `working` | `error`
     #[ts(type = r#""idle" | "working" | "error""#)]
