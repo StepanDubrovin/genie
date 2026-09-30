@@ -132,7 +132,16 @@ impl FromRequestParts<Arc<App>> for Ctx {
         // The operator on the server's machine (the command line without a token).
         if parts.extensions.get::<crate::ops::api::OperatorAccess>().is_some() {
             let login = std::env::var("USER").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| "operator".into());
-            let user = User { id: 0, name: login.clone(), login, email: None, is_admin: true, disabled: false, created: String::new() };
+            let user = User {
+                id: 0,
+                name: login.clone(),
+                login,
+                email: None,
+                is_admin: true,
+                disabled: false,
+                created: String::new(),
+                avatar: None,
+            };
             return Ok(Ctx { who: Who::User { user, local: true }, project_hint, project_strict, session: None });
         }
         let (bearer2, session2) = (bearer.clone(), session.clone());
@@ -163,6 +172,7 @@ impl FromRequestParts<Arc<App>> for Ctx {
                             is_admin: true,
                             disabled: false,
                             created: String::new(),
+                            avatar: None,
                         };
                         return Ok(Who::User { user, local: true });
                     }

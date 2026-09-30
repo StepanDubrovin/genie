@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use genie_core::server_db::{ProjectRole, SESSION_DAYS};
 use serde::Deserialize;
@@ -22,13 +23,15 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/auth/logout", post(logout))
         .route("/auth/invite", post(accept_invite))
         .route("/auth/password", post(change_password))
-        .route("/auth/tokens", post(create_token))
+        .route("/auth/tokens", get(list_tokens).post(create_token))
+        .route("/auth/tokens/{id}", delete(revoke_token))
         .route("/me/litellm-key", get(litellm_key).put(set_litellm_key).delete(delete_litellm_key))
         .route("/session/project", post(select_project))
         .route("/users", get(list_users).post(create_user))
         .route("/users/{id}", patch(update_user))
         .route("/users/{id}/password", post(set_user_password))
         .route("/users/{id}/tokens", post(create_user_token))
+        .route("/users/{id}/avatar", get(avatar).put(set_avatar).delete(clear_avatar))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{slug}", patch(update_project))
         .route("/projects/{slug}/members", get(list_members))
@@ -174,6 +177,26 @@ async fn create_token(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<Token
     Ok(Json(json!({ "token": token })))
 }
 
+/// The caller's own live personal tokens (never their secrets).
+async fn list_tokens(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    let user = ctx.user()?.clone();
+    if user.id == 0 {
+        return Ok(Json(json!([])));
+    }
+    let tokens = app.blocking(move |app| app.with_server(|db| db.user_tokens(user.id))).await?;
+    Ok(Json(json!(tokens)))
+}
+
+/// Revoke one of the caller's personal tokens; the next request with it is refused.
+async fn revoke_token(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    let user = ctx.user()?.clone();
+    let done = app.blocking(move |app| app.with_server(|db| db.revoke_user_token(user.id, id))).await?;
+    if !done {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "no such token"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// The caller's LiteLLM key, as far as it may be shown: set or not, its last characters.
 async fn litellm_key(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
     let user = ctx.user()?.clone();
@@ -258,6 +281,7 @@ async fn create_user(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<NewUse
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UserPatch {
+    login: Option<String>,
     name: Option<String>,
     email: Option<Option<String>>,
     is_admin: Option<bool>,
@@ -270,11 +294,70 @@ async fn update_user(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>,
     if (me.id != id || admin_fields) && !me.is_admin {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "server admin rights required"));
     }
+    if id == 0 {
+        return Err(ApiError::bad("create a user first: genie user add <login> --admin"));
+    }
     let user = app
         .blocking(move |app| {
-            app.with_server(|db| db.update_user(id, b.name.as_deref(), b.email.as_ref().map(|e| e.as_deref()), b.is_admin, b.disabled))
+            let before = app.with_server(|db| db.user(id))?;
+            let user = app.with_server(|db| {
+                db.tx(|| {
+                    if let Some(login) = &b.login {
+                        db.rename_user(id, login)?;
+                    }
+                    db.update_user(id, b.name.as_deref(), b.email.as_ref().map(|e| e.as_deref()), b.is_admin, b.disabled)
+                })
+            })?;
+            if user.login != before.login {
+                // Tasks name the person responsible by login: they follow the new one.
+                for p in app.projects()? {
+                    app.with_tracker(&p.slug, |t| {
+                        t.conn().execute("UPDATE tasks SET assignee = ?1 WHERE assignee = ?2", [&user.login, &before.login])?;
+                        Ok(())
+                    })?;
+                }
+            }
+            Ok(user)
         })
         .await?;
+    Ok(Json(json!(user)))
+}
+
+/// Only the person themself, or a server admin, changes someone's photo.
+fn may_edit(ctx: &Ctx, id: i64) -> ApiResult<()> {
+    let me = ctx.user()?;
+    if id == 0 || me.id == 0 {
+        return Err(ApiError::bad("create a user first: genie user add <login> --admin"));
+    }
+    if me.id != id && !me.is_admin {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "server admin rights required"));
+    }
+    Ok(())
+}
+
+async fn avatar(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>) -> ApiResult<impl IntoResponse> {
+    ctx.user()?;
+    let found = app.blocking(move |app| app.with_server(|db| db.avatar(id))).await?;
+    let Some((bytes, kind)) = found else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "no photo"));
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(&kind).unwrap_or(HeaderValue::from_static("application/octet-stream")));
+    // The address carries the photo's version, so a changed photo is a new address.
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=31536000, immutable"));
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    Ok((headers, bytes))
+}
+
+async fn set_avatar(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>, body: Bytes) -> ApiResult<Json<Value>> {
+    may_edit(&ctx, id)?;
+    let user = app.blocking(move |app| app.with_server(|db| db.set_avatar(id, &body))).await?;
+    Ok(Json(json!(user)))
+}
+
+async fn clear_avatar(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>) -> ApiResult<Json<Value>> {
+    may_edit(&ctx, id)?;
+    let user = app.blocking(move |app| app.with_server(|db| db.clear_avatar(id))).await?;
     Ok(Json(json!(user)))
 }
 

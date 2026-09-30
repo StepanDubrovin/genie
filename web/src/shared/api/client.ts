@@ -20,6 +20,14 @@ export async function request<T>(method: string, url: string, body?: unknown): P
   return data;
 }
 
+/** Send a file as the request body (a photo): same headers and errors as `request`. */
+export async function upload<T>(method: string, url: string, body: Blob): Promise<T> {
+  const res = await fetch(url, { method, headers: { "content-type": body.type || "application/octet-stream", "x-genie": "1" }, body });
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+  if (!res.ok) throw new ApiError(data.error ?? `${res.status} ${res.statusText}`, res.status);
+  return data;
+}
+
 export const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: 1 } },
 });

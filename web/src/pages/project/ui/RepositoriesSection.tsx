@@ -25,24 +25,33 @@ export function RepositoriesSection({ admin }: { admin: boolean }) {
   const hosts = useGitHosts(admin);
   const list = repos.data ?? [];
   return (
-    <section>
-      <h2>
-        Репозитории <span className="n">{list.length || ""}</span>
-      </h2>
-      <p className="muted">
-        Код проекта. Агенты работают с ним через сервер: у них нет доступа к хостингу, а что и куда они могут отправить, решает политика репозитория. Хостинги (адрес и токен)
-        настраивает администратор сервера в <span className="mono">git.json</span>.
-      </p>
-      {list.length > 0 && (
-        <ul className="rp-list">
-          {list.map((r) => (
-            <Repo key={`${r.name}:${r.mount}:${r.access}:${JSON.stringify(r.policy)}`} repo={r} admin={admin} />
-          ))}
-        </ul>
+    <>
+      <section className="st-card" aria-label="Репозитории проекта">
+        <div className="st-card-body">
+          {list.length > 0 && (
+            <ul className="rp-list">
+              {list.map((r) => (
+                <Repo key={`${r.name}:${r.mount}:${r.access}:${JSON.stringify(r.policy)}`} repo={r} admin={admin} />
+              ))}
+            </ul>
+          )}
+          {!list.length && <p className="muted">{repos.isPending ? "Загрузка…" : "Репозиториев нет: результат задач — артефакты и страницы документации."}</p>}
+        </div>
+      </section>
+      {admin && (
+        <section className="st-card">
+          <div className="st-card-head">
+            <h3>Добавить репозиторий</h3>
+            <p>
+              Хостинги (адрес и токен) настраивает администратор сервера в <span className="mono">git.json</span>.
+            </p>
+          </div>
+          <div className="st-card-body">
+            <AddRepo hosts={hosts.data?.hosts.map((h) => h.id) ?? []} problems={hosts.data?.errors ?? []} loaded={!hosts.isPending} />
+          </div>
+        </section>
       )}
-      {!list.length && <p className="muted">{repos.isPending ? "Загрузка…" : "Репозиториев нет: результат задач — артефакты и страницы документации."}</p>}
-      {admin && <AddRepo hosts={hosts.data?.hosts.map((h) => h.id) ?? []} problems={hosts.data?.errors ?? []} loaded={!hosts.isPending} />}
-    </section>
+    </>
   );
 }
 
@@ -195,7 +204,6 @@ function AddRepo({ hosts, problems, loaded }: { hosts: string[]; problems: strin
   const [f, setF] = useState(empty);
   return (
     <>
-      <h3 className="pj-sub">Добавить репозиторий</h3>
       {loaded && hosts.length === 0 && (
         <p className="pj-bad">
           В <span className="mono">git.json</span> нет ни одного хостинга. Опишите его (адрес и токен) и обновите страницу — пример в docs/platform/git-repositories.md.

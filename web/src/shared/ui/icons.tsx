@@ -148,4 +148,15 @@ export const Icon = {
       <path d="M5 6l3-3 3 3M5 10l3 3 3-3" />
     </svg>
   ),
+  upload: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.6}>
+      <path d="M8 11V3M4.5 6.5L8 3l3.5 3.5M3 13h10" />
+    </svg>
+  ),
+  key: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <circle cx="5.5" cy="10.5" r="3" />
+      <path d="M7.6 8.4L13.5 2.5M11.5 4.5l1.5 1.5M10 6l1.2 1.2" />
+    </svg>
+  ),
 };

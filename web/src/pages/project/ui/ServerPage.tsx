@@ -356,7 +356,7 @@ function Accounts({ me }: { me?: string }) {
       <ul className="pj-people">
         {list.map((u) => (
           <li key={u.id} className={u.disabled ? "off" : undefined}>
-            <PersonAvatar login={u.login} name={u.name} size="md" prefix="" />
+            <PersonAvatar login={u.login} name={u.name} src={u.avatar} size="md" prefix="" />
             <span className="who">
               <b>
                 {personName(u)}

@@ -7,6 +7,9 @@ export interface SessionUser {
   name: string;
   email?: string;
   isAdmin: boolean;
+  created?: string;
+  /** Where the person's photo is served; none without a photo. */
+  avatar?: string;
 }
 
 export interface SessionProject {

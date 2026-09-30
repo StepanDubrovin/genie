@@ -40,6 +40,8 @@ export interface Person {
   isAdmin: boolean;
   disabled: boolean;
   created: string;
+  /** Where the person's photo is served; none without a photo. */
+  avatar?: string;
 }
 
 export interface Membership {

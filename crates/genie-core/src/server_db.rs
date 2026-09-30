@@ -34,7 +34,10 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT,
   is_admin INTEGER NOT NULL DEFAULT 0,
   disabled INTEGER NOT NULL DEFAULT 0,
-  created TEXT NOT NULL
+  created TEXT NOT NULL,
+  avatar BLOB,
+  avatar_type TEXT,
+  avatar_at TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
@@ -66,7 +69,8 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   label TEXT NOT NULL DEFAULT '',
   created TEXT NOT NULL,
   expires TEXT,
-  revoked INTEGER NOT NULL DEFAULT 0
+  revoked INTEGER NOT NULL DEFAULT 0,
+  last_used TEXT
 );
 CREATE TABLE IF NOT EXISTS projects (
   slug TEXT PRIMARY KEY,
@@ -314,6 +318,12 @@ const SERVER_COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
     ("api_tokens", "role_id", "ALTER TABLE api_tokens ADD COLUMN role_id TEXT"),
     // How a project's finished work gets integrated unless a task says otherwise.
     ("projects", "integration", "ALTER TABLE projects ADD COLUMN integration TEXT NOT NULL DEFAULT ''"),
+    // A person's photo: the image itself, its media type and when it changed (the cache key).
+    ("users", "avatar", "ALTER TABLE users ADD COLUMN avatar BLOB"),
+    ("users", "avatar_type", "ALTER TABLE users ADD COLUMN avatar_type TEXT"),
+    ("users", "avatar_at", "ALTER TABLE users ADD COLUMN avatar_at TEXT"),
+    // When a personal token was last presented, so its owner can tell which ones are stale.
+    ("api_tokens", "last_used", "ALTER TABLE api_tokens ADD COLUMN last_used TEXT"),
     // The person a job runs on behalf of (whose LiteLLM key it uses).
     ("agent_jobs", "initiator", "ALTER TABLE agent_jobs ADD COLUMN initiator TEXT"),
 ];
@@ -367,21 +377,54 @@ pub struct User {
     pub is_admin: bool,
     pub disabled: bool,
     pub created: String,
+    /// Where the person's photo is served, versioned by when it changed; none without a photo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
 }
 
 impl User {
     fn from_row(r: &Row<'_>) -> rusqlite::Result<User> {
+        let id: i64 = r.get("id")?;
+        let avatar_at: Option<String> = r.get("avatar_at")?;
         Ok(User {
-            id: r.get("id")?,
+            id,
             login: r.get("login")?,
             name: r.get("name")?,
             email: r.get("email")?,
             is_admin: r.get::<_, i64>("is_admin")? != 0,
             disabled: r.get::<_, i64>("disabled")? != 0,
             created: r.get("created")?,
+            avatar: avatar_at.map(|at| format!("/api/users/{id}/avatar?v={}", &hash_secret(&at)[..10])),
         })
     }
 }
+
+/// A personal token as its owner sees it: never the secret, only what tells tokens apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserToken {
+    pub id: i64,
+    pub label: String,
+    pub created: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<String>,
+}
+
+/// Photo formats a person may upload, by their leading bytes.
+pub fn avatar_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// The largest photo the server keeps; the web shrinks pictures to 256×256 before sending.
+pub const AVATAR_MAX_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -497,6 +540,15 @@ pub fn time_in(duration: ChronoDuration) -> String {
 }
 
 /// A project slug: lowercase latin letters, digits and dashes (it names directories).
+/// A login as stored: trimmed, lower case, latin letters, digits, dot, dash or underscore.
+pub fn valid_login(login: &str) -> Result<String> {
+    let login = login.trim().to_lowercase();
+    if login.is_empty() || !login.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+        return Err(GenieError::invalid("login must be latin letters, digits, dot, dash or underscore"));
+    }
+    Ok(login)
+}
+
 pub fn valid_slug(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !s.starts_with('-')
 }
@@ -547,10 +599,7 @@ impl ServerDb {
     }
 
     pub fn create_user(&self, login: &str, name: &str, email: Option<&str>, password: Option<&str>, is_admin: bool) -> Result<User> {
-        let login = login.trim().to_lowercase();
-        if login.is_empty() || !login.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-            return Err(GenieError::invalid("login must be latin letters, digits, dot, dash or underscore"));
-        }
+        let login = valid_login(login)?;
         if let Some(p) = password
             && p.chars().count() < 8
         {
@@ -587,6 +636,50 @@ impl ServerDb {
     pub fn users(&self) -> Result<Vec<User>> {
         let mut stmt = self.conn().prepare("SELECT * FROM users ORDER BY login")?;
         Ok(stmt.query_map([], User::from_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Give a person a new login. Sessions, tokens and memberships follow the account;
+    /// the caller moves what names the person by login elsewhere (tasks, consoles).
+    pub fn rename_user(&self, user: i64, login: &str) -> Result<User> {
+        let login = valid_login(login)?;
+        let current = self.user(user)?;
+        if current.login == login {
+            return Ok(current);
+        }
+        match self.conn().execute("UPDATE users SET login = ?1 WHERE id = ?2", params![login, user]) {
+            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
+                return Err(GenieError::invalid(format!("login {login} is taken")));
+            }
+            other => other?,
+        };
+        self.conn().execute("UPDATE consoles SET user = ?1 WHERE user = ?2", params![login, current.login])?;
+        self.user(user)
+    }
+
+    /// Set a person's photo (checked: a PNG, JPEG or WebP within [`AVATAR_MAX_BYTES`]).
+    pub fn set_avatar(&self, user: i64, bytes: &[u8]) -> Result<User> {
+        if bytes.len() > AVATAR_MAX_BYTES {
+            return Err(GenieError::invalid("the photo is larger than 512 KB"));
+        }
+        let kind = avatar_type(bytes).ok_or_else(|| GenieError::invalid("the photo must be PNG, JPEG or WebP"))?;
+        self.conn().execute(
+            "UPDATE users SET avatar = ?1, avatar_type = ?2, avatar_at = ?3 WHERE id = ?4",
+            params![bytes, kind, format!("{}#{}", now(), new_code()), user],
+        )?;
+        self.user(user)
+    }
+
+    pub fn clear_avatar(&self, user: i64) -> Result<User> {
+        self.conn().execute("UPDATE users SET avatar = NULL, avatar_type = NULL, avatar_at = NULL WHERE id = ?1", [user])?;
+        self.user(user)
+    }
+
+    /// A person's photo and its media type.
+    pub fn avatar(&self, user: i64) -> Result<Option<(Vec<u8>, String)>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT avatar, avatar_type FROM users WHERE id = ?1 AND avatar IS NOT NULL", [user], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
     }
 
     pub fn set_password(&self, user: i64, password: &str) -> Result<()> {
@@ -681,6 +774,24 @@ impl ServerDb {
         Ok(format!("gnu_{secret}"))
     }
 
+    /// A person's live personal tokens, newest first.
+    pub fn user_tokens(&self, user: i64) -> Result<Vec<UserToken>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, label, created, last_used FROM api_tokens WHERE kind = 'user' AND user = ?1 AND revoked = 0 ORDER BY created DESC, id DESC",
+        )?;
+        Ok(stmt
+            .query_map([user], |r| Ok(UserToken { id: r.get(0)?, label: r.get(1)?, created: r.get(2)?, last_used: r.get(3)? }))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Revoke one of a person's own tokens; false when they have no such live token.
+    pub fn revoke_user_token(&self, user: i64, id: i64) -> Result<bool> {
+        Ok(self.conn().execute(
+            "UPDATE api_tokens SET revoked = 1 WHERE id = ?1 AND kind = 'user' AND user = ?2 AND revoked = 0",
+            params![id, user],
+        )? > 0)
+    }
+
     /// Token for an agent run: bound to a project and a workflow role; expires.
     pub fn create_agent_token(
         &self,
@@ -717,22 +828,38 @@ impl ServerDb {
 
     pub fn resolve_token(&self, token: &str) -> Result<Option<Principal>> {
         let secret = secret_of(token);
-        type Row = (String, Option<i64>, Option<String>, Option<Role>, Option<String>, Option<String>, Option<i64>, Option<String>);
+        type Row = (
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<Role>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            i64,
+            Option<String>,
+        );
         let row: Option<Row> = self
             .conn()
             .query_row(
-                "SELECT kind, user, project, agent_role, team, member, job, role_id FROM api_tokens
+                "SELECT kind, user, project, agent_role, team, member, job, role_id, id, last_used FROM api_tokens
                  WHERE token_hash = ?1 AND revoked = 0 AND (expires IS NULL OR expires > ?2)",
                 params![hash_secret(secret), now()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)),
             )
             .optional()?;
         Ok(match row {
-            Some((kind, Some(user), ..)) if kind == "user" => {
+            Some((kind, Some(user), .., id, last_used)) if kind == "user" => {
                 let u = self.user(user)?;
+                // Note the use at most once a minute, so a busy CLI does not write on every call.
+                let t = now();
+                if last_used.as_deref().is_none_or(|l| l < time_in(ChronoDuration::minutes(-1)).as_str()) {
+                    self.conn().execute("UPDATE api_tokens SET last_used = ?1 WHERE id = ?2", params![t, id])?;
+                }
                 (!u.disabled).then_some(Principal::User { user: u })
             }
-            Some((kind, _, Some(project), Some(role), team, Some(name), job, role_id)) if kind == "agent" => {
+            Some((kind, _, Some(project), Some(role), team, Some(name), job, role_id, ..)) if kind == "agent" => {
                 Some(Principal::Agent { project, role, role_id, name, team, job })
             }
             _ => None,
@@ -1123,6 +1250,59 @@ mod tests {
         db.revoke_agent_tokens("shop", Some("G-1"), None).unwrap();
         assert!(db.resolve_token(&agent).unwrap().is_none());
         assert!(db.resolve_token("gnu_nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn personal_tokens_are_listed_and_revoked_by_their_owner() {
+        let (_d, db) = db();
+        let anna = db.create_user("anna", "Anna", None, Some("password1"), false).unwrap();
+        let boris = db.create_user("boris", "Boris", None, Some("password1"), false).unwrap();
+        let laptop = db.create_user_token(anna.id, "laptop").unwrap();
+        db.create_user_token(anna.id, "ci").unwrap();
+        let list = db.user_tokens(anna.id).unwrap();
+        assert_eq!(list.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(), ["ci", "laptop"]);
+        assert!(list.iter().all(|t| t.last_used.is_none()));
+        db.resolve_token(&laptop).unwrap().unwrap();
+        let used = db.user_tokens(anna.id).unwrap();
+        assert!(used.iter().find(|t| t.label == "laptop").unwrap().last_used.is_some(), "a presented token notes its use");
+        let id = used.iter().find(|t| t.label == "laptop").unwrap().id;
+        assert!(!db.revoke_user_token(boris.id, id).unwrap(), "nobody revokes someone else's token");
+        assert!(db.revoke_user_token(anna.id, id).unwrap());
+        assert!(db.resolve_token(&laptop).unwrap().is_none());
+        assert_eq!(db.user_tokens(anna.id).unwrap().len(), 1);
+        assert!(!db.revoke_user_token(anna.id, id).unwrap(), "a revoked token is gone");
+    }
+
+    #[test]
+    fn a_login_changes_and_the_account_follows() {
+        let (_d, db) = db();
+        let anna = db.create_user("anna", "Anna", None, Some("password1"), false).unwrap();
+        db.create_user("boris", "Boris", None, Some("password1"), false).unwrap();
+        let token = db.create_user_token(anna.id, "cli").unwrap();
+        assert!(db.rename_user(anna.id, "boris").is_err(), "a taken login");
+        assert!(db.rename_user(anna.id, "анна").is_err(), "latin only");
+        let renamed = db.rename_user(anna.id, " Anna.N ").unwrap();
+        assert_eq!(renamed.login, "anna.n");
+        assert!(db.authenticate("anna.n", "password1").unwrap().is_some());
+        assert!(db.authenticate("anna", "password1").unwrap().is_none());
+        assert!(matches!(db.resolve_token(&token).unwrap(), Some(Principal::User { user }) if user.login == "anna.n"));
+    }
+
+    #[test]
+    fn a_photo_is_an_image_and_its_address_changes_with_it() {
+        let (_d, db) = db();
+        let anna = db.create_user("anna", "Anna", None, Some("password1"), false).unwrap();
+        assert!(anna.avatar.is_none());
+        assert!(db.set_avatar(anna.id, b"<svg></svg>").is_err(), "no SVG or other formats");
+        assert!(db.set_avatar(anna.id, &[0xFF; AVATAR_MAX_BYTES + 1]).is_err(), "too large");
+        let png = b"\x89PNG\r\n\x1a\n rest of the picture";
+        let first = db.set_avatar(anna.id, png).unwrap().avatar.unwrap();
+        assert!(first.starts_with(&format!("/api/users/{}/avatar?v=", anna.id)));
+        assert_eq!(db.avatar(anna.id).unwrap(), Some((png.to_vec(), "image/png".into())));
+        let second = db.set_avatar(anna.id, &[0xFF, 0xD8, 0xFF, 0xE0]).unwrap().avatar.unwrap();
+        assert_ne!(first, second, "a new photo is a new address, so caches refresh");
+        assert!(db.clear_avatar(anna.id).unwrap().avatar.is_none());
+        assert!(db.avatar(anna.id).unwrap().is_none());
     }
 
     #[test]
