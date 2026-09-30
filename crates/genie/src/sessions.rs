@@ -198,6 +198,8 @@ pub struct Session {
     pub name: String,
     pub team: Option<String>,
     pub task: Option<String>,
+    /// The person it works for: its `LITELLM_API_KEY` is theirs ([`crate::llm_key`]).
+    pub initiator: Option<String>,
     token: String,
     stdin: Mutex<Option<mpsc::UnboundedSender<String>>>,
     replies: Mutex<HashMap<String, oneshot::Sender<Value>>>,
@@ -337,6 +339,16 @@ pub async fn deliver(app: &Arc<App>, key: &AgentKey) {
     if let Some(s) = app.sessions.get(key) {
         let (state, failures) = s.with_live(|l| (l.state.clone(), l.failures));
         if state == "idle" && failures < app.cfg.runtime.max_attempts.max(1) {
+            // The orchestrator answers whoever wrote: another person's mail restarts
+            // it (the same conversation) with that person's key.
+            if let AgentKey::Orchestrator { project } = key {
+                let slug = project.clone();
+                let now = app.blocking(move |app| Ok(crate::llm_key::orchestrator_initiator(app, &slug))).await.ok().flatten();
+                if now.is_some() && now != s.initiator {
+                    s.stop("the mail is from another person");
+                    return;
+                }
+            }
             s.nudge();
         }
         return;
@@ -374,6 +386,13 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
     let files = spec.kit.write(app, &dir, &spec.role_id).map_err(|e| AppError::Internal(e.to_string()))?;
     let sessions = app.data.join("sessions").join(key.project());
     tokio::fs::create_dir_all(&sessions).await.map_err(|e| AppError::Internal(e.to_string()))?;
+    let (slug, label, initiator, model) = (key.project().to_string(), key.label(), spec.initiator.clone(), spec.model.clone());
+    let llm = app
+        .blocking(move |app| {
+            crate::llm_key::resolve(app, &slug, &label, initiator.as_deref(), model.as_deref())
+                .map_err(|e| genie_core::GenieError::invalid(e).into())
+        })
+        .await?;
     let (slug, role, role_id, name, team) =
         (key.project().to_string(), spec.role, spec.role_id.clone(), spec.name.clone(), spec.team.clone());
     let token = app
@@ -405,6 +424,7 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
             return Err(AppError::Internal(e));
         }
     };
+    llm.apply(&mut cmd);
     runtime::kit_env(&mut cmd, &files, &argv);
     cmd.env("GENIE_SESSION", "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = match cmd.spawn() {
@@ -426,6 +446,7 @@ async fn start(app: &Arc<App>, key: &AgentKey) -> AppResult<Option<Arc<Session>>
         name: spec.name.clone(),
         team: spec.team.clone(),
         task: spec.task.clone(),
+        initiator: spec.initiator.clone(),
         token,
         stdin: Mutex::new(Some(tx)),
         replies: Mutex::new(HashMap::new()),
@@ -894,6 +915,16 @@ pub fn reset(app: &App, key: &AgentKey) {
     if let Some(s) = app.sessions.get(key) {
         s.stop("restart");
     }
+}
+
+/// Agents waiting out a backoff may try again at once (someone set their LiteLLM key).
+pub fn retry_now(app: &App) {
+    let now = Instant::now();
+    for b in app.sessions.backoff.lock().unwrap_or_else(|e| e.into_inner()).values_mut() {
+        b.1 = now;
+    }
+    app.sched.retry_now();
+    app.wake_runtime.notify_one();
 }
 
 /// Whether a live session holds `key` right now.

@@ -262,6 +262,9 @@ pub struct TeamSpec {
     /// template shows on the team, which keeps working by its snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_hash: Option<String>,
+    /// The person the team works on behalf of (a login): whose LiteLLM key its agents use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator: Option<String>,
 }
 
 /// What a team takes from a template, as a hash (`TeamSpec::template_hash`).
@@ -394,6 +397,7 @@ impl TeamSpec {
             members,
             charter: None,
             template_hash: None,
+            initiator: None,
         }
     }
 }

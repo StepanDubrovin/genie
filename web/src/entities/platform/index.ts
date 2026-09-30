@@ -94,6 +94,16 @@ export const useProposal = (id?: number) =>
 export const useChannels = () =>
   useQuery({ queryKey: ["channels"], queryFn: () => request<{ links: { channel: string; address: string }[]; telegram: boolean; email: boolean }>("GET", "/api/me/channels") });
 
+/** The person's LiteLLM key as the server shows it: never the value itself. */
+export interface LitellmKey {
+  hint: string;
+  updated: string;
+  unreadable?: boolean;
+}
+
+export const useLitellmKey = () =>
+  useQuery({ queryKey: ["litellm-key"], queryFn: () => request<{ key: LitellmKey | null }>("GET", "/api/me/litellm-key") });
+
 export const RUN_STATUS: Record<string, string> = {
   queued: "в очереди",
   running: "выполняется",

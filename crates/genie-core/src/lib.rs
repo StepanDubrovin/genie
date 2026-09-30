@@ -11,6 +11,7 @@ pub mod events;
 pub mod inbox;
 pub mod model;
 pub mod repos;
+pub mod secrets;
 pub mod server_db;
 pub mod team;
 pub mod tracker;

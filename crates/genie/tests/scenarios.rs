@@ -120,6 +120,8 @@ async fn new_task_triage_asks_the_author_in_telegram() {
             let pm = db.create_user("pm", "Продакт", None, Some("password-1"), false)?;
             db.set_membership("shop", pm.id, ProjectRole::Member)?;
             db.link_channel(pm.id, "telegram", "4242")?;
+            // The triage agent works for the PM and runs with their LiteLLM key.
+            db.set_user_secret(pm.id, genie_core::secrets::LITELLM, "sk-pm-0123456789")?;
             Ok(pm)
         })
         .unwrap();

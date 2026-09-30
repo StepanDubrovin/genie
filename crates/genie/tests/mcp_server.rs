@@ -159,6 +159,7 @@ async fn an_agent_sees_what_its_class_and_role_may_do() {
                 inputs: json!({}),
                 output_schema: None,
                 workspace: "none".into(),
+                initiator: None,
             })
         })
         .unwrap();
@@ -234,6 +235,7 @@ async fn every_operation_is_a_command_and_an_action_of_a_tool() {
                 inputs: json!({}),
                 output_schema: None,
                 workspace: "none".into(),
+                initiator: None,
             })
         })
         .unwrap();
