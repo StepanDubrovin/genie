@@ -141,7 +141,7 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
           <span className="grow">Уведомления</span>
           {unread > 0 && <span className="unread-dot" role="img" aria-label={`непрочитанных: ${unread}`} />}
         </NavLink>
-        <NavLink to="/project" className={({ isActive }) => `nav-item${isActive ? " on" : ""}`}>
+        <NavLink to="/project" className={({ isActive }) => `nav-item${isActive || pathname.startsWith("/project/") ? " on" : ""}`}>
           <Icon.folder size={15} />
           <span className="grow">Проект и люди</span>
         </NavLink>
@@ -173,9 +173,15 @@ export function Sidebar({ onNew, online }: { onNew: () => void; online: boolean 
       )}
 
       <div className="side-foot">
-        <span className="me" aria-hidden="true">
-          {initials(me)}
-        </span>
+        {session?.mode === "users" && session.user.avatar ? (
+          <span className="me photo" aria-hidden="true">
+            <img src={session.user.avatar} alt="" />
+          </span>
+        ) : (
+          <span className="me" aria-hidden="true">
+            {initials(me)}
+          </span>
+        )}
         <span className="who">
           <span className="nm">{me}</span>
           <span className={`live${online ? "" : " off"}`} title={meta?.tailnet ?? location.host}>

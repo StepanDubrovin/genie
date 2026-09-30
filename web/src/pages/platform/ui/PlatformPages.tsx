@@ -1,18 +1,16 @@
 // Pages for the platform features of the server: answering questions (public
-// link), notifications, profile (Telegram, password, CLI token), automations
-// with runs and playbooks, and the review of knowledge proposals.
+// link), notifications, automations with runs and playbooks, and the review of
+// knowledge proposals.
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { useAgentConfig } from "@/entities/agent-config";
-import { useSession } from "@/entities/session";
 import {
   type Automation,
   type Notification,
   RUN_STATUS,
   useAutomations,
-  useChannels,
   useNotifications,
   usePlaybooks,
   useProposal,
@@ -208,126 +206,6 @@ function dayName(iso: string): string {
   if (diff <= 0) return "Сегодня";
   if (diff === 1) return "Вчера";
   return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
-}
-
-// ------------------------------------------------------------------ profile
-
-export function ProfilePage() {
-  const session = useSession().data;
-  const channels = useChannels().data;
-  const act = useAction();
-  const [code, setCode] = useState<string>();
-  const [token, setToken] = useState<string>();
-  const [pw, setPw] = useState({ current: "", password: "" });
-  const telegram = channels?.links.find((l) => l.channel === "telegram");
-  const local = session?.mode === "local";
-  return (
-    <main className="main">
-      <header className="topbar">
-        <h1>Профиль</h1>
-      </header>
-      <div className="scroll settings">
-        <section>
-          <div className="me-line">
-            <span className="me" aria-hidden="true">
-              {(session?.user.name || session?.user.login || "?").slice(0, 2).toUpperCase()}
-            </span>
-            <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              <h2>{session?.user.name}</h2>
-              <span className="muted">
-                {session?.user.login}
-                {session?.user.isAdmin ? " · администратор" : ""}
-                {session?.user.email ? ` · ${session.user.email}` : ""}
-              </span>
-            </span>
-          </div>
-          {local && <p className="muted">Сервер работает без пользователей (локальный режим). Создайте учётку: genie user add &lt;login&gt; --admin --password-stdin</p>}
-        </section>
-        {!local && (
-          <>
-            <section>
-              <h2>Telegram</h2>
-              {!channels?.telegram ? (
-                <p className="muted">Telegram не настроен на сервере (telegram.token в config.json).</p>
-              ) : telegram ? (
-                <p>
-                  Чат привязан.{" "}
-                  <button type="button" className="btn ghost" onClick={() => void act(() => request("DELETE", "/api/me/channels/telegram"), "Telegram отвязан")}>
-                    Отвязать
-                  </button>
-                </p>
-              ) : (
-                <>
-                  <p className="muted">Уведомления и вопросы от агентов будут приходить в Telegram, отвечать можно прямо там.</p>
-                  <button
-                    type="button"
-                    className="btn primary"
-                    onClick={() =>
-                      void act(async () => {
-                        const r = await request<{ code: string; instructions: string }>("POST", "/api/me/channels/telegram/code");
-                        setCode(r.instructions);
-                      })
-                    }
-                  >
-                    Привязать Telegram
-                  </button>
-                  {code && <p className="secret">{code}</p>}
-                </>
-              )}
-            </section>
-            <section>
-              <h2>Пароль</h2>
-              <form
-                className="auth-form narrow"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void act(() => request("POST", "/api/auth/password", pw), "Пароль изменён — войдите снова");
-                }}
-              >
-                <label className="field">
-                  Текущий пароль
-                  <input type="password" value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })} />
-                </label>
-                <label className="field">
-                  Новый пароль
-                  <input type="password" minLength={8} value={pw.password} onChange={(e) => setPw({ ...pw, password: e.target.value })} />
-                </label>
-                <button className="btn">Сменить пароль</button>
-              </form>
-            </section>
-            <section>
-              <h2>Токен для CLI и MCP</h2>
-              <p className="muted">
-                Командная строка <code>genie</code> и скрипты: переменные <code>GENIE_URL</code> и <code>GENIE_TOKEN</code>. Свой агент (Claude Code, pi,
-                Codex…): MCP-сервер <code>{window.location.origin}/mcp</code> с заголовком <code>Authorization: Bearer &lt;токен&gt;</code>.
-              </p>
-              <button
-                type="button"
-                className="btn"
-                onClick={() =>
-                  void act(async () => {
-                    const r = await request<{ token: string }>("POST", "/api/auth/tokens", { label: "web" });
-                    setToken(r.token);
-                  })
-                }
-              >
-                Выпустить токен
-              </button>
-              {token && (
-                <>
-                  <p className="secret">{token}</p>
-                  <p className="muted">Например, для Claude Code:</p>
-                  <p className="secret">
-                    claude mcp add --transport http genie {window.location.origin}/mcp --header "Authorization: Bearer {token}"
-                  </p>
-                </>
-              )}
-            </section>
-          </>
-        )}
-      </div>
-    </main>
-  );
 }
 
 // ------------------------------------------------------------------ automations

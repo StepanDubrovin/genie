@@ -549,3 +549,76 @@ async fn a_repository_tracker_from_the_pi_extension_joins_with_its_tasks() {
     let (s, next, _) = call(r, "POST", "/api/tasks").header("x-genie-project", "shop").json(json!({ "title": "Next" })).send().await;
     assert_eq!((s, next["id"].as_str()), (StatusCode::CREATED, Some("TS-2")), "{next}");
 }
+
+#[tokio::test]
+async fn people_rename_themselves_set_a_photo_and_manage_their_tokens() {
+    let h = Harness::new();
+    h.project("shop");
+    let (anna, boris) = h
+        .app
+        .with_server(|db| {
+            let anna = db.create_user("anna", "Анна", None, Some("password-1"), false)?;
+            let boris = db.create_user("boris", "Борис", None, Some("password-2"), false)?;
+            db.set_membership("shop", anna.id, ProjectRole::Member)?;
+            db.set_membership("shop", boris.id, ProjectRole::Member)?;
+            Ok((anna.id, boris.id))
+        })
+        .unwrap();
+    let r = &h.remote;
+    let (_, _, cookies) = call(r, "POST", "/api/auth/login").json(json!({ "login": "anna", "password": "password-1" })).send().await;
+    let session = cookies[0].clone();
+    let (_, t, _) = call(r, "POST", "/api/tasks").cookie(&session).json(json!({ "title": "Экспорт", "assignee": "anna" })).send().await;
+    let task = format!("/api/tasks/{}", t["id"].as_str().unwrap());
+    call(r, "PATCH", &task).cookie(&session).json(json!({ "assignee": "anna" })).send().await;
+
+    // A new login and name: the session goes on, tasks follow the new login.
+    let (s, u, _) = call(r, "PATCH", &format!("/api/users/{anna}")).cookie(&session).json(json!({ "login": "boris" })).send().await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "taken: {u}");
+    let (s, u, _) =
+        call(r, "PATCH", &format!("/api/users/{anna}")).cookie(&session).json(json!({ "login": "anna.n", "name": "Анна Н." })).send().await;
+    assert_eq!(s, StatusCode::OK, "{u}");
+    assert_eq!((u["login"].as_str(), u["name"].as_str()), (Some("anna.n"), Some("Анна Н.")));
+    let (_, me, _) = call(r, "GET", "/api/auth/me").cookie(&session).send().await;
+    assert_eq!(me["user"]["login"], "anna.n");
+    let (_, t, _) = call(r, "GET", &task).cookie(&session).send().await;
+    assert_eq!(t["assignee"], "anna.n", "{t}");
+    let (s, _, _) = call(r, "PATCH", &format!("/api/users/{boris}")).cookie(&session).json(json!({ "login": "b" })).send().await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "nobody renames someone else");
+
+    // A photo: an image only, served at the address the account names.
+    let (s, _, _) = call(r, "PUT", &format!("/api/users/{anna}/avatar")).cookie(&session).bytes(b"<svg/>").send().await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let png = b"\x89PNG\r\n\x1a\n picture";
+    let (s, u, _) = call(r, "PUT", &format!("/api/users/{anna}/avatar")).cookie(&session).bytes(png).send().await;
+    assert_eq!(s, StatusCode::OK, "{u}");
+    let src = u["avatar"].as_str().unwrap().to_string();
+    let (s, headers, body) = call(r, "GET", &src).cookie(&session).send_raw().await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(body, png);
+    let (s, _, _) = call(r, "PUT", &format!("/api/users/{boris}/avatar")).cookie(&session).bytes(png).send().await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (_, u, _) = call(r, "DELETE", &format!("/api/users/{anna}/avatar")).cookie(&session).send().await;
+    assert!(u.get("avatar").is_none(), "{u}");
+
+    // Tokens: issued, listed without secrets, revoked one by one.
+    let (_, issued, _) = call(r, "POST", "/api/auth/tokens").cookie(&session).json(json!({ "label": "ноутбук" })).send().await;
+    let token = issued["token"].as_str().unwrap().to_string();
+    let (s, _, _) = call(r, "GET", "/api/auth/me").bearer(&token).no_csrf().send().await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, list, _) = call(r, "GET", "/api/auth/tokens").cookie(&session).send().await;
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(list[0]["label"], "ноутбук");
+    assert!(list[0]["lastUsed"].is_string(), "{list}");
+    assert!(!list.to_string().contains(token.trim_start_matches("gnu_")), "no secrets in the list");
+    let id = list[0]["id"].as_i64().unwrap();
+    let (_, _, bl) = call(r, "POST", "/api/auth/login").json(json!({ "login": "boris", "password": "password-2" })).send().await;
+    let (s, _, _) = call(r, "DELETE", &format!("/api/auth/tokens/{id}")).cookie(&bl[0]).send().await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "nobody revokes someone else's token");
+    let (s, _, _) = call(r, "DELETE", &format!("/api/auth/tokens/{id}")).cookie(&session).send().await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _, _) = call(r, "GET", "/api/auth/me").bearer(&token).no_csrf().send().await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (_, list, _) = call(r, "GET", "/api/auth/tokens").cookie(&session).send().await;
+    assert_eq!(list, json!([]));
+}

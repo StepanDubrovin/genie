@@ -439,6 +439,11 @@ button.title { background: none; border: 0; padding: 0; color: inherit; text-ali
 /* People (not agents): a ring tells them apart from the team's avatars. */
 .av.person { background: #d6d8de; box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px #d6d8de55; }
 .av.person.solo { margin-left: 0; }
+.av.photo { background: var(--bg-card); overflow: hidden; }
+.av.photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.av.xl { width: 64px; height: 64px; font-size: 20px; margin: 0; box-shadow: 0 0 0 2px var(--line-strong); }
+.side-foot .me.photo { overflow: hidden; background: var(--bg-card); }
+.side-foot .me.photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .av.person.md { box-shadow: none; }
 .av.lost { opacity: 0.55; box-shadow: 0 0 0 2px var(--amber); }
 

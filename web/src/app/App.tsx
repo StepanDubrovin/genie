@@ -10,7 +10,8 @@ import { EpicsPage } from "@/pages/epics";
 import { DocsPage } from "@/pages/docs";
 import { InvitePage, LoginPage } from "@/pages/auth";
 import { FirstProjectPage, ProjectPage, ServerPage } from "@/pages/project";
-import { AnswerPage, AutomationsPage, NotificationsPage, ProfilePage, ProposalsPage } from "@/pages/platform";
+import { AnswerPage, AutomationsPage, NotificationsPage, ProposalsPage } from "@/pages/platform";
+import { ProfilePage } from "@/pages/profile";
 import { useSession } from "@/entities/session";
 import { TasksPage } from "@/pages/tasks";
 import { TeamView } from "@/pages/team";
@@ -175,8 +176,8 @@ export const router = createBrowserRouter([
       { path: "automations", element: <AutomationsPage /> },
       { path: "agents", element: <AgentsPage /> },
       { path: "notifications", element: <NotificationsPage /> },
-      { path: "profile", element: <ProfilePage /> },
-      { path: "project", element: <ProjectPage /> },
+      { path: "profile/:tab?", element: <ProfilePage /> },
+      { path: "project/:tab?", element: <ProjectPage /> },
       { path: "server", element: <ServerPage /> },
       { path: ":view", element: <TasksRoute /> },
     ],

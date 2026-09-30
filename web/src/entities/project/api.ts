@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { keys, request, useInvalidating } from "@/shared/api";
+import { keys, request, upload, useInvalidating } from "@/shared/api";
 import type { DoctorCheck, Meta, Membership, Person, ProjectInfo, ProjectRole, ProjectStats, VaultSync } from "./model.ts";
 
 export const useMeta = () => useQuery({ queryKey: keys.meta, queryFn: () => request<Meta>("GET", "/api/meta") });
@@ -35,9 +35,30 @@ export const useCreateUser = () =>
   useInvalidating((u: { login: string; name: string; email?: string; password?: string; isAdmin: boolean }) => request<Person>("POST", "/api/users", u));
 
 export const usePatchUser = () =>
-  useInvalidating(({ id, patch }: { id: number; patch: Partial<Pick<Person, "name" | "isAdmin" | "disabled">> & { email?: string | null } }) =>
+  useInvalidating(({ id, patch }: { id: number; patch: Partial<Pick<Person, "login" | "name" | "isAdmin" | "disabled">> & { email?: string | null } }) =>
     request<Person>("PATCH", `/api/users/${id}`, patch),
   );
+
+/** A person's photo: an image already shrunk to a small square, or none to remove it. */
+export const useSetAvatar = () =>
+  useInvalidating(({ id, image }: { id: number; image: Blob | null }) =>
+    image ? upload<Person>("PUT", `/api/users/${id}/avatar`, image) : request<Person>("DELETE", `/api/users/${id}/avatar`),
+  );
+
+/** A personal token as its owner sees it: never the secret. */
+export interface UserToken {
+  id: number;
+  label: string;
+  created: string;
+  lastUsed?: string;
+}
+
+export const useTokens = (enabled: boolean) =>
+  useQuery({ queryKey: ["tokens"], queryFn: () => request<UserToken[]>("GET", "/api/auth/tokens"), enabled });
+
+export const useIssueToken = () => useInvalidating((label: string) => request<{ token: string }>("POST", "/api/auth/tokens", { label }));
+
+export const useRevokeToken = () => useInvalidating((id: number) => request("DELETE", `/api/auth/tokens/${id}`));
 
 /** The server's preflight, for its admins (runs pi and git on the server: a second or so). */
 export const useDoctor = (enabled: boolean) =>
