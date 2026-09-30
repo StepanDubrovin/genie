@@ -22,6 +22,8 @@
 
 [credential "https://github.com"]
 	# HTTPS access with a token from the container's environment (GITHUB_TOKEN, GH_TOKEN or GENIE_GIT_TOKEN).
-	# Read at use time, never written to disk; silent when no token is set. Works for agents and for
-	# people in `docker exec` shells alike.
+	# Read at use time, never written to disk; silent when no token is set. Works for people in
+	# `docker exec` shells and for agents of projects with a local repository. Agents of projects
+	# whose repositories are attached through git.json do not get these variables: genie removes
+	# them from their environment, and they push through the server's proxy instead.
 	helper = "!f() { test \"$1\" = get || exit 0; t=\"${GITHUB_TOKEN:-${GH_TOKEN:-${GENIE_GIT_TOKEN:-}}}\"; test -n \"$t\" || exit 0; echo username=x-access-token; echo password=$t; }; f"

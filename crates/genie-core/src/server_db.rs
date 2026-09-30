@@ -264,6 +264,37 @@ CREATE TABLE IF NOT EXISTS config_changes (
   after TEXT
 );
 CREATE INDEX IF NOT EXISTS config_changes_item ON config_changes(item, id);
+-- Repositories of a project (docs/platform/git-repositories.md).
+CREATE TABLE IF NOT EXISTS project_repos (
+  project TEXT NOT NULL REFERENCES projects(slug) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  host TEXT NOT NULL,
+  remote TEXT NOT NULL,
+  mount TEXT NOT NULL DEFAULT '.',
+  default_branch TEXT NOT NULL DEFAULT '',
+  access TEXT NOT NULL DEFAULT 'write',
+  policy TEXT NOT NULL DEFAULT '{}',
+  created TEXT NOT NULL,
+  PRIMARY KEY (project, name)
+);
+-- What a task does with a repository: its access and how delivery stands.
+CREATE TABLE IF NOT EXISTS task_repos (
+  project TEXT NOT NULL REFERENCES projects(slug) ON DELETE CASCADE,
+  task TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  access TEXT NOT NULL DEFAULT 'write',
+  branch TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'pending',
+  cr_number INTEGER,
+  cr_url TEXT,
+  cr_state TEXT,
+  ci_state TEXT,
+  head_sha TEXT,
+  -- The host's timestamp of the newest comment already passed on to the task.
+  seen_at TEXT NOT NULL DEFAULT '',
+  updated TEXT NOT NULL,
+  PRIMARY KEY (project, task, repo)
+);
 "#;
 
 /// Columns added after the first server release; applied to existing databases on open.

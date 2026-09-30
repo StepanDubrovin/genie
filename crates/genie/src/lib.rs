@@ -10,6 +10,7 @@ pub mod cli;
 pub mod config;
 pub mod doctor;
 pub mod engine;
+pub mod git;
 pub mod http;
 pub mod knowledge;
 pub mod mcp_gateway;

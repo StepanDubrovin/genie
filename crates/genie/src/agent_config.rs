@@ -136,6 +136,10 @@ pub struct RoleDef {
     /// The effective permissions: the class's set with `allow` and `deny` applied.
     pub capabilities: Vec<Capability>,
     pub files: FileAccess,
+    /// What the role may do in the project's repositories (`none`, `read`, `write`) at most;
+    /// `None`: what `files` allows (write → write, read → read, none → none).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
     pub deny_commands: Vec<String>,
     /// `None`: every skill installed on the machine (the harness default).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -690,6 +694,7 @@ struct RawRole {
     allow: Option<Vec<String>>,
     deny: Option<Vec<String>>,
     files: Option<String>,
+    git: Option<String>,
     exclude_tools: Option<Vec<String>>,
     deny_commands: Option<Vec<String>>,
     skills: Option<Vec<String>>,
@@ -711,6 +716,7 @@ const ROLE_KEYS: &[&str] = &[
     "allow",
     "deny",
     "files",
+    "git",
     "excludeTools",
     "denyCommands",
     "skills",
@@ -737,6 +743,7 @@ fn parse_role(text: &str) -> Result<(RawRole, Vec<String>), String> {
             "allow" => r.allow = Some(v.list()),
             "deny" => r.deny = Some(v.list()),
             "files" => r.files = non_empty(v.text()),
+            "git" => r.git = non_empty(v.text()),
             "excludeTools" => r.exclude_tools = Some(v.list()),
             "denyCommands" => r.deny_commands = Some(v.list()),
             "skills" => r.skills = Some(v.list()),
@@ -769,6 +776,7 @@ impl RawRole {
             allow: pick!(allow),
             deny: pick!(deny),
             files: pick!(files),
+            git: pick!(git),
             exclude_tools: pick!(exclude_tools),
             deny_commands: pick!(deny_commands),
             skills: pick!(skills),
@@ -909,6 +917,14 @@ impl RoleResolver<'_> {
                 _ => class_files(class),
             },
         };
+        let git = match raw.git.as_deref() {
+            Some(g @ ("none" | "read" | "write")) => Some(g.to_string()),
+            Some(other) => {
+                errors.push(format!("`git: {other}`: expected none, read or write"));
+                None
+            }
+            None => parent.as_ref().and_then(|p| p.git.clone()),
+        };
         let mut stages = Vec::new();
         for s in raw.stages.iter().flatten() {
             match s.as_str() {
@@ -956,6 +972,7 @@ impl RoleResolver<'_> {
             deny,
             capabilities,
             files,
+            git,
             deny_commands: raw.deny_commands.clone().or_else(|| parent.as_ref().map(|p| p.deny_commands.clone())).unwrap_or_default(),
             skills: raw.skills.clone().or_else(|| parent.as_ref().and_then(|p| p.skills.clone())),
             mcp: raw.mcp.clone().or_else(|| parent.as_ref().map(|p| p.mcp.clone())).unwrap_or_default(),

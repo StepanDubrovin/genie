@@ -1,0 +1,408 @@
+//! A task's delivery end to end: an agent pushes through the proxy, opens a request on the
+//! (fake) host, the workflow's gates hold until the request is in order, a person merges,
+//! the watcher notices what happens on the host, and `auto` merges by itself.
+
+mod common;
+
+use std::path::{Path, PathBuf};
+
+use axum::http::StatusCode;
+use common::fakehost::{self, FakeHost};
+use common::githost::{sh, try_sh, upstream};
+use common::*;
+use genie::runtime::{SpawnRequest, spawn_team};
+use genie_core::{Actor, CreateInput, Role, Status, StatusOptions};
+use serde_json::{Value, json};
+
+struct Rig {
+    h: Harness,
+    fake: FakeHost,
+    port: u16,
+    orchestrator: String,
+}
+
+struct Team {
+    task: String,
+    ws: PathBuf,
+    executor: String,
+    reviewer: String,
+}
+
+async fn rig(kind: &'static str, policy: Value) -> Rig {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let h = Harness::with_config(|c| c.port = port);
+    let hosts = h.dir.path().join("hosts");
+    std::fs::create_dir_all(&hosts).unwrap();
+    upstream(&hosts, "acme/api", &[("README.md", "api\n")]);
+    let fake = fakehost::spawn(kind, "secret").await;
+    let cfg = json!({ "hosts": { "h": {
+        "kind": kind, "url": fake.url, "token": "secret",
+        "clone_urls": { "https": format!("file://{}/{{remote}}.git", hosts.display()) }
+    } } });
+    std::fs::write(h.dir.path().join("git.json"), cfg.to_string()).unwrap();
+    h.project("shop");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    tokio::spawn(genie::serve_on(h.app.clone(), listener, std::future::pending()));
+    let orchestrator = h
+        .app
+        .with_server(|db| {
+            db.create_role_token("shop", Role::Orchestrator, Some("orchestrator"), "orchestrator", None, None, chrono::Duration::hours(1))
+        })
+        .unwrap();
+    let r = Rig { h, fake, port, orchestrator };
+    let (s, b, _) = call(&r.h.router, "POST", "/api/repos")
+        .json(json!({ "name": "api", "host": "h", "remote": "acme/api", "mount": ".", "policy": policy }))
+        .header("x-genie-project", "shop")
+        .header("host", &format!("127.0.0.1:{port}"))
+        .send()
+        .await;
+    assert_eq!(s, 201, "{b}");
+    r
+}
+
+async fn http(r: &Rig, method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> (StatusCode, Value) {
+    let mut c = call(&r.h.router, method, path).header("x-genie-project", "shop").header("host", &format!("127.0.0.1:{}", r.port));
+    if let Some(t) = token {
+        c = c.bearer(t);
+    }
+    if let Some(b) = body {
+        c = c.json(b);
+    }
+    let (s, b, _) = c.send().await;
+    (s, b)
+}
+
+async fn team(r: &Rig, title: &str) -> Team {
+    let task =
+        r.h.app
+            .with_tracker("shop", |t| {
+                let orch = Actor::new("orchestrator", Role::Orchestrator);
+                let task = t.create(
+                    &orch,
+                    CreateInput {
+                        title: title.into(),
+                        description: Some("do it".into()),
+                        acceptance: vec!["it works".into()],
+                        ..Default::default()
+                    },
+                )?;
+                t.set_status(&orch, &task.id, Status::Ready, StatusOptions::default())?;
+                Ok(task.id)
+            })
+            .unwrap();
+    let (app, t) = (r.h.app.clone(), task.clone());
+    let team = tokio::task::spawn_blocking(move || {
+        spawn_team(
+            &app,
+            "shop",
+            SpawnRequest {
+                task: t,
+                template: None,
+                members: vec![
+                    genie::config::MemberSpec { role: "executor".into(), ..Default::default() },
+                    genie::config::MemberSpec { role: "reviewer".into(), ..Default::default() },
+                ],
+                models: Default::default(),
+                note: None,
+                by: Actor::new("orchestrator", Role::Orchestrator),
+            },
+        )
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    let token = |class: Role, role: &str, name: &str| {
+        r.h.app
+            .with_server(|db| db.create_role_token("shop", class, Some(role), name, Some(&team.id), None, chrono::Duration::hours(1)))
+            .unwrap()
+    };
+    let exec = team.members.iter().find(|m| m.role == "executor").unwrap().name.clone();
+    let rev = team.members.iter().find(|m| m.role == "reviewer").unwrap().name.clone();
+    Team {
+        task,
+        ws: PathBuf::from(&team.cwd),
+        executor: token(Role::Executor, "executor", &exec),
+        reviewer: token(Role::Reviewer, "reviewer", &rev),
+    }
+}
+
+fn git(dir: &Path, token: &str, args: &[&str]) -> (bool, String) {
+    try_sh(dir, &[("GENIE_TOKEN", token)], args)
+}
+
+fn commit_and_push(t: &Team) -> String {
+    std::fs::write(t.ws.join("feature.txt"), "feature\n").unwrap();
+    sh(&t.ws, &["add", "."]);
+    sh(&t.ws, &["commit", "-q", "-m", "feature"]);
+    let (ok, out) = git(&t.ws, &t.executor, &["push", "origin", "HEAD"]);
+    assert!(ok, "{out}");
+    sh(&t.ws, &["branch", "--show-current"])
+}
+
+fn row(r: &Rig, task: &str) -> genie_core::repos::TaskRepo {
+    r.h.app.with_server(|db| db.task_repo("shop", task, "api")).unwrap().unwrap()
+}
+
+fn journal(r: &Rig, kind: &str) -> Vec<genie_core::Event> {
+    r.h.app.with_tracker("shop", |t| genie_core::events::latest_of(t.conn(), kind, 50)).unwrap()
+}
+
+async fn status(r: &Rig, task: &str, token: &str, to: &str) -> (StatusCode, Value) {
+    http(r, "POST", &format!("/api/tasks/{task}/status"), Some(token), Some(json!({ "status": to }))).await
+}
+
+async fn each_provider(f: impl AsyncFn(&'static str)) {
+    f("github").await;
+    f("gitlab").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_workflow_waits_for_the_request_and_a_person_merges_it() {
+    each_provider(async |kind| {
+        let r = rig(kind, json!({})).await;
+        let t = team(&r, "Add a feature").await;
+        let id = t.task.clone();
+
+        assert_eq!(status(&r, &id, &t.executor, "in_progress").await.0, StatusCode::OK);
+        let branch = commit_and_push(&t);
+        assert_eq!(row(&r, &id).state, "published");
+
+        // Review needs the request: the branch is on the host, the policy says requests.
+        let (s, b) = status(&r, &id, &t.executor, "review").await;
+        assert_eq!(s, StatusCode::CONFLICT, "{kind}: {b}");
+        assert!(b["error"].as_str().unwrap().contains("pr open"), "{b}");
+
+        // Opening the request through genie.
+        let (s, b) = http(
+            &r,
+            "POST",
+            &format!("/api/tasks/{id}/repos/api/cr"),
+            Some(&t.executor),
+            Some(json!({ "title": "Add a feature", "body": "what and why" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{kind}: {b}");
+        assert_eq!(b["request"]["number"], 1);
+        assert_eq!(b["request"]["head"], branch.as_str());
+        {
+            let f = r.fake.lock();
+            assert_eq!(f.prs.len(), 1);
+            assert!(f.prs[0].title.starts_with(&format!("[{id}]")), "the task is named in the title: {}", f.prs[0].title);
+            assert!(f.prs[0].body.contains("what and why") && f.prs[0].body.contains(&format!("Task {id}")), "{}", f.prs[0].body);
+        }
+        assert_eq!((row(&r, &id).cr_number, row(&r, &id).cr_state.as_deref()), (Some(1), Some("open")), "{kind}");
+        // Again: the same request, not a second one, and one announcement.
+        let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({}))).await;
+        assert_eq!((s, b["request"]["number"].clone()), (StatusCode::OK, json!(1)), "{kind}: {b}");
+        assert_eq!(journal(&r, "cr.opened").len(), 1);
+
+        assert_eq!(status(&r, &id, &t.executor, "review").await.0, StatusCode::OK);
+        assert_eq!(http(&r, "POST", &format!("/api/tasks/{id}/acceptance/1"), Some(&t.reviewer), None).await.0, StatusCode::OK);
+        assert_eq!(status(&r, &id, &t.reviewer, "approved").await.0, StatusCode::OK);
+
+        // The task is approved, but its request is open: it cannot be closed yet.
+        let (s, b) = status(&r, &id, &r.orchestrator, "done").await;
+        assert_eq!(s, StatusCode::CONFLICT, "{kind}: {b}");
+        assert!(b["error"].as_str().unwrap().contains("not merged"), "{b}");
+
+        // The policy says a person merges: the executor may not.
+        let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr/merge"), Some(&t.executor), None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{kind}: {b}");
+        assert!(b["error"].as_str().unwrap().contains("person merges"), "{b}");
+        assert_eq!(r.fake.lock().prs[0].state, "open");
+
+        // The owner merges it (through genie here; on the host itself works as well: see the watcher test).
+        let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr/merge"), None, None).await;
+        assert_eq!(s, StatusCode::OK, "{kind}: {b}");
+        assert_eq!(b["request"]["state"], "merged");
+        assert_eq!(row(&r, &id).state, "merged");
+        assert_eq!(journal(&r, "cr.merged").len(), 1);
+
+        assert_eq!(status(&r, &id, &r.orchestrator, "done").await.0, StatusCode::OK, "{kind}");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_watcher_follows_the_host_and_tells_the_team_and_the_orchestrator() {
+    let r = rig("gitlab", json!({})).await;
+    let t = team(&r, "Fix the export").await;
+    let id = t.task.clone();
+    commit_and_push(&t);
+    let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let watch = || async {
+        genie::git::delivery::watch_one(&r.h.app, &row(&r, &id)).await.unwrap();
+    };
+
+    // The checks fail on the host: an event, and the team hears of it.
+    r.fake.lock().ci = "failed".into();
+    watch().await;
+    assert_eq!(row(&r, &id).ci_state.as_deref(), Some("failed"));
+    assert_eq!(journal(&r, "ci.failed").len(), 1);
+    let team_id = r.h.app.with_tracker("shop", |t| Ok(t.get(&id)?.team.unwrap())).unwrap();
+    let mail = r.h.app.with_tracker("shop", |t| t.bus().history(&team_id, 50)).unwrap();
+    assert!(mail.iter().any(|m| m.from == "git-host" && m.text.contains("checks") && m.text.contains("failed")), "{mail:?}");
+    watch().await;
+    assert_eq!(journal(&r, "ci.failed").len(), 1, "one announcement per change");
+
+    // Fixed; and somebody merges it on the host itself.
+    r.fake.lock().ci = "passed".into();
+    watch().await;
+    assert_eq!(journal(&r, "ci.passed").len(), 1);
+    r.fake.lock().prs[0].state = "merged".into();
+    watch().await;
+    assert_eq!((row(&r, &id).state.as_str(), row(&r, &id).cr_state.as_deref()), ("merged", Some("merged")));
+    assert_eq!(journal(&r, "cr.merged").len(), 1);
+    let task = r.h.app.with_tracker("shop", |t| t.get(&id)).unwrap();
+    assert!(task.comments.iter().any(|c| c.text.contains("was merged")), "the task says so");
+    assert!(r.h.app.with_server(|db| db.open_deliveries()).unwrap().is_empty(), "a merged request is not watched any more");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_closed_on_the_host_is_recorded_as_abandoned() {
+    let r = rig("github", json!({})).await;
+    let t = team(&r, "Try something").await;
+    let id = t.task.clone();
+    commit_and_push(&t);
+    http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({}))).await;
+    r.fake.lock().prs[0].state = "closed".into();
+    genie::git::delivery::watch_one(&r.h.app, &row(&r, &id)).await.unwrap();
+    assert_eq!((row(&r, &id).state.as_str(), row(&r, &id).cr_state.as_deref()), ("abandoned", Some("closed")));
+    assert_eq!(journal(&r, "cr.closed").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_auto_the_server_merges_once_the_task_is_approved_and_the_host_agrees() {
+    let policy = json!({ "change_request": { "merge": "auto", "approvals": 1, "require_ci": true } });
+    let r = rig("github", policy).await;
+    let t = team(&r, "Ship it").await;
+    let id = t.task.clone();
+    commit_and_push(&t);
+    http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({}))).await;
+    let watch = || async { genie::git::delivery::watch_one(&r.h.app, &row(&r, &id)).await.unwrap() };
+
+    // Not approved as a task: nothing happens, however green the host is.
+    {
+        let mut f = r.fake.lock();
+        f.ci = "passed".into();
+        f.approvals = 1;
+    }
+    watch().await;
+    assert_eq!(r.fake.lock().prs[0].state, "open");
+
+    // The task is approved, but the host's conditions are not met yet: it waits.
+    r.h.app
+        .with_tracker("shop", |tr| {
+            tr.set_status(&Actor::new("boss", Role::Human), &id, Status::Approved, StatusOptions { force: true, ..Default::default() })
+        })
+        .unwrap();
+    r.fake.lock().approvals = 0;
+    watch().await;
+    assert_eq!(r.fake.lock().prs[0].state, "open");
+    r.fake.lock().ci = "pending".into();
+    r.fake.lock().approvals = 1;
+    watch().await;
+    assert_eq!(r.fake.lock().prs[0].state, "open", "the checks are still running");
+
+    // Everything holds: the server merges.
+    r.fake.lock().ci = "passed".into();
+    watch().await;
+    assert_eq!(r.fake.lock().prs[0].state, "merged");
+    assert_eq!(row(&r, &id).state, "merged");
+    assert_eq!(journal(&r, "cr.merged").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_may_merge_after_approval_when_the_policy_lets_it_and_the_host_refusing_is_reported() {
+    let policy = json!({ "change_request": { "merge": "agent_after_approval", "approvals": 0, "require_ci": false } });
+    let r = rig("gitlab", policy).await;
+    let t = team(&r, "Small fix").await;
+    let id = t.task.clone();
+    commit_and_push(&t);
+    http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({}))).await;
+    let merge = |token: String| {
+        let (r, id) = (&r, id.clone());
+        async move { http(r, "POST", &format!("/api/tasks/{id}/repos/api/cr/merge"), Some(&token), None).await }
+    };
+    // Before the reviewer approves the task: no.
+    let (s, b) = merge(t.executor.clone()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("approved"));
+    assert_eq!(status(&r, &id, &t.executor, "in_progress").await.0, StatusCode::OK);
+    assert_eq!(status(&r, &id, &t.executor, "review").await.0, StatusCode::OK);
+    assert_eq!(status(&r, &id, &t.reviewer, "approved").await.0, StatusCode::OK);
+    // The host has conflicts: its refusal comes back as it is.
+    r.fake.lock().mergeable = false;
+    let (s, b) = merge(t.executor.clone()).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("cannot be merged"), "{b}");
+    r.fake.lock().mergeable = true;
+    let (s, b) = merge(t.executor.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(r.fake.lock().prs[0].state, "merged");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_follow_the_policy_and_the_branch() {
+    let r = rig("github", json!({ "change_request": { "open": false }, "push": "branches" })).await;
+    let t = team(&r, "No requests here").await;
+    let id = t.task.clone();
+    commit_and_push(&t);
+    let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("not allowed"), "{b}");
+    // Review is not held up by a request nobody may open.
+    assert_eq!(status(&r, &id, &t.executor, "in_progress").await.0, StatusCode::OK);
+    assert_eq!(status(&r, &id, &t.executor, "review").await.0, StatusCode::OK);
+    assert!(r.fake.lock().prs.is_empty());
+
+    // A reviewer cannot open one either, and a branch with nothing new has nothing to deliver.
+    let r2 = rig("github", json!({})).await;
+    let t2 = team(&r2, "Nothing yet").await;
+    let (s, b) = http(&r2, "POST", &format!("/api/tasks/{}/repos/api/cr", t2.task), Some(&t2.reviewer), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{b}");
+    let (s, b) = http(&r2, "POST", &format!("/api/tasks/{}/repos/api/cr", t2.task), Some(&t2.executor), Some(json!({}))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("not on the git host"), "{b}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_a_person_writes_on_the_request_reaches_the_task_and_the_team_once() {
+    each_provider(async |kind| {
+        let r = rig(kind, json!({})).await;
+        let t = team(&r, "Review me").await;
+        let id = t.task.clone();
+        commit_and_push(&t);
+        http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({}))).await;
+        let watch = || async { genie::git::delivery::watch_one(&r.h.app, &row(&r, &id)).await.unwrap() };
+        watch().await;
+        let reviews = |task: &genie_core::Task| task.comments.iter().filter(|c| c.kind == genie_core::CommentKind::Review).count();
+        assert_eq!(reviews(&r.h.app.with_tracker("shop", |t| t.get(&id)).unwrap()), 0);
+
+        // The agent's own comment (signed) is not echoed back; a person's is passed on.
+        let (s, _) = http(
+            &r,
+            "POST",
+            &format!("/api/tasks/{id}/repos/api/cr/comments"),
+            Some(&t.executor),
+            Some(json!({ "text": "ready for a look" })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        r.fake.lock().comments.push(("alice".into(), "please rename the flag".into()));
+        watch().await;
+        let task = r.h.app.with_tracker("shop", |t| t.get(&id)).unwrap();
+        assert_eq!(reviews(&task), 1, "{kind}: {:?}", task.comments);
+        let review = task.comments.iter().find(|c| c.kind == genie_core::CommentKind::Review).unwrap();
+        assert!(review.text.contains("alice") && review.text.contains("please rename the flag"), "{}", review.text);
+        let team_id = task.team.clone().unwrap();
+        let mail = r.h.app.with_tracker("shop", |t| t.bus().history(&team_id, 50)).unwrap();
+        assert!(mail.iter().any(|m| m.from == "git-host" && m.text.contains("please rename the flag")), "{kind}: {mail:?}");
+
+        // The same comment is not announced again.
+        watch().await;
+        assert_eq!(reviews(&r.h.app.with_tracker("shop", |t| t.get(&id)).unwrap()), 1, "{kind}");
+    })
+    .await;
+}

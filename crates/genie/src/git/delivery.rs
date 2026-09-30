@@ -1,0 +1,569 @@
+//! A task's delivery: the pull/merge request of its branch, the checks, the merge.
+//!
+//! The state lives in `task_repos` (one row per task and repository). Agents open and
+//! merge requests through the server (`genie agent pr …`), which checks the effective
+//! policy first and calls the host with the host's token. A watcher polls open
+//! requests, records merges, closures and CI results, tells the orchestrator (a merge
+//! is owner activity there) and the team (a failed check), and merges by itself where
+//! the policy says `auto`. Webhooks would replace the polling behind the same functions.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use genie_core::events;
+use genie_core::repos::{Delivery, ProjectRepo, TaskRepo};
+use genie_core::team::SendMail;
+use genie_core::{Actor, CommentKind, Role, Status};
+use serde_json::{Value, json};
+
+use super::hosts::Host;
+use super::policy::{Effective, Merge, RoleGit, effective};
+use super::provider::{Api, ApiError, ChangeRequest, Ci, Comment, CrState, OpenRequest};
+use super::service::{self, AgentId};
+use super::store;
+use crate::state::{App, AppError};
+
+/// Why a delivery operation failed.
+#[derive(Debug)]
+pub enum DeliveryError {
+    /// The policy or the caller's rights forbid it.
+    Denied(String),
+    /// The request cannot be done in this state.
+    Invalid(String),
+    NotFound(String),
+    /// The host's answer.
+    Host(ApiError),
+    Internal(String),
+}
+
+impl std::fmt::Display for DeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeliveryError::Denied(m) | DeliveryError::Invalid(m) | DeliveryError::NotFound(m) | DeliveryError::Internal(m) => {
+                write!(f, "{m}")
+            }
+            DeliveryError::Host(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<ApiError> for DeliveryError {
+    fn from(e: ApiError) -> Self {
+        DeliveryError::Host(e)
+    }
+}
+
+impl From<AppError> for DeliveryError {
+    fn from(e: AppError) -> Self {
+        match e {
+            AppError::Genie(genie_core::GenieError::NotFound(m)) => DeliveryError::NotFound(m),
+            AppError::Genie(genie_core::GenieError::Invalid(m) | genie_core::GenieError::Denied(m)) => DeliveryError::Invalid(m),
+            other => DeliveryError::Internal(other.to_string()),
+        }
+    }
+}
+
+impl From<genie_core::GenieError> for DeliveryError {
+    fn from(e: genie_core::GenieError) -> Self {
+        AppError::Genie(e).into()
+    }
+}
+
+pub type DResult<T> = Result<T, DeliveryError>;
+
+/// The agent making a call (people make them too, with `None`).
+#[derive(Debug, Clone)]
+pub struct Caller {
+    pub name: String,
+    pub role: Role,
+    pub agent: Option<AgentId>,
+}
+
+/// Everything an operation on one repository of one task needs.
+struct Target {
+    record: ProjectRepo,
+    host: Host,
+    row: TaskRepo,
+    eff: Effective,
+}
+
+fn load(app: &App, project: &str, task: &str, repo: &str, caller: &Caller) -> DResult<Target> {
+    let record = app.with_server(|db| db.repo(project, repo))?;
+    let record = store::resolved(app, &record);
+    let host = store::host_of(app, &record).map_err(DeliveryError::Internal)?;
+    let Some(row) = app.with_server(|db| db.task_repo(project, task, repo))? else {
+        return Err(DeliveryError::NotFound(format!("{task} does not use the repository {repo}: name it first (`genie agent repos set`)")));
+    };
+    // People act with the write rights of the task's row; agents with their role's.
+    let eff = match &caller.agent {
+        Some(a) => {
+            let role = service::role_git(app, a);
+            effective(&record, Some(task), role, Some(&row.access))
+        }
+        None => effective(&record, Some(task), RoleGit::Write, Some(&row.access)),
+    }
+    .map_err(DeliveryError::Invalid)?;
+    Ok(Target { record, host, row, eff })
+}
+
+fn api(t: &Target) -> DResult<Api> {
+    Ok(Api::new(&t.host)?)
+}
+
+fn cr_json(row: &TaskRepo, cr: &ChangeRequest, ci: Ci) -> Value {
+    json!({ "repo": row.repo, "branch": row.branch, "request": cr, "ci": ci, "delivery": row })
+}
+
+/// The task's title and status.
+fn task_info(app: &App, project: &str, task: &str) -> DResult<(String, Status)> {
+    Ok(app.with_tracker(project, |t| t.get(task).map(|t| (t.title, t.status)))?)
+}
+
+/// Blocking work whose failures keep their kind (a refusal by policy stays a refusal).
+async fn blocking<T: Send + 'static>(app: &Arc<App>, f: impl FnOnce(&App) -> DResult<T> + Send + 'static) -> DResult<T> {
+    app.blocking(move |app| Ok(f(app))).await?
+}
+
+pub struct OpenArgs {
+    pub title: Option<String>,
+    pub body: String,
+    pub base: Option<String>,
+    pub draft: bool,
+}
+
+/// Open the request of the task's branch (or return the one already open).
+pub async fn open_request(app: &Arc<App>, project: &str, task: &str, repo: &str, caller: &Caller, args: OpenArgs) -> DResult<Value> {
+    let (p, tk, rp, c) = (project.to_string(), task.to_string(), repo.to_string(), caller.clone());
+    let (t, head, base, title, body) = blocking(app, move |app| {
+        let t = load(app, &p, &tk, &rp, &c)?;
+        let base = args.base.clone().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| t.eff.default_branch.clone());
+        if base.is_empty() {
+            return Err(DeliveryError::Internal(
+                "the repository's default branch is not known yet: sync it first (POST /api/repos/<name>/sync)".into(),
+            ));
+        }
+        t.eff.check_open_request(&base).map_err(DeliveryError::Denied)?;
+        let head = if t.row.branch.is_empty() { t.eff.task_branch().unwrap_or_default() } else { t.row.branch.clone() };
+        // The branch must be on the host, with something in it.
+        let mirror = store::refresh(app, &t.host, &t.record.remote, Duration::from_secs(5)).map_err(DeliveryError::Internal)?.path;
+        if store::ref_sha(&mirror, &format!("refs/heads/{head}")).is_none() {
+            return Err(DeliveryError::Invalid(format!("the branch {head} is not on the git host: `git push origin {head}` first")));
+        }
+        let ahead =
+            store::run(Some(&mirror), &[], &["rev-list", "--count", &format!("refs/heads/{base}..refs/heads/{head}")]).unwrap_or_default();
+        if ahead == "0" {
+            return Err(DeliveryError::Invalid(format!("{head} has no commits beyond {base}: nothing to deliver")));
+        }
+        let (task_title, _) = task_info(app, &p, &tk)?;
+        let title = args.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or(task_title);
+        let title = if title.contains(&tk) { title } else { format!("[{tk}] {title}") };
+        let mut body = args.body.trim().to_string();
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&format!(
+            "---\nTask {tk} · opened by {} ({}) through genie{}",
+            c.name,
+            c.role.as_str(),
+            app.cfg.public_url.as_deref().map(|u| format!(" · {}", u.trim_end_matches('/'))).unwrap_or_default()
+        ));
+        Ok((t, head, base, title, body))
+    })
+    .await?;
+    let api = api(&t)?;
+    let cr = api.open(&t.record.remote, &OpenRequest { head: head.clone(), base, title, body, draft: args.draft }).await?;
+    let ci = api.ci(&t.record.remote, &cr).await.unwrap_or(Ci::None);
+    // What is on the request already is not news later.
+    let seen = api.comments(&t.record.remote, cr.number).await.ok().and_then(|c| c.into_iter().map(|x| x.at).max());
+    let (p, tk, rp, c, first) =
+        (project.to_string(), task.to_string(), repo.to_string(), caller.clone(), t.row.cr_number != Some(cr.number));
+    let cr2 = cr.clone();
+    let row = app
+        .blocking(move |app| {
+            let row = app.with_server(|db| {
+                db.update_delivery(
+                    &p,
+                    &tk,
+                    &rp,
+                    Delivery {
+                        branch: Some(head),
+                        state: Some("published".into()),
+                        cr_number: Some(cr2.number),
+                        cr_url: Some(cr2.url.clone()),
+                        cr_state: Some(cr2.state.as_str().into()),
+                        ci_state: Some(ci.as_str().into()),
+                        head_sha: cr2.head_sha.clone(),
+                        seen_at: first.then_some(seen).flatten(),
+                    },
+                )
+            })?;
+            if first {
+                let actor = Actor::new(c.name.clone(), c.role);
+                let payload = json!({ "task": tk, "repo": rp, "number": cr2.number, "url": cr2.url, "by": c.name });
+                app.with_tracker(&p, |t| {
+                    events::append(t.conn(), events::CR_OPENED, Some(&tk), &actor.name, actor.role.as_str(), payload)?;
+                    t.comment(
+                        &actor,
+                        &tk,
+                        &format!(
+                            "Opened {} #{} in {rp}: {}",
+                            if cr2.url.contains("/pull/") { "pull request" } else { "merge request" },
+                            cr2.number,
+                            cr2.url
+                        ),
+                        CommentKind::Note,
+                    )?;
+                    Ok(())
+                })?;
+            }
+            Ok(row)
+        })
+        .await?;
+    Ok(cr_json(&row, &cr, ci))
+}
+
+fn to_app(e: DeliveryError) -> AppError {
+    match e {
+        DeliveryError::Denied(m) => AppError::Genie(genie_core::GenieError::Denied(m)),
+        DeliveryError::Invalid(m) => AppError::Genie(genie_core::GenieError::Invalid(m)),
+        DeliveryError::NotFound(m) => AppError::Genie(genie_core::GenieError::NotFound(m)),
+        DeliveryError::Internal(m) => AppError::Internal(m),
+        DeliveryError::Host(h) => AppError::Internal(h.to_string()),
+    }
+}
+
+/// The delivery of one repository, brought up to date from the host.
+pub async fn show(app: &Arc<App>, project: &str, task: &str, repo: &str, caller: &Caller) -> DResult<Value> {
+    let (p, tk, rp, c) = (project.to_string(), task.to_string(), repo.to_string(), caller.clone());
+    let t = app.blocking(move |app| load(app, &p, &tk, &rp, &c).map_err(to_app)).await?;
+    if t.row.cr_number.is_none() {
+        return Ok(json!({ "repo": t.row.repo, "branch": t.row.branch, "request": null, "delivery": t.row }));
+    }
+    let (cr, ci, row) = sync_row(app, &t.row).await?;
+    Ok(cr_json(&row, &cr, ci))
+}
+
+pub async fn comments(app: &Arc<App>, project: &str, task: &str, repo: &str, caller: &Caller) -> DResult<Value> {
+    let (p, tk, rp, c) = (project.to_string(), task.to_string(), repo.to_string(), caller.clone());
+    let t = app.blocking(move |app| load(app, &p, &tk, &rp, &c).map_err(to_app)).await?;
+    let number = t.row.cr_number.ok_or_else(|| DeliveryError::Invalid("no request is open for this task yet".into()))?;
+    let list = api(&t)?.comments(&t.record.remote, number).await?;
+    Ok(json!(list))
+}
+
+pub async fn comment(app: &Arc<App>, project: &str, task: &str, repo: &str, caller: &Caller, text: &str) -> DResult<()> {
+    let (p, tk, rp, c) = (project.to_string(), task.to_string(), repo.to_string(), caller.clone());
+    let t = app.blocking(move |app| load(app, &p, &tk, &rp, &c).map_err(to_app)).await?;
+    if !t.eff.read {
+        return Err(DeliveryError::Denied(format!("{repo}: no access")));
+    }
+    let number = t.row.cr_number.ok_or_else(|| DeliveryError::Invalid("no request is open for this task yet".into()))?;
+    let text = format!("{}\n\n— {} ({}) through genie", text.trim(), caller.name, caller.role.as_str());
+    api(&t)?.comment(&t.record.remote, number, &text).await?;
+    Ok(())
+}
+
+/// Merge the task's request, if the policy and the host's conditions allow it.
+pub async fn merge(app: &Arc<App>, project: &str, task: &str, repo: &str, caller: &Caller) -> DResult<Value> {
+    let (p, tk, rp, c) = (project.to_string(), task.to_string(), repo.to_string(), caller.clone());
+    let (t, status) = app
+        .blocking(move |app| {
+            let t = load(app, &p, &tk, &rp, &c).map_err(to_app)?;
+            let (_, status) = task_info(app, &p, &tk).map_err(to_app)?;
+            Ok((t, status))
+        })
+        .await?;
+    // People merge as they wish; agents (and the server's own auto-merge) follow the policy.
+    if caller.agent.is_some() {
+        t.eff.check_merge(status == Status::Approved).map_err(DeliveryError::Denied)?;
+    }
+    do_merge(app, project, task, &t, caller.agent.is_some()).await
+}
+
+async fn do_merge(app: &Arc<App>, project: &str, task: &str, t: &Target, strict: bool) -> DResult<Value> {
+    let number = t.row.cr_number.ok_or_else(|| DeliveryError::Invalid("no request is open for this task yet".into()))?;
+    let api = api(t)?;
+    let cr = api.get(&t.record.remote, number).await?;
+    if cr.state != CrState::Open {
+        return Err(DeliveryError::Invalid(format!("#{number} is already {}", cr.state.as_str())));
+    }
+    if cr.draft {
+        return Err(DeliveryError::Invalid(format!("#{number} is a draft")));
+    }
+    let policy = &t.eff.policy.change_request;
+    if strict {
+        if cr.mergeable == Some(false) {
+            return Err(DeliveryError::Invalid(format!(
+                "the host says #{number} cannot be merged now (conflicts or unmet rules): fix that, then merge"
+            )));
+        }
+        if cr.changes_requested {
+            return Err(DeliveryError::Invalid(format!("a reviewer asked for changes on #{number}")));
+        }
+        if cr.approvals < policy.approvals {
+            return Err(DeliveryError::Invalid(format!("#{number} has {} of {} approvals on the host", cr.approvals, policy.approvals)));
+        }
+        if policy.require_ci {
+            match api.ci(&t.record.remote, &cr).await? {
+                Ci::Failed => return Err(DeliveryError::Invalid(format!("the checks of #{number} failed"))),
+                Ci::Pending => return Err(DeliveryError::Invalid(format!("the checks of #{number} are still running"))),
+                Ci::Passed | Ci::None => {}
+            }
+        }
+    }
+    api.merge(&t.record.remote, number, policy.method.as_deref(), cr.head_sha.as_deref()).await?;
+    let (cr, ci, row) = sync_row(app, &t.row).await?;
+    let _ = (project, task);
+    Ok(cr_json(&row, &cr, ci))
+}
+
+/// Read the request and its checks from the host, record what changed, and announce it.
+pub async fn sync_row(app: &Arc<App>, row: &TaskRepo) -> DResult<(ChangeRequest, Ci, TaskRepo)> {
+    let number = row.cr_number.ok_or_else(|| DeliveryError::Invalid("no request yet".into()))?;
+    let (p, r) = (row.project.clone(), row.repo.clone());
+    let (record, host) = app
+        .blocking(move |app| {
+            let record = app.with_server(|db| db.repo(&p, &r))?;
+            let host = store::host_of(app, &record).map_err(AppError::Internal)?;
+            Ok((record, host))
+        })
+        .await?;
+    let api = Api::new(&host)?;
+    let cr = api.get(&record.remote, number).await?;
+    let ci = if cr.state == CrState::Open {
+        api.ci(&record.remote, &cr).await?
+    } else {
+        row.ci_state.as_deref().map(parse_ci).unwrap_or(Ci::None)
+    };
+    // What people wrote on an open request (a failure to read it must not hide the rest).
+    let comments = if cr.state == CrState::Open { api.comments(&record.remote, number).await.unwrap_or_default() } else { Vec::new() };
+    let (row0, cr2) = (row.clone(), cr.clone());
+    let row = app.blocking(move |app| record_changes(app, &row0, &cr2, ci, &comments)).await?;
+    Ok((cr, ci, row))
+}
+
+fn parse_ci(s: &str) -> Ci {
+    match s {
+        "pending" => Ci::Pending,
+        "passed" => Ci::Passed,
+        "failed" => Ci::Failed,
+        _ => Ci::None,
+    }
+}
+
+/// Store the host's state and, for what changed, the event, the note on the task and the message to whoever acts on it.
+fn record_changes(app: &App, row: &TaskRepo, cr: &ChangeRequest, ci: Ci, comments: &[Comment]) -> Result<TaskRepo, AppError> {
+    let (p, task, repo) = (row.project.as_str(), row.task.as_str(), row.repo.as_str());
+    let host_actor = Actor::new("git-host", Role::Human);
+    let state_now = cr.state.as_str();
+    let state_changed = row.cr_state.as_deref() != Some(state_now);
+    let ci_changed = row.ci_state.as_deref() != Some(ci.as_str());
+    let delivery = match cr.state {
+        CrState::Merged => Some("merged"),
+        CrState::Closed => Some("abandoned"),
+        CrState::Open => None,
+    };
+    // Comments of people that are new since the last look (ours carry a signature and are not echoed).
+    let fresh: Vec<&Comment> =
+        comments.iter().filter(|c| c.at > row.seen_at && !c.body.trim().is_empty() && !c.body.contains(" through genie")).collect();
+    let seen_at = fresh.iter().map(|c| c.at.clone()).max();
+    let updated = app.with_server(|db| {
+        db.update_delivery(
+            p,
+            task,
+            repo,
+            Delivery {
+                state: delivery.map(str::to_string),
+                cr_state: Some(state_now.into()),
+                ci_state: Some(ci.as_str().into()),
+                head_sha: cr.head_sha.clone(),
+                seen_at,
+                ..Default::default()
+            },
+        )
+    })?;
+    if !fresh.is_empty() {
+        let text: String = fresh
+            .iter()
+            .map(|c| format!("[{} on #{} in {repo}] {}", c.author, cr.number, c.body.trim().chars().take(1500).collect::<String>()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        app.with_tracker(p, |t| {
+            // A person's review on the host becomes a `review` comment of the task (it wakes the orchestrator too) and reaches the team.
+            t.comment(&host_actor, task, &text, CommentKind::Review)?;
+            if let Ok(tk) = t.get(task)
+                && let Some(team) = tk.team
+                && t.bus().get(&team).is_ok_and(|x| x.state == "active")
+            {
+                let mail = format!("Comments on the request #{} in {repo} ({}):\n\n{text}", cr.number, cr.url);
+                let _ = t.bus().send(SendMail {
+                    team: &team,
+                    from: "git-host",
+                    from_role: "system",
+                    to: "all",
+                    text: &mail,
+                    level: Some("normal"),
+                    intent: Some("question"),
+                    kind: "message",
+                    ..Default::default()
+                });
+            }
+            Ok(())
+        })?;
+    }
+    if !state_changed && !ci_changed {
+        return Ok(updated);
+    }
+    let payload = json!({ "task": task, "repo": repo, "number": cr.number, "url": cr.url, "ci": ci });
+    app.with_tracker(p, |t| {
+        if state_changed && cr.state == CrState::Merged {
+            events::append(t.conn(), events::CR_MERGED, Some(task), "git-host", "human", payload.clone())?;
+            // A merge is news for the orchestrator (owner activity wakes it).
+            t.comment(&host_actor, task, &format!("The request #{} in {repo} was merged: {}", cr.number, cr.url), CommentKind::Note)?;
+        }
+        if state_changed && cr.state == CrState::Closed {
+            events::append(t.conn(), events::CR_CLOSED, Some(task), "git-host", "human", payload.clone())?;
+            t.comment(
+                &host_actor,
+                task,
+                &format!("The request #{} in {repo} was closed without merging: {}", cr.number, cr.url),
+                CommentKind::Note,
+            )?;
+        }
+        if ci_changed && ci == Ci::Failed {
+            events::append(t.conn(), events::CI_FAILED, Some(task), "git-host", "human", payload.clone())?;
+            if let Ok(tk) = t.get(task)
+                && let Some(team) = tk.team
+                && t.bus().get(&team).is_ok_and(|x| x.state == "active")
+            {
+                let text =
+                    format!("The checks of the request #{} in {repo} failed: {}. Open it, find out why, fix and push.", cr.number, cr.url);
+                let _ = t.bus().send(SendMail {
+                    team: &team,
+                    from: "git-host",
+                    from_role: "system",
+                    to: "all",
+                    text: &text,
+                    level: Some("high"),
+                    intent: Some("blocker"),
+                    kind: "message",
+                    ..Default::default()
+                });
+            }
+        }
+        if ci_changed && ci == Ci::Passed {
+            events::append(t.conn(), events::CI_PASSED, Some(task), "git-host", "human", payload.clone())?;
+        }
+        Ok(())
+    })?;
+    Ok(updated)
+}
+
+// --- the gates of the workflow ---------------------------------------------------------------
+
+/// A status change an agent asks for, checked against the task's delivery. `review` needs a
+/// request for every pushed branch whose policy calls for one; `done` needs none left open.
+/// (People are not held to it: their moves are authoritative.)
+pub fn gate(app: &App, project: &str, task: &str, to: Status) -> Result<(), String> {
+    if !matches!(to, Status::Review | Status::Done) {
+        return Ok(());
+    }
+    let task = app.with_tracker(project, |t| t.normalize_id(task)).map_err(|e| e.to_string())?;
+    let rows = app.with_server(|db| db.task_repos(project, &task)).map_err(|e| e.to_string())?;
+    for row in rows.iter().filter(|r| r.access == "write") {
+        match to {
+            Status::Review if row.state == "published" && row.cr_number.is_none() => {
+                let wants_request = app
+                    .with_server(|db| db.repo(project, &row.repo))
+                    .ok()
+                    .and_then(|r| effective(&store::resolved(app, &r), Some(&task), RoleGit::Write, Some("write")).ok())
+                    .is_some_and(|e| e.policy.push == super::policy::Push::PrOnly && e.policy.change_request.open);
+                if wants_request {
+                    return Err(format!(
+                        "the branch {} of {} is pushed but has no pull/merge request: `genie agent pr open --repo {}`, then move the task to review",
+                        row.branch, row.repo, row.repo
+                    ));
+                }
+            }
+            Status::Done if row.cr_state.as_deref() == Some("open") => {
+                return Err(format!(
+                    "the request #{} of {} is not merged yet: it is merged by a person (move the task to needs_owner and say so) or by you (`genie agent pr merge --repo {}`) when the policy allows",
+                    row.cr_number.unwrap_or_default(),
+                    row.repo,
+                    row.repo
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// --- the watcher --------------------------------------------------------------------------------
+
+/// Watch open requests until the server stops. Each row is looked at every `poll_secs` of its host.
+pub fn spawn_poller(app: Arc<App>) {
+    tokio::spawn(async move {
+        let mut last: std::collections::HashMap<String, std::time::Instant> = Default::default();
+        let mut complained: std::collections::HashMap<String, std::time::Instant> = Default::default();
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let rows = match app.blocking(|app| app.with_server(|db| db.open_deliveries())).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            for row in rows {
+                let key = format!("{}/{}/{}", row.project, row.task, row.repo);
+                let every = app
+                    .blocking({
+                        let (p, r) = (row.project.clone(), row.repo.clone());
+                        move |app| {
+                            let rec = app.with_server(|db| db.repo(&p, &r))?;
+                            Ok(store::host_of(app, &rec).map(|h| h.poll_secs).unwrap_or(60))
+                        }
+                    })
+                    .await
+                    .unwrap_or(60);
+                if last.get(&key).is_some_and(|t| t.elapsed() < Duration::from_secs(every)) {
+                    continue;
+                }
+                last.insert(key.clone(), std::time::Instant::now());
+                if let Err(e) = watch_one(&app, &row).await
+                    && complained.get(&key).is_none_or(|t| t.elapsed() > Duration::from_secs(600))
+                {
+                    complained.insert(key.clone(), std::time::Instant::now());
+                    eprintln!("genie git: {key}: {e}");
+                }
+            }
+        }
+    });
+}
+
+/// One look at one open request: record its state, merge it when the policy says `auto` and the time has come.
+pub async fn watch_one(app: &Arc<App>, row: &TaskRepo) -> DResult<()> {
+    let (cr, ci, row) = sync_row(app, row).await?;
+    if cr.state != CrState::Open {
+        crate::http::tasks::changed(app);
+        return Ok(());
+    }
+    let (p, tk, rp) = (row.project.clone(), row.task.clone(), row.repo.clone());
+    let auto = app
+        .blocking(move |app| {
+            let caller = Caller { name: "genie".into(), role: Role::Orchestrator, agent: None };
+            let t = load(app, &p, &tk, &rp, &caller).map_err(to_app)?;
+            let (_, status) = task_info(app, &p, &tk).map_err(to_app)?;
+            Ok((t.eff.policy.change_request.merge == Merge::Auto && status == Status::Approved).then_some(t))
+        })
+        .await?;
+    if let Some(t) = auto
+        && ci != Ci::Failed
+    {
+        match do_merge(app, &row.project, &row.task, &t, true).await {
+            Ok(_) => crate::http::tasks::changed(app),
+            // Not yet mergeable (approvals, checks still running): try again next time.
+            Err(DeliveryError::Invalid(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}

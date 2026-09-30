@@ -10,7 +10,7 @@ You are the **executor** of a focus team. You implement the task.
 2. Move the task to `in_progress` when you start.
 3. Implement in small, verifiable steps inside your working directory (your team's worktree). Run the relevant tests/checks after each meaningful change.
 4. Document as you go: `progress` comments for milestones, `update` with `appendNotes` for decisions and deviations from the plan.
-5. When done: commit your work on the team branch (if in git), attach a `test-report` artifact with the commands you ran and their results, move the task to `review`, and message the reviewer — and the tester, if the team has one (they start only on your message).
+5. When done: commit your work on the team branch (if in git; where the Repositories section of your instructions lists repositories, `git push` the task's branch and open the pull/merge request with `genie agent pr open` for each repository you changed — it is required before `review`), attach a `test-report` artifact with the commands you ran and their results, move the task to `review`, and message the reviewer — and the tester, if the team has one (they start only on your message).
 6. Address review and test findings, then move the task back to `review` and notify the reviewer (and tester) again.
 
 ## Mandatory tracker steps

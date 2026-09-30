@@ -40,6 +40,9 @@ enum Command {
     /// People with access to this server.
     #[command(subcommand)]
     User(UserCmd),
+    /// Git repositories of projects and the hosts they live on (`git.json`).
+    #[command(subcommand)]
+    Repos(ReposCmd),
     /// Give a user a role in a project (viewer, member, admin, owner).
     Member { project: String, login: String, role: String },
     /// Print an invitation link for a project.
@@ -115,6 +118,61 @@ enum ProjectCmd {
 }
 
 #[derive(Subcommand)]
+enum ReposCmd {
+    /// The hosts of <data>/git.json and what is wrong with them (add --check to ask each host).
+    Hosts {
+        #[arg(long)]
+        check: bool,
+    },
+    /// Repositories of a project (all projects without an argument).
+    List { project: Option<String> },
+    /// Attach a repository to a project; the mirror is fetched at once.
+    Add {
+        project: String,
+        /// The repository's alias in the project (api, web…).
+        name: String,
+        /// A host of git.json.
+        host: String,
+        /// Path on the host: group/subgroup/repo.
+        remote: String,
+        /// Where it sits in the project's workspace (default: the root).
+        #[arg(long)]
+        mount: Option<String>,
+        /// The most agents may do: read or write (default write).
+        #[arg(long)]
+        access: Option<String>,
+        /// The policy as JSON (default: only the task's branch, requests, a person merges).
+        #[arg(long)]
+        policy: Option<String>,
+    },
+    /// Change a repository's mount, access, default branch or policy.
+    Set {
+        project: String,
+        name: String,
+        #[arg(long)]
+        mount: Option<String>,
+        #[arg(long)]
+        access: Option<String>,
+        #[arg(long)]
+        default_branch: Option<String>,
+        #[arg(long)]
+        policy: Option<String>,
+    },
+    /// Detach a repository (refused while a delivery of it is unmerged).
+    Remove { project: String, name: String },
+    /// Fetch a repository's mirror from its host now.
+    Sync { project: String, name: String },
+    /// Check a repository against its host: reachable, the token's rights, protected default branch.
+    Check {
+        project: String,
+        name: String,
+        /// Push a throw-away branch (and delete it) to prove the token can push.
+        #[arg(long)]
+        probe_push: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum VaultCmd {
     /// Copy Markdown pages (e.g. a repository's docs/) into a vault space, keeping folders.
     Import {
@@ -167,6 +225,98 @@ fn read_password() -> Result<String, String> {
     Ok(s.trim_end_matches(['\n', '\r']).to_string())
 }
 
+/// `genie repos …`: repositories of projects, worked on the data directory directly.
+async fn repos_cmd(data: &std::path::Path, cmd: ReposCmd) -> Result<(), String> {
+    use crate::git::{check, hosts, policy::Policy, service, store};
+    use genie_core::repos::{NewRepo, RepoPatch};
+    let cfg = Config::load(data)?;
+    let app = App::open(data, cfg, PathBuf::new()).map_err(|e| e.to_string())?;
+    let policy_arg = |s: Option<String>| -> Result<Option<serde_json::Value>, String> {
+        let v = s.map(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| format!("--policy must be JSON: {e}"))).transpose()?;
+        if let Some(v) = &v {
+            Policy::parse(v)?;
+        }
+        Ok(v)
+    };
+    let show = |lines: &[check::Line]| {
+        for l in lines {
+            println!("{:<4} {}", l.level, l.text);
+        }
+    };
+    match cmd {
+        ReposCmd::Hosts { check: ask } => {
+            let h = hosts::load(data);
+            for e in &h.errors {
+                println!("FAIL git.json: {e}");
+            }
+            if h.map.is_empty() && h.errors.is_empty() {
+                println!("(no hosts: create {} — see docs/platform/git-repositories.md)", data.join("git.json").display());
+            }
+            for host in h.map.values() {
+                println!("{:<14} {:<7} {} over {}", host.id, host.kind.as_str(), host.url, if host.ssh { "ssh" } else { "https" });
+                if ask {
+                    show(&check::host(&app, &host.id).await);
+                } else {
+                    for m in &host.missing {
+                        println!("  FAIL secret missing: {m}");
+                    }
+                }
+            }
+        }
+        ReposCmd::List { project } => {
+            let repos = app
+                .with_server(|db| match &project {
+                    Some(p) => db.repos(p),
+                    None => db.all_repos(),
+                })
+                .map_err(|e| e.to_string())?;
+            if repos.is_empty() {
+                println!("(no repositories)");
+            }
+            for r in repos {
+                let push = r.policy["push"].as_str().unwrap_or("pr_only");
+                println!("{:<12} {:<10} {:<18} {}:{} · {} · push {push}", r.project, r.name, r.mount, r.host, r.remote, r.access);
+            }
+        }
+        ReposCmd::Add { project, name, host, remote, mount, access, policy } => {
+            let new = NewRepo { name, host, remote, mount, access, policy: policy_arg(policy)?, default_branch: None };
+            let (repo, warning) = service::add_repo(&app, &project, new).map_err(|e| e.to_string())?;
+            println!(
+                "{}/{} added at {} (default branch {})",
+                repo.project,
+                repo.name,
+                repo.mount,
+                if repo.default_branch.is_empty() { "not known yet" } else { &repo.default_branch }
+            );
+            if let Some(w) = warning {
+                println!("warning: {w}");
+            }
+        }
+        ReposCmd::Set { project, name, mount, access, default_branch, policy } => {
+            let patch = RepoPatch { mount, default_branch, access, policy: policy_arg(policy)? };
+            let r = app.with_server(|db| db.update_repo(&project, &name, patch)).map_err(|e| e.to_string())?;
+            println!("{}/{}: {} · {} · {}", r.project, r.name, r.mount, r.access, r.policy);
+        }
+        ReposCmd::Remove { project, name } => {
+            app.with_server(|db| db.remove_repo(&project, &name)).map_err(|e| e.to_string())?;
+            println!("{project}/{name} detached (the mirror stays on disk: it may serve other projects)");
+        }
+        ReposCmd::Sync { project, name } => {
+            let repo = app.with_server(|db| db.repo(&project, &name)).map_err(|e| e.to_string())?;
+            let info = store::sync(&app, &repo)?;
+            println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+        }
+        ReposCmd::Check { project, name, probe_push } => {
+            let lines = check::repo(&app, &project, &name, probe_push).await;
+            show(&lines);
+            if check::failed(&lines) {
+                return Err("the repository has problems".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let data = cli.data.unwrap_or_else(crate::default_data_dir);
@@ -182,6 +332,7 @@ pub async fn run() -> Result<(), String> {
             }
             let app = App::open(&data, cfg, web).map_err(|e| e.to_string())?;
             crate::runtime::start(&app);
+            crate::git::delivery::spawn_poller(app.clone());
             crate::serve(app).await?;
         }
         Command::Project(ProjectCmd::Add { slug, name, repo, tracker, prefix }) => {
@@ -205,6 +356,7 @@ pub async fn run() -> Result<(), String> {
                 p.repo.map(|r| format!(", repo {r}")).unwrap_or_default()
             );
         }
+        Command::Repos(cmd) => repos_cmd(&data, cmd).await?,
         Command::Project(ProjectCmd::List) => {
             for p in server_db()?.projects().map_err(|e| e.to_string())? {
                 println!(

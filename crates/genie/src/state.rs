@@ -63,6 +63,8 @@ pub struct App {
     agents: RwLock<Arc<AgentConfig>>,
     /// The agents' connections through the MCP gateway.
     pub mcp: crate::mcp_gateway::Gateway,
+    /// Locks and fetch times of the repository mirrors and workspaces.
+    pub git: crate::git::Git,
 }
 
 impl App {
@@ -97,6 +99,7 @@ impl App {
             sessions: Default::default(),
             agents: RwLock::new(Arc::new(agents)),
             mcp: Default::default(),
+            git: Default::default(),
         }))
     }
 

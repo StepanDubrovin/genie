@@ -345,6 +345,12 @@ async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
             ));
         }
     }
+    // What the task delivers to its repositories must be in order before review and close (people decide for themselves).
+    if !access.is_human() && matches!(to, Status::Review | Status::Done) {
+        let (slug, task_id) = (access.project.clone(), id.clone());
+        let verdict = app.blocking(move |app| Ok(crate::git::delivery::gate(app, &slug, &task_id, to))).await?;
+        verdict.map_err(|m| ApiError::new(StatusCode::CONFLICT, m))?;
+    }
     let force = access.is_human() || (access.actor.role == Role::Orchestrator && b["force"] == json!(true));
     let opts = StatusOptions { note: b.get("note").and_then(text).filter(|n| !n.is_empty()), force };
     let actor = access.actor.clone();

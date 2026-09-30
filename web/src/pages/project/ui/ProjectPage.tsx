@@ -22,6 +22,7 @@ import {
 import { useSession } from "@/entities/session";
 import { request } from "@/shared/api";
 import { ConfirmDialog, Icon, useToast } from "@/shared/ui";
+import { RepositoriesSection } from "./RepositoriesSection.tsx";
 import "./project.css";
 
 export const ROLES: ProjectRole[] = ["viewer", "member", "admin", "owner"];
@@ -63,6 +64,7 @@ export function ProjectPage() {
         ) : (
           <>
             <General key={`${project.slug}:${project.name}:${project.integration}`} project={project} admin={admin} />
+            <RepositoriesSection admin={admin} />
             {local ? <FirstAdmin /> : <People slug={project.slug} admin={admin} me={session?.user.login} />}
             {admin && !local && <Invite slug={project.slug} />}
           </>
