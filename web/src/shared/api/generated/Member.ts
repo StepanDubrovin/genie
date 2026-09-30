@@ -2,9 +2,9 @@
 
 export type Member = { name: string, role: string, model?: string, thinking?: string, instructions?: string, status: string, statusAt: string, 
 /**
- * `active` | `stopped` | `error`
+ * `active` | `paused` | `stopped` | `error`
  */
-state: "active" | "stopped" | "error", 
+state: "active" | "paused" | "stopped" | "error", 
 /**
  * `idle` | `working` | `error`
  */

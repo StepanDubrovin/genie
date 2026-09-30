@@ -285,6 +285,8 @@ fn latency_stats(samples: Vec<(String, f64)>) -> Value {
 #[derive(Deserialize, Default)]
 struct PeekQuery {
     deep: Option<String>,
+    /// How many of the latest conversation messages `deep` returns (default 12, at most 60).
+    limit: Option<usize>,
 }
 
 fn key_of(project: &str, team: &str, member: &str) -> AgentKey {
@@ -295,7 +297,8 @@ fn key_of(project: &str, team: &str, member: &str) -> AgentKey {
     }
 }
 
-/// What an agent is doing now; `deep` adds the latest messages of its conversation.
+/// What an agent is doing now; `deep` adds the latest messages of its conversation
+/// (each with a short `text` for agents and structured `parts` for the web chat).
 async fn peek(
     State(app): State<Arc<App>>,
     ctx: Ctx,
@@ -315,28 +318,45 @@ async fn peek(
     if q.deep.as_deref().is_some_and(|d| d != "0") {
         let messages = s.request(json!({ "type": "get_messages" }), Duration::from_secs(5)).await;
         let list = messages.as_ref().and_then(|r| r["data"]["messages"].as_array().cloned()).unwrap_or_default();
-        out["conversation"] = json!(list.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().map(brief).collect::<Vec<_>>());
+        let n = q.limit.unwrap_or(12).clamp(1, 60);
+        out["conversation"] = json!(list.iter().rev().take(n).collect::<Vec<_>>().into_iter().rev().map(brief).collect::<Vec<_>>());
     }
     Ok(Json(out))
 }
 
-/// One conversation message, short.
+/// One conversation message, short: `text` for agents, `parts` (text, thinking,
+/// tool calls) for people, plus the tool of a tool result and the mail a
+/// genie-mail message delivered.
 fn brief(m: &Value) -> Value {
     let clip = |s: &str, n: usize| {
         let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
         if flat.chars().count() > n { format!("{}…", flat.chars().take(n).collect::<String>()) } else { flat }
     };
     let role = m["customType"].as_str().map(|c| format!("custom:{c}")).unwrap_or_else(|| m["role"].as_str().unwrap_or("?").to_string());
+    let mut text = Vec::new();
     let mut parts = Vec::new();
     match &m["content"] {
-        Value::String(s) => parts.push(clip(s, 500)),
+        Value::String(s) => {
+            text.push(clip(s, 500));
+            parts.push(json!({ "type": "text", "text": clip(s, 2000) }));
+        }
         Value::Array(blocks) => {
             for b in blocks {
                 match b["type"].as_str() {
-                    Some("text") => parts.push(clip(b["text"].as_str().unwrap_or_default(), 500)),
-                    Some("thinking") => parts.push(format!("(thinking) {}", clip(b["thinking"].as_str().unwrap_or_default(), 300))),
+                    Some("text") => {
+                        let t = b["text"].as_str().unwrap_or_default();
+                        text.push(clip(t, 500));
+                        parts.push(json!({ "type": "text", "text": clip(t, 2000) }));
+                    }
+                    Some("thinking") => {
+                        let t = b["thinking"].as_str().unwrap_or_default();
+                        text.push(format!("(thinking) {}", clip(t, 300)));
+                        parts.push(json!({ "type": "thinking", "text": clip(t, 1000) }));
+                    }
                     Some("toolCall") => {
-                        parts.push(format!("→ {} {}", b["name"].as_str().unwrap_or("tool"), clip(&b["arguments"].to_string(), 200)))
+                        let name = b["name"].as_str().unwrap_or("tool");
+                        text.push(format!("→ {} {}", name, clip(&b["arguments"].to_string(), 200)));
+                        parts.push(json!({ "type": "tool", "id": b["id"], "name": name, "args": clip(&b["arguments"].to_string(), 600) }));
                     }
                     _ => {}
                 }
@@ -344,7 +364,17 @@ fn brief(m: &Value) -> Value {
         }
         _ => {}
     }
-    json!({ "role": role, "text": parts.join("\n") })
+    let mut out = json!({ "role": role, "text": text.join("\n"), "parts": parts });
+    if let Some(at) = m["timestamp"].as_i64().and_then(chrono::DateTime::from_timestamp_millis) {
+        out["at"] = json!(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    }
+    if m["role"] == "toolResult" {
+        out["tool"] = json!({ "id": m["toolCallId"], "name": m["toolName"], "error": m["isError"].as_bool().unwrap_or(false) });
+    }
+    if let Some(ids) = m["details"]["mailIds"].as_array() {
+        out["mailIds"] = json!(ids);
+    }
+    out
 }
 
 async fn set_paused(app: Arc<App>, ctx: Ctx, team: String, member: String, paused: bool) -> ApiResult<Json<Value>> {

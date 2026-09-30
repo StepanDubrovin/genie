@@ -353,14 +353,17 @@ export function TeamView() {
 function MemberCard({ team, member: m, live, session: s }: { team: TeamDetail; member: TeamDetail["members"][number]; live?: { state: LiveState; note?: string }; session?: LiveSession }) {
   useTick();
   const active = team.state === "active";
-  const state: LiveState = !active || m.state === "stopped" ? "stopped" : m.activity === "error" || m.state === "error" ? "error" : m.activity === "working" ? "working" : (live?.state ?? "idle");
+  const paused = active && m.state === "paused";
+  const state: LiveState = !active || m.state === "stopped" ? "stopped" : paused ? "waiting" : m.activity === "error" || m.state === "error" ? "error" : m.activity === "working" ? "working" : (live?.state ?? "idle");
   const text =
     state === "working"
       ? s?.tool
         ? `работает · ${s.tool.name} ${timeAgo(s.tool.since)}`
         : "работает"
-      : state === "waiting"
-        ? (live?.note ?? "ждёт")
+      : paused
+        ? "на паузе"
+        : state === "waiting"
+          ? (live?.note ?? "ждёт")
         : state === "error"
           ? "ошибка"
           : state === "stopped"
@@ -374,7 +377,9 @@ function MemberCard({ team, member: m, live, session: s }: { team: TeamDetail; m
       <Avatar role={m.role} name={m.name} activity={active ? m.activity : undefined} state={m.state} size="md" />
       <div className="info">
         <div className="nm">
-          <b>{displayName(m.name)}</b>
+          <Link to={`/team/${encodeURIComponent(team.id)}/${encodeURIComponent(m.name)}`} className="mcard-open" title="Открыть разговор с агентом">
+            <b>{displayName(m.name)}</b>
+          </Link>
           <span className="muted">{ROLE_TITLE_RU[m.role] ?? m.role}</span>
           {active && (
             <span className="acts">
