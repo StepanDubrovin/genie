@@ -296,9 +296,10 @@ export function ProfilePage() {
               </form>
             </section>
             <section>
-              <h2>Токен для CLI</h2>
+              <h2>Токен для CLI и MCP</h2>
               <p className="muted">
-                Для <code>genie agent …</code> и скриптов: переменные <code>GENIE_URL</code> и <code>GENIE_TOKEN</code>.
+                Командная строка <code>genie</code> и скрипты: переменные <code>GENIE_URL</code> и <code>GENIE_TOKEN</code>. Свой агент (Claude Code, pi,
+                Codex…): MCP-сервер <code>{window.location.origin}/mcp</code> с заголовком <code>Authorization: Bearer &lt;токен&gt;</code>.
               </p>
               <button
                 type="button"
@@ -312,7 +313,15 @@ export function ProfilePage() {
               >
                 Выпустить токен
               </button>
-              {token && <p className="secret">{token}</p>}
+              {token && (
+                <>
+                  <p className="secret">{token}</p>
+                  <p className="muted">Например, для Claude Code:</p>
+                  <p className="secret">
+                    claude mcp add --transport http genie {window.location.origin}/mcp --header "Authorization: Bearer {token}"
+                  </p>
+                </>
+              )}
             </section>
           </>
         )}

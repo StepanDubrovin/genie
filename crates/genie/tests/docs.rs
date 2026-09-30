@@ -129,3 +129,45 @@ async fn a_task_in_review_names_the_pages_its_changes_may_have_made_stale() {
     assert_eq!(impact["candidates"][1]["reasons"][0], json!({ "kind": "related", "id": "G-1" }));
     assert_eq!(impact["applicable"], false, "the hint is meant for review and done");
 }
+
+/// Agents know the project's knowledge base without asking: its pages by title
+/// in their prompt (L0) and the pages chosen for a task in their kickoff (L1).
+#[tokio::test]
+async fn agents_get_the_index_in_their_prompt_and_the_tasks_pages_in_their_kickoff() {
+    let h = Harness::new();
+    h.project("shop");
+    let r = &h.router;
+    let export = "---\ntitle: Export\ntype: guide\nstatus: current\nsummary: How orders leave the shop\nrelated: [G-1]\n---\n# Export\n\n## Formats\n\nOrders go out as CSV and XLSX.\n";
+    let billing =
+        "---\ntitle: Billing\ntype: reference\nstatus: current\n---\n# Billing\n\nInvoices are monthly.\n\nBody-only-secret-phrase.\n";
+    for (path, content) in [("shop/features/export.md", export), ("shop/features/billing.md", billing)] {
+        let (s, v, _) = call(r, "POST", "/api/docs/page").json(json!({ "path": path, "content": content, "mode": "create" })).send().await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+    }
+    call(r, "POST", "/api/tasks").json(json!({ "title": "CSV export" })).send().await;
+
+    // L0: every page of the space, metadata only, in the orchestrator's prompt.
+    let (s, console, _) = call(r, "POST", "/api/orchestrator/console").json(json!({})).send().await;
+    assert_eq!(s, StatusCode::OK, "{console}");
+    let prompt = console["prompt"].as_str().unwrap();
+    assert!(prompt.contains("## Project knowledge (L0 index)"), "{prompt}");
+    assert!(
+        prompt.contains("- shop/features/export.md — Export (guide, current, ") && prompt.contains("How orders leave the shop"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("- shop/features/billing.md — Billing (reference, current, "));
+    assert!(prompt.contains("Invoices are monthly"), "a page without a summary is summed up by its first paragraph");
+    assert!(!prompt.contains("Body-only-secret-phrase"), "L0 carries no page bodies");
+
+    // L1: the task's pages in the kickoff — in the template's preview and in a real team's first mail.
+    let (_, preview, _) = call(r, "POST", "/api/templates/pair/preview").json(json!({ "task": "G-1" })).send().await;
+    let kickoff = preview["members"][0]["kickoff"].as_str().unwrap();
+    assert!(kickoff.contains("## Project knowledge (L1 context)"), "{kickoff}");
+    assert!(kickoff.contains("### Export — shop/features/export.md (guide, current) — related G-1"), "{kickoff}");
+    assert!(kickoff.contains("Orders go out as CSV and XLSX.") && !kickoff.contains("Body-only-secret-phrase"), "{kickoff}");
+    let (s, team, _) = call(r, "POST", "/api/teams").json(json!({ "task": "G-1", "template": "research" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let member = team["members"][0]["name"].as_str().unwrap().to_string();
+    let mail = h.app.with_tracker("shop", |t| t.bus().pending(Some("G-1"), &member)).unwrap();
+    assert!(mail.iter().any(|m| m.text.contains("### Export — shop/features/export.md")), "the kickoff carries the page");
+}

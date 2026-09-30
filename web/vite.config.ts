@@ -1,8 +1,10 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// The UI is served by `genie web` from web/dist. During development run
-// `genie web` (port 7420) and `npm run dev:web`; API calls are proxied to it.
+// The build (web/dist) goes into the genie binary (crates/genie/build.rs); `genie
+// serve --web web/dist` serves a fresh one without rebuilding genie. During
+// development run `genie serve` (port 7420) and `npm run dev:web`; API calls are
+// proxied to it.
 export default defineConfig({
   root: import.meta.dirname,
   plugins: [react()],

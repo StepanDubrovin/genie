@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { keys, request, useInvalidating } from "@/shared/api";
-import type { DocsImpactResult } from "../../../../src/docs/impact.ts";
+import type { DocsImpact } from "@/shared/api";
 import type { Status, Task, TaskSummary } from "./model.ts";
 
 /** Every task, closed ones included; views and the board filter on the client. */
@@ -23,7 +23,7 @@ export const useTask = (id: string | undefined) =>
 export const useDocsImpact = (id: string, enabled: boolean) =>
   useQuery({
     queryKey: [...keys.task(id), "docs-impact"] as const,
-    queryFn: () => request<DocsImpactResult>("GET", `/api/tasks/${encodeURIComponent(id)}/docs-impact`),
+    queryFn: () => request<DocsImpact>("GET", `/api/tasks/${encodeURIComponent(id)}/docs-impact`),
     enabled: enabled && !!id,
   });
 

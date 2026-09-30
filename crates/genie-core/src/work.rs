@@ -215,7 +215,7 @@ impl ServerDb {
         Ok(())
     }
 
-    /// The agent reports its structured result (`genie agent output`).
+    /// The agent reports its structured result (`genie job output`).
     pub fn set_job_output(&self, id: i64, output: &Value) -> Result<()> {
         let n = self
             .conn()

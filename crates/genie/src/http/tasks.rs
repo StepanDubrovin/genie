@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::ctx::{Access, Ctx};
+use super::images::image_mime;
 use super::{ApiError, ApiResult};
 use crate::state::App;
 
@@ -462,7 +463,10 @@ async fn add_artifact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<Stri
     let access = ctx.access(&app, None).await?;
     access.write()?;
     in_scope(&app, &access, &id, Touch::Note).await?;
-    let kind = b["kind"].as_str().and_then(|k| k.parse().ok()).or(Some(ArtifactKind::Doc));
+    let kind = match b["kind"].as_str().filter(|k| !k.is_empty()) {
+        Some(k) => Some(k.parse::<ArtifactKind>().map_err(|e| ApiError::bad(e.to_string()))?),
+        None => Some(ArtifactKind::Doc),
+    };
     let content = match b["contentBase64"].as_str() {
         Some(b64) => base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| ApiError::bad(format!("contentBase64: {e}")))?,
         None => b["text"].as_str().unwrap_or_default().as_bytes().to_vec(),
@@ -479,25 +483,11 @@ async fn add_artifact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<Stri
     Ok((StatusCode::CREATED, to_json(task)))
 }
 
-/// PNG, JPEG, GIF or WebP by magic bytes (the only formats shown inline).
-pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
 #[derive(Deserialize, Default)]
 struct ArtifactQuery {
     download: Option<String>,
     raw: Option<String>,
+    base64: Option<String>,
 }
 
 async fn read_artifact(
@@ -533,6 +523,10 @@ async fn read_artifact(
     let mut v = json!({ "name": a.name, "kind": a.kind, "size": a.content.len(), "text": a.text });
     if let Some(m) = mime {
         v["mime"] = json!(m);
+    }
+    // A binary artifact for a client that saves it (`genie task artifact-read N --out FILE`).
+    if q.base64.as_deref() == Some("1") && v["text"].is_null() {
+        v["contentBase64"] = json!(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &a.content));
     }
     Ok(Json(v).into_response())
 }
@@ -611,5 +605,5 @@ async fn journal(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<JournalQ
 async fn docs_impact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     let project = access.project.clone();
-    Ok(Json(app.blocking(move |app| crate::knowledge::docs_impact(app, &project, &id)).await?))
+    Ok(Json(json!(app.blocking(move |app| crate::knowledge::docs_impact(app, &project, &id)).await?)))
 }

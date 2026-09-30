@@ -2,13 +2,15 @@
 title: Решения (по итогам интервью, 2026-09-27)
 summary: Журнал решений по итогам интервью с владельцем: статусы, автономность, команды, хранилище, git, ABAP, модели и уведомления.
 type: decision
-status: current
+status: deprecated
 tags: [решения, интервью]
-paths: [src/tracker/model.ts, src/tracker/db.ts, src/tracker/store.ts, src/team/config.ts, src/team/ops.ts, src/team/spawn.ts, src/extension/index.ts, src/extension/settings.ts, src/notify.ts, config/default.json, agents/*.md]
+paths: []
 verified: 2026-09-27
 ---
 
 # Решения (по итогам интервью, 2026-09-27)
+
+> Журнал TS-версии (расширение pi, удалено 2026-09-29): «Где реализовано» указывает на её файлы. Решения сервера — [[platform/decisions]].
 
 | # | Вопрос | Решение | Где реализовано |
 |---|---|---|---|

@@ -248,7 +248,7 @@ export function TeamView() {
                           </div>
                         )}
                         <div className="text">
-                          <MessageText text={m.text} />
+                          <MessageText text={m.text} team={team.id} />
                         </div>
                         {m.kind === "mine" && !same(next) && <span className="receipt">{m.delivered ? "получено" : "ещё не прочитано"}</span>}
                       </div>
@@ -353,7 +353,7 @@ export function TeamView() {
 function MemberCard({ team, member: m, live, session: s }: { team: TeamDetail; member: TeamDetail["members"][number]; live?: { state: LiveState; note?: string }; session?: LiveSession }) {
   useTick();
   const active = team.state === "active";
-  const state: LiveState = !active || m.state === "stopped" ? "stopped" : m.activity === "error" ? "error" : m.state === "lost" ? "error" : m.activity === "working" ? "working" : (live?.state ?? "idle");
+  const state: LiveState = !active || m.state === "stopped" ? "stopped" : m.activity === "error" || m.state === "error" ? "error" : m.activity === "working" ? "working" : (live?.state ?? "idle");
   const text =
     state === "working"
       ? s?.tool
@@ -362,9 +362,7 @@ function MemberCard({ team, member: m, live, session: s }: { team: TeamDetail; m
       : state === "waiting"
         ? (live?.note ?? "ждёт")
         : state === "error"
-          ? m.state === "lost"
-            ? "нет связи"
-            : "ошибка"
+          ? "ошибка"
           : state === "stopped"
             ? "остановлен"
             : "свободен";

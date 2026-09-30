@@ -1,7 +1,7 @@
 //! HTTP API and web UI.
 //!
-//! Routes of the TypeScript server (`src/web/server.ts`) keep their paths and JSON
-//! so the SPA works unchanged; project scope comes from the project cookie,
+//! Routes keep the paths and JSON of the TypeScript version's server, which the
+//! SPA was written against; project scope comes from the project cookie,
 //! `X-Genie-Project` or `?project=`. Protections: loopback bind by default,
 //! Host allowlist (DNS rebinding), `X-Genie: 1` on cookie-authenticated writes
 //! (cross-site forms cannot send it), no CORS.
@@ -10,20 +10,24 @@ pub mod account;
 pub mod agent_config;
 pub mod agents;
 pub mod automations;
+pub mod console;
 pub mod ctx;
 pub mod docs;
+pub mod images;
 pub mod live;
 pub mod mcp_gateway;
+pub mod mcp_server;
 pub mod tasks;
 pub mod teams;
+pub mod web;
 
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use genie_core::GenieError;
 use serde_json::json;
@@ -84,23 +88,22 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(teams::routes())
         .merge(agents::routes())
         .merge(docs::routes())
+        .merge(images::routes())
         .merge(automations::routes())
+        .merge(console::routes())
         .merge(agent_config::routes())
         .merge(mcp_gateway::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
-    let index = app.web_root.join("index.html");
-    let router = Router::new().nest("/api", api);
+    let router =
+        Router::new().nest("/api", api).route("/mcp", post(mcp_server::endpoint).get(mcp_server::no_stream).delete(mcp_server::no_stream));
     // Client-side routes (/board, /team/G-7…) fall back to the SPA entry.
-    let router = if index.exists() {
-        router.fallback_service(ServeDir::new(&app.web_root).fallback(ServeFile::new(index)))
-    } else {
-        router.fallback(|| async {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "genie web UI is not built yet: run `npm install && npm run build:web` in the genie repository",
-            )
-        })
+    let router = match web::resolve(app.web_root.as_deref()) {
+        web::WebUi::BuiltIn => {
+            router.fallback(|method: Method, uri: Uri| async move { web::respond(web::WEB_ASSETS, &method, uri.path()) })
+        }
+        web::WebUi::Dir(dir) => router.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")))),
+        web::WebUi::Missing(why) => router.fallback(move || async move { (StatusCode::SERVICE_UNAVAILABLE, why) }),
     };
     router.layer(middleware::from_fn_with_state(app.clone(), guard)).with_state(app)
 }

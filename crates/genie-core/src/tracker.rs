@@ -1,5 +1,5 @@
 //! The task tracker: tasks, epics, the role-checked workflow, acceptance,
-//! comments, artifacts and history. Port of `src/tracker/store.ts`: error
+//! comments, artifacts and history. Ported from the TypeScript tracker: error
 //! messages and rules match it; every change also appends to the event journal
 //! in the same transaction.
 

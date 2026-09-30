@@ -1,53 +1,43 @@
 //! The Rust core opens a tracker written by the TypeScript CLI in place: same
-//! schema, same JSON columns, same ids. Skipped when Node or the TypeScript
-//! sources are not available.
+//! schema, same JSON columns, same ids.
+//!
+//! `fixtures/ts-tracker.db` is the `.genie/genie.db` the TypeScript CLI wrote
+//! (schema 3) in a directory named `shop`, with `GENIE_ROLE=human GENIE_MEMBER=anna`:
+//!
+//! ```text
+//! genie init --prefix TS
+//! genie new Export -d "CSV export" -a downloads --label web --draft
+//! genie comment TS-1 "please hurry"
+//! genie status TS-1 needs_owner -m "Keep ZPR1?"
+//! ```
+//!
+//! It is kept as it was written, so trackers of the TypeScript era keep opening
+//! after the TypeScript CLI is gone.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
 use genie_core::*;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
-}
-
-fn node_genie(cwd: &Path, args: &[&str]) -> bool {
-    let cli = repo_root().join("src/cli/genie.ts");
-    Command::new("node")
-        .arg(&cli)
-        .args(args)
-        .current_dir(cwd)
-        .env_remove("GENIE_DIR")
-        .env("GENIE_ROLE", "human")
-        .output()
-        .map(|o| {
-            if !o.status.success() {
-                eprintln!("genie {args:?}: {}", String::from_utf8_lossy(&o.stderr));
-            }
-            o.status.success()
-        })
-        .unwrap_or(false)
-}
 
 #[test]
 fn opens_a_tracker_written_by_the_typescript_cli() {
     let project = tempfile::tempdir().unwrap();
-    if !repo_root().join("src/cli/genie.ts").exists() || !node_genie(project.path(), &["init", "--prefix", "TS"]) {
-        eprintln!("skipped: node or the TypeScript CLI is not available");
-        return;
-    }
-    assert!(node_genie(project.path(), &["new", "Export", "-d", "CSV export", "-a", "downloads", "--label", "web", "--draft"]));
-    assert!(node_genie(project.path(), &["comment", "TS-1", "please hurry"]));
-    assert!(node_genie(project.path(), &["status", "TS-1", "needs_owner", "-m", "Keep ZPR1?"]));
+    let dir = project.path().join(".genie");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ts-tracker.db"), dir.join("genie.db")).unwrap();
 
-    let t = Tracker::open(project.path().join(".genie")).unwrap();
+    let t = Tracker::open(&dir).unwrap();
     assert_eq!(t.meta().unwrap().prefix, "TS");
     let task = t.get("1").unwrap();
     assert_eq!(task.id, "TS-1");
+    assert_eq!(task.title, "Export");
+    assert_eq!(task.description, "CSV export");
     assert_eq!(task.labels, vec!["web"]);
     assert_eq!(task.acceptance[0].text, "downloads");
     assert_eq!(task.comments[0].kind, CommentKind::Owner);
-    assert_eq!(task.needs_owner.as_ref().unwrap().previous, Status::Draft);
+    assert_eq!((task.comments[0].author.as_str(), task.comments[0].text.as_str()), ("anna", "please hurry"));
+    assert_eq!(task.status, Status::NeedsOwner);
+    let asked = task.needs_owner.as_ref().unwrap();
+    assert_eq!((asked.question.as_str(), asked.previous), ("Keep ZPR1?", Status::Draft));
 
     // Rust writes on top of the TypeScript data: the sequence continues and events start now.
     let next =

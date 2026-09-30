@@ -1,7 +1,7 @@
 // UI-side view of the tracker model. Types and constants come straight from the
 // server code, so the API contract is checked by the compiler on both sides.
 
-import type { Status, Task, TaskSummary } from "../../../../src/tracker/model.ts";
+import type { Status, Task, TaskSummary } from "../../shared/api/types.ts";
 
 export type { Status, Task, TaskSummary };
 

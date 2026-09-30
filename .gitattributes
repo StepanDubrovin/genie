@@ -2,3 +2,5 @@
 docker/*.sh text eol=lf
 docker/gitconfig text eol=lf
 docker/configure.mjs text eol=lf
+# TypeScript types of the API, generated from the Rust structs (ts-rs): folded in diffs.
+web/src/shared/api/generated/** linguist-generated=true

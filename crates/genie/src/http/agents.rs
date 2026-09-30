@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use genie_core::team::{self, ORCHESTRATOR, SendMail};
@@ -57,9 +57,12 @@ struct LeaseBody {
     seen: Vec<i64>,
 }
 
-async fn lease(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<LeaseBody>) -> ApiResult<Json<Value>> {
+async fn lease(State(app): State<Arc<App>>, ctx: Ctx, headers: HeaderMap, Json(b): Json<LeaseBody>) -> ApiResult<Json<Value>> {
     let access = ctx.access(&app, None).await?;
     let (team, recipient) = own_mailbox(&access)?;
+    if team.is_none() {
+        super::console::may_take_orchestrator_mail(&app, &access.project, &headers).await?;
+    }
     let slug = access.project.clone();
     let budget = app.cfg.runtime.delivery_budget.max(500);
     let delivery = app
@@ -176,7 +179,7 @@ async fn ask(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<AskBody>) -> A
         .await?;
     let Some(ask) = asked.first().cloned() else { return Err(ApiError::bad("nobody to ask")) };
     if asked.len() > 1 {
-        return Err(ApiError::bad("ask one teammate (not all); broadcast with `genie agent send all`"));
+        return Err(ApiError::bad("ask one teammate (not all); broadcast with `genie mail send all`"));
     }
     wake(&app);
     let limit = Duration::from_secs(b.timeout.unwrap_or(app.cfg.runtime.ask_timeout_secs).clamp(1, 1800));
