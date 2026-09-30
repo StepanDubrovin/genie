@@ -24,24 +24,37 @@
 .ac-say .text .md > :first-child { margin-top: 0; }
 .ac-say .text .md > :last-child { margin-bottom: 0; }
 .ac-say .t { font-size: 12px; line-height: 20px; color: var(--muted); }
-.ac-think { align-self: flex-start; display: flex; align-items: flex-start; gap: 8px; max-width: 100%; margin-left: 36px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 12.5px; font-style: italic; text-align: left; }
-.ac-think svg { flex: none; margin-top: 5px; transition: transform 0.15s; }
-.ac-think span { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
-.ac-think.open svg { transform: rotate(90deg); }
-.ac-think.open span { display: block; white-space: pre-wrap; }
-.ac-tool { margin-left: 36px; border: 1px solid var(--line); border-radius: 10px; background: #0f1013; overflow: hidden; }
-.ac-tool.running { border-color: #2f3463; }
-.ac-tool.error { border-color: var(--amber-line); }
-.ac-thd { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 6px 0 12px; }
-.ac-tool .name { flex: none; font: 11px/18px var(--mono); padding: 0 6px; border-radius: 5px; background: var(--bg-active); color: var(--text-2); }
-.ac-tool .args { flex: 1; min-width: 0; font: 12px var(--mono); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ac-tool .st { flex: none; font-size: 12px; color: var(--muted); }
-.ac-tool.running .st { color: var(--accent-text); }
-.ac-tool.error .st { color: var(--amber); }
-.ac-tool .quote { flex: none; height: 26px; padding: 0 8px; border: 0; border-radius: 6px; background: none; color: var(--accent-text); font-size: 12px; opacity: 0; }
-.ac-tool:hover .quote, .ac-tool .quote:focus-visible { opacity: 1; }
-@media (hover: none) { .ac-tool .quote { opacity: 1; } }
-.ac-tool .out { margin: 0; max-height: 160px; overflow: auto; padding: 8px 12px; border-top: 1px solid var(--line); font: 11.5px/1.55 var(--mono); color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The agent's steps: faded one-line tool calls and «Thinking…», a run of them folded into one line. */
+.ac-steps { margin-left: 36px; display: flex; flex-direction: column; gap: 2px; }
+.ac-steps.open > .ac-steplist { margin-left: 13px; padding-left: 12px; border-left: 1px solid var(--line); }
+.ac-steplist { display: flex; flex-direction: column; gap: 2px; }
+.ac-stepitem { display: flex; flex-direction: column; gap: 4px; }
+.ac-steprow { display: flex; align-items: center; gap: 4px; }
+.ac-step { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 8px; border: 0; border-radius: 8px; background: none; color: var(--text-2); font-size: 12px; text-align: left; overflow: hidden; opacity: 0.6; transition: opacity 0.12s, background 0.12s; }
+.ac-step.group { height: 30px; }
+.ac-step:hover, .ac-step:focus-visible, .ac-step.open, .ac-step.running { opacity: 1; }
+.ac-step:hover:not(:disabled), .ac-step.open { background: var(--bg-hover); }
+.ac-step:disabled { cursor: default; }
+.ac-step > svg { flex: none; color: var(--muted); transition: transform 0.15s; }
+.ac-step.open > svg:first-child { transform: rotate(90deg); }
+.ac-step:disabled > svg:first-child { visibility: hidden; }
+.ac-step .count { flex: none; }
+.ac-step .chips { flex: 0 1 auto; min-width: 0; display: flex; gap: 6px; overflow: hidden; }
+.ac-chip { flex: none; font: 11px/18px var(--mono); padding: 0 6px; border-radius: 5px; background: #1b1d33; color: var(--accent-text); white-space: nowrap; }
+.ac-chip.bad { background: #2a1f12; color: #f5b670; }
+.ac-chip.think { padding: 0 2px; background: none; color: var(--muted); font: italic 12px/18px var(--sans); }
+.ac-step .args { flex: 1; min-width: 0; font: 12px var(--mono); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ac-step.running .args { color: var(--text); }
+.ac-step .took { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ac-step .st { flex: none; color: var(--muted); }
+.ac-step .st.live { color: var(--accent-text); }
+.ac-step .st.bad { color: var(--amber); }
+.ac-step .spin { flex: none; width: 9px; height: 9px; }
+.ac-steprow .quote { flex: none; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 8px; background: none; color: var(--accent-text); opacity: 0; }
+.ac-steprow:hover .quote, .ac-steprow .quote:focus-visible { opacity: 1; }
+@media (hover: none) { .ac-steprow .quote { opacity: 0.6; } }
+.ac-thought { margin: 0 0 4px 26px; font-size: 12.5px; font-style: italic; line-height: 1.55; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ac-stepitem .out { margin: 0 0 4px 26px; max-height: 240px; overflow: auto; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: #0f1013; font: 11.5px/1.55 var(--mono); color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .ac-chips { flex: none; gap: 8px; padding: 0 16px 8px; overflow-x: auto; }
 .ac-chips .chip { flex: none; height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 18px; background: none; color: var(--text-2); font-size: 14px; white-space: nowrap; }
@@ -108,12 +121,13 @@
   .agent-chat { min-height: 100vh; }
   .ac-tabs { padding: 8px 16px; }
   .ac-feed { padding: 8px 16px 12px; }
-  .ac-think, .ac-tool { margin-left: 0; }
+  .ac-steps { margin-left: 0; }
+  .ac-step { height: 40px; }
+  .ac-step.group .stack, .ac-step.group .args { display: none; }
+  .ac-step.group .chips { flex: 1; }
   .ac-composer { margin: 8px 16px 16px; }
   .ac-composer .hint, .ac-composer .ac-levels { display: none; }
-  .ac-tool .quote { display: none; }
-  .ac-tool .args { white-space: normal; overflow-wrap: anywhere; }
-  .ac-thd { flex-wrap: wrap; padding: 8px 12px; row-gap: 4px; }
+  .ac-steprow .quote { display: none; }
   /* "What is it doing?" opens the agent panel as a sheet. */
   .team-aside.ac-aside.open { display: flex; position: fixed; inset: auto 0 0 0; max-height: 75vh; border-top: 1px solid var(--line-strong); border-radius: 16px 16px 0 0; box-shadow: var(--shadow); z-index: 15; }
 }
