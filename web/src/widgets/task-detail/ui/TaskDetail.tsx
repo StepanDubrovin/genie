@@ -31,6 +31,7 @@ import { useAgentConfig } from "@/entities/agent-config";
 import { PersonAvatar, responsibleChoices, useMembers } from "@/entities/project";
 import { useSession } from "@/entities/session";
 import type { Team } from "@/entities/team";
+import { OwnerDecision } from "@/features/owner-decision";
 import { SpawnTeamDialog } from "@/features/spawn-team";
 import { plural, timeAgo, useTick } from "@/shared/lib";
 import { ConfirmDialog, Icon, Markdown, useToast } from "@/shared/ui";
@@ -48,7 +49,6 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const check = useCheck();
   const del = useDeleteTask();
   const [deleting, setDeleting] = useState(false);
-  const [answer, setAnswer] = useState("");
   const [draft, setDraft] = useState("");
   const [editDesc, setEditDesc] = useState<string | undefined>();
   const [spawning, setSpawning] = useState(false);
@@ -63,7 +63,6 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const members = useMembers(me ? session?.project : undefined).data;
 
   useEffect(() => {
-    setAnswer("");
     setDraft("");
     setEditDesc(undefined);
     setDeleting(false);
@@ -89,22 +88,6 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
 
   const setStatus = (status: Status, note?: string) =>
     move.mutate({ id: t.id, status, note }, { onSuccess: () => toast(`${t.id} → ${STATUS_NAME[status]} · оркестратор уведомлён`), onError: fail });
-
-  const sendAnswer = (andReturn: boolean) => {
-    const text = answer.trim();
-    if (!text) return;
-    comment.mutate(
-      { id: t.id, text },
-      {
-        onSuccess: () => {
-          setAnswer("");
-          if (andReturn && t.needsOwner) setStatus(t.needsOwner.previous, "Owner answered");
-          else toast("Ответ отправлен оркестратору");
-        },
-        onError: fail,
-      },
-    );
-  };
 
   // A status change's note is also a comment (`[in_progress → review] …`): the history
   // line already says it, so the comment is left out of the activity.
@@ -290,35 +273,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
         {epic && <EpicBox id={epic.id} onArtifact={viewer.show} />}
         {impactEnabled && <DocsImpactBlock result={impact.data} />}
 
-        {t.needsOwner && (
-          <section className="owner-box" aria-label="Нужно ваше решение">
-            <div className="h">
-              <StatusIcon status="needs_owner" size={15} />
-              Нужно ваше решение
-              <span className="when">
-                {t.needsOwner.by} · {timeAgo(t.needsOwner.at)}
-              </span>
-            </div>
-            <p>{t.needsOwner.question}</p>
-            <textarea
-              aria-label="Ваш ответ"
-              placeholder="Ваш ответ уйдёт оркестратору и команде"
-              value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && (e.metaKey || e.ctrlKey) && sendAnswer(true)}
-            />
-            <div className="actions">
-              <span>⌘↵ ответить и вернуть в «{STATUS_NAME[t.needsOwner.previous]}»</span>
-              <span className="grow" />
-              <button type="button" className="btn ghost" disabled={!answer.trim()} onClick={() => sendAnswer(false)}>
-                Только ответить
-              </button>
-              <button type="button" className="btn amber" disabled={!answer.trim()} onClick={() => sendAnswer(true)}>
-                Ответить и вернуть в работу
-              </button>
-            </div>
-          </section>
-        )}
+        <OwnerDecision task={t} />
 
         <section className="sec">
           <h3>

@@ -319,6 +319,91 @@ pub struct NeedsOwner {
     pub at: String,
     /// Status to return to once the owner has answered.
     pub previous: Status,
+    /// What the owner can do right in the decision box besides answering in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<OwnerAction>,
+}
+
+/// An action an agent attaches to its question for the owner. The kind picks the buttons
+/// the web shows; a free answer is always possible. New kinds are added here (with their
+/// checks in `validate`) and as a card in the web, which shows a kind it does not know
+/// as a plain question.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+#[ts(export)]
+pub enum OwnerAction {
+    /// A question with options to pick from.
+    AskOwnerQuestion { options: Vec<String> },
+    /// Merge the task's request in a repository (or look at it first).
+    AskForMergePr {
+        /// The repository (the server picks the task's only open request when it is empty).
+        #[serde(default)]
+        repo: String,
+        /// The request's number and page on the host, filled in by the server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        number: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        url: Option<String>,
+    },
+    /// A question answered in words.
+    AskFreeForm,
+}
+
+impl OwnerAction {
+    pub const KINDS: &'static [&'static str] = &["ask-owner-question", "ask-for-merge-pr", "ask-free-form"];
+    pub const MAX_OPTIONS: usize = 6;
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            OwnerAction::AskOwnerQuestion { .. } => "ask-owner-question",
+            OwnerAction::AskForMergePr { .. } => "ask-for-merge-pr",
+            OwnerAction::AskFreeForm => "ask-free-form",
+        }
+    }
+
+    /// Read an action as agents send it: `{"kind": "ask-owner-question", "options": […]}`
+    /// (`validate` checks it when the task moves).
+    pub fn parse(v: &serde_json::Value) -> Result<OwnerAction, GenieError> {
+        let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or_default();
+        if !Self::KINDS.contains(&kind) {
+            return Err(GenieError::invalid(format!("unknown action \"{kind}\" (known: {})", Self::KINDS.join(", "))));
+        }
+        serde_json::from_value(v.clone()).map_err(|e| GenieError::invalid(format!("action {kind}: {e}")))
+    }
+
+    /// Tidy the action and check what it needs; the server fills in the rest (a request's number).
+    pub fn validate(&mut self) -> Result<(), GenieError> {
+        match self {
+            OwnerAction::AskOwnerQuestion { options } => {
+                let mut seen: Vec<String> = Vec::new();
+                for o in options.iter().map(|o| o.trim()).filter(|o| !o.is_empty()) {
+                    if o.chars().count() > 120 {
+                        return Err(GenieError::invalid("ask-owner-question: an option is at most 120 characters"));
+                    }
+                    if !seen.iter().any(|s| s == o) {
+                        seen.push(o.to_string());
+                    }
+                }
+                if seen.len() < 2 || seen.len() > Self::MAX_OPTIONS {
+                    return Err(GenieError::invalid(format!(
+                        "ask-owner-question takes 2 to {} different options (the owner can always answer in words)",
+                        Self::MAX_OPTIONS
+                    )));
+                }
+                *options = seen;
+            }
+            OwnerAction::AskForMergePr { repo, .. } => {
+                *repo = repo.trim().to_string();
+                if repo.is_empty() {
+                    return Err(GenieError::invalid("ask-for-merge-pr needs the repository whose request to merge"));
+                }
+            }
+            OwnerAction::AskFreeForm => {}
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]

@@ -77,7 +77,8 @@ fn the_auto_ready_playbook_moves_a_task_once_nothing_holds_it() {
     assert_eq!(status(&blocked), Status::Draft, "a block holds it");
 
     app.with_tracker("shop", |t| t.unblock(&anna, &blocked)).unwrap();
-    app.with_tracker("shop", |t| t.set_status(&anna, &dep, Status::Done, StatusOptions { note: None, force: true })).unwrap();
+    app.with_tracker("shop", |t| t.set_status(&anna, &dep, Status::Done, StatusOptions { note: None, force: true, ..Default::default() }))
+        .unwrap();
     genie::engine::tick(&app).unwrap();
     assert_eq!(status(&blocked), Status::Ready, "unblocked, nothing else holds it");
     assert_eq!(status(&waiting), Status::Ready, "its dependency is done");

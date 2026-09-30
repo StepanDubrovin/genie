@@ -404,7 +404,11 @@ async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
         verdict.map_err(|m| ApiError::new(StatusCode::CONFLICT, m))?;
     }
     let force = access.is_human() || (access.actor.role == Role::Orchestrator && b["force"] == json!(true));
-    let opts = StatusOptions { note: b.get("note").and_then(text).filter(|n| !n.is_empty()), force };
+    let action = match b.get("action").filter(|a| !a.is_null()) {
+        Some(a) => Some(owner_action(&app, &access.project, &id, OwnerAction::parse(a)?).await?),
+        None => None,
+    };
+    let opts = StatusOptions { note: b.get("note").and_then(text).filter(|n| !n.is_empty()), force, action };
     let actor = access.actor.clone();
     let task = tracker(&app, &access, move |t| t.set_status(&actor, &id, to, opts)).await?;
     if CLOSED.contains(&to) {
@@ -412,6 +416,33 @@ async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
     }
     changed(&app);
     Ok(to_json(task))
+}
+
+/// An owner action as the task will keep it: a merge request names the task's open
+/// request (the only one when no repository is named) with its number and page.
+async fn owner_action(app: &Arc<App>, project: &str, task: &str, action: OwnerAction) -> ApiResult<OwnerAction> {
+    let OwnerAction::AskForMergePr { repo, .. } = action else { return Ok(action) };
+    let (slug, raw) = (project.to_string(), task.to_string());
+    let rows = app
+        .blocking(move |app| {
+            let task = app.with_tracker(&slug, |t| t.normalize_id(&raw))?;
+            app.with_server(|db| db.task_repos(&slug, &task))
+        })
+        .await?;
+    let open: Vec<_> = rows.into_iter().filter(|r| r.cr_number.is_some() && r.cr_state.as_deref() == Some("open")).collect();
+    let names = || open.iter().map(|r| r.repo.as_str()).collect::<Vec<_>>().join(", ");
+    let row = match repo.trim() {
+        "" if open.len() == 1 => &open[0],
+        "" if open.is_empty() => return Err(ApiError::bad(format!("ask-for-merge-pr: {task} has no open request to merge"))),
+        "" => return Err(ApiError::bad(format!("ask-for-merge-pr: name the repository (open requests in {})", names()))),
+        name => open.iter().find(|r| r.repo == name).ok_or_else(|| {
+            ApiError::bad(format!(
+                "ask-for-merge-pr: {task} has no open request in {name}{}",
+                if open.is_empty() { String::new() } else { format!(" (open in {})", names()) }
+            ))
+        })?,
+    };
+    Ok(OwnerAction::AskForMergePr { repo: row.repo.clone(), number: row.cr_number, url: row.cr_url.clone() })
 }
 
 async fn comment(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, Json(b): Json<Value>) -> ApiResult<impl IntoResponse> {

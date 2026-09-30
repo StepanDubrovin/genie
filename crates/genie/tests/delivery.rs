@@ -424,3 +424,51 @@ async fn what_a_person_writes_on_the_request_reaches_the_task_and_the_team_once(
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_owner_merges_from_the_agents_request_by_the_policy() {
+    let r = rig("github", json!({})).await;
+    let t = team(&r, "Ship the report").await;
+    let id = t.task.clone();
+    assert_eq!(status(&r, &id, &t.executor, "in_progress").await.0, StatusCode::OK);
+    commit_and_push(&t);
+
+    // Before there is a request, asking to merge one says so.
+    let ask = json!({ "status": "needs_owner", "note": "Слейте, пожалуйста", "action": { "kind": "ask-for-merge-pr" } });
+    let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/status"), Some(&r.orchestrator), Some(ask.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("no open request"), "{b}");
+
+    let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({ "title": "Report" }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+
+    // The task's only open request is the one to merge: the server names it.
+    let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/status"), Some(&r.orchestrator), Some(ask)).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    let action = &b["needsOwner"]["action"];
+    assert_eq!(
+        (action["kind"].as_str(), action["repo"].as_str(), action["number"].as_i64()),
+        (Some("ask-for-merge-pr"), Some("api"), Some(1)),
+        "{b}"
+    );
+    assert!(action["url"].as_str().is_some_and(|u| !u.is_empty()), "{b}");
+
+    // A repository without a request of the task is refused by name.
+    let wrong = json!({ "status": "needs_owner", "note": "?", "action": { "kind": "ask-for-merge-pr", "repo": "web" } });
+    let (s, b) = http(&r, "POST", &format!("/api/tasks/{id}/status"), Some(&r.orchestrator), Some(wrong)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("open in api"), "{b}");
+
+    // The button holds the person to the policy: the checks must pass (the person counts as the approval).
+    r.fake.lock().ci = "failed".into();
+    let merge = format!("/api/tasks/{id}/repos/api/cr/merge");
+    let (s, b) = http(&r, "POST", &merge, None, Some(json!({ "policy": true }))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("checks"), "{b}");
+    assert_eq!(r.fake.lock().prs[0].state, "open");
+
+    r.fake.lock().ci = "passed".into();
+    let (s, b) = http(&r, "POST", &merge, None, Some(json!({ "policy": true }))).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["request"]["state"], "merged");
+}

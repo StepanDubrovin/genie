@@ -20,6 +20,7 @@ export type { HistoryEntry } from "./generated/HistoryEntry.ts";
 export type { Mail } from "./generated/Mail.ts";
 export type { Member } from "./generated/Member.ts";
 export type { NeedsOwner } from "./generated/NeedsOwner.ts";
+export type { OwnerAction } from "./generated/OwnerAction.ts";
 export type { Policy } from "./generated/Policy.ts";
 export type { Publish } from "./generated/Publish.ts";
 export type { Role } from "./generated/Role.ts";

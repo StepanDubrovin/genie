@@ -121,9 +121,22 @@ async fn cr_comment(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn cr_merge(State(app): State<Arc<App>>, ctx: Ctx, Path((id, name)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MergeBody {
+    /// A person asks to be held to the repository's policy (the merge button of an agent's request).
+    policy: bool,
+}
+
+async fn cr_merge(
+    State(app): State<Arc<App>>,
+    ctx: Ctx,
+    Path((id, name)): Path<(String, String)>,
+    body: Option<Json<MergeBody>>,
+) -> ApiResult<Json<Value>> {
     let (access, task, caller) = cr_caller(&app, &ctx, &id, Touch::Edit).await?;
-    let out = delivery::merge(&app, &access.project, &task, &name, &caller).await?;
+    let by_policy = body.is_some_and(|b| b.policy);
+    let out = delivery::merge(&app, &access.project, &task, &name, &caller, by_policy).await?;
     changed(&app);
     Ok(Json(out))
 }

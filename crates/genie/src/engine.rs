@@ -328,7 +328,11 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
         "task.status" => {
             let task = need_task()?;
             let to: Status = input["to"].as_str().unwrap_or_default().parse().map_err(AppError::Genie)?;
-            let opts = StatusOptions { note: input["note"].as_str().map(str::to_string), force: input["force"] == json!(true) };
+            let opts = StatusOptions {
+                note: input["note"].as_str().map(str::to_string),
+                force: input["force"] == json!(true),
+                ..Default::default()
+            };
             let t = app.with_tracker(project, |t| t.set_status(&actor, &task, to, opts))?;
             if genie_core::CLOSED.contains(&to) {
                 let _ = crate::runtime::reap_closed_blocking(app, project);
@@ -395,7 +399,7 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
                 let note =
                     "Nothing holds it: no block, dependencies done, no open questions or jobs; moved to ready automatically".to_string();
                 app.with_tracker(project, |tr| {
-                    tr.set_status(&actor, &t.id, Status::Ready, StatusOptions { note: Some(note), force: false })
+                    tr.set_status(&actor, &t.id, Status::Ready, StatusOptions { note: Some(note), force: false, ..Default::default() })
                 })?;
                 moved.push(t.id);
             }
@@ -642,7 +646,12 @@ fn poll(app: &App, run: &Run, step: &Value, state: &StepState) -> AppResult<Outc
                             let note = format!("Нет ответа на вопросы: {}", open.join("; "));
                             let actor = automation_actor(run);
                             let _ = app.with_tracker(&run.project, |t| {
-                                t.set_status(&actor, task, Status::NeedsOwner, StatusOptions { note: Some(note), force: false })
+                                t.set_status(
+                                    &actor,
+                                    task,
+                                    Status::NeedsOwner,
+                                    StatusOptions { note: Some(note), force: false, ..Default::default() },
+                                )
                             });
                         }
                         Ok(Outcome::Done(json!({ "answers": genie_core::inbox::answers_json(&qn), "expired": true })))

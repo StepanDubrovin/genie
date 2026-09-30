@@ -264,7 +264,19 @@ pub async fn comment(app: &Arc<App>, project: &str, task: &str, repo: &str, call
 }
 
 /// Merge the task's request, if the policy and the host's conditions allow it.
-pub async fn merge(app: &Arc<App>, project: &str, task: &str, repo: &str, caller: &Caller) -> DResult<Value> {
+/// How closely a merge follows the repository's policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strictness {
+    /// Agents and the server: everything the policy asks (checks, approvals, no requested changes).
+    Agent,
+    /// A person from the merge button of an agent's request: the same checks, the person
+    /// pressing it counting as one approval.
+    Owner,
+    /// A person merging as they wish; the host's own rules still apply.
+    Free,
+}
+
+pub async fn merge(app: &Arc<App>, project: &str, task: &str, repo: &str, caller: &Caller, by_policy: bool) -> DResult<Value> {
     let (p, tk, rp, c) = (project.to_string(), task.to_string(), repo.to_string(), caller.clone());
     let (t, status) = app
         .blocking(move |app| {
@@ -273,14 +285,20 @@ pub async fn merge(app: &Arc<App>, project: &str, task: &str, repo: &str, caller
             Ok((t, status))
         })
         .await?;
-    // People merge as they wish; agents (and the server's own auto-merge) follow the policy.
-    if caller.agent.is_some() {
+    // People merge as they wish, or by the policy when they ask for it; agents (and the
+    // server's own auto-merge) always follow the policy.
+    let strictness = if caller.agent.is_some() {
         t.eff.check_merge(status == Status::Approved).map_err(DeliveryError::Denied)?;
-    }
-    do_merge(app, project, task, &t, caller.agent.is_some()).await
+        Strictness::Agent
+    } else if by_policy {
+        Strictness::Owner
+    } else {
+        Strictness::Free
+    };
+    do_merge(app, project, task, &t, strictness).await
 }
 
-async fn do_merge(app: &Arc<App>, project: &str, task: &str, t: &Target, strict: bool) -> DResult<Value> {
+async fn do_merge(app: &Arc<App>, project: &str, task: &str, t: &Target, strictness: Strictness) -> DResult<Value> {
     let number = t.row.cr_number.ok_or_else(|| DeliveryError::Invalid("no request is open for this task yet".into()))?;
     let api = api(t)?;
     let cr = api.get(&t.record.remote, number).await?;
@@ -291,7 +309,7 @@ async fn do_merge(app: &Arc<App>, project: &str, task: &str, t: &Target, strict:
         return Err(DeliveryError::Invalid(format!("#{number} is a draft")));
     }
     let policy = &t.eff.policy.change_request;
-    if strict {
+    if strictness != Strictness::Free {
         if cr.mergeable == Some(false) {
             return Err(DeliveryError::Invalid(format!(
                 "the host says #{number} cannot be merged now (conflicts or unmet rules): fix that, then merge"
@@ -300,7 +318,8 @@ async fn do_merge(app: &Arc<App>, project: &str, task: &str, t: &Target, strict:
         if cr.changes_requested {
             return Err(DeliveryError::Invalid(format!("a reviewer asked for changes on #{number}")));
         }
-        if cr.approvals < policy.approvals {
+        let approvals = cr.approvals + u32::from(strictness == Strictness::Owner);
+        if approvals < policy.approvals {
             return Err(DeliveryError::Invalid(format!("#{number} has {} of {} approvals on the host", cr.approvals, policy.approvals)));
         }
         if policy.require_ci {
@@ -487,10 +506,9 @@ pub fn gate(app: &App, project: &str, task: &str, to: Status) -> Result<(), Stri
             }
             Status::Done if row.cr_state.as_deref() == Some("open") => {
                 return Err(format!(
-                    "the request #{} of {} is not merged yet: it is merged by a person (move the task to needs_owner and say so) or by you (`genie pr merge --repo {}`) when the policy allows",
+                    "the request #{} of {1} is not merged yet: it is merged by a person (move the task to needs_owner with `--action ask-for-merge-pr --repo {1}`) or by you (`genie pr merge --repo {1}`) when the policy allows",
                     row.cr_number.unwrap_or_default(),
                     row.repo,
-                    row.repo
                 ));
             }
             _ => {}
@@ -558,7 +576,7 @@ pub async fn watch_one(app: &Arc<App>, row: &TaskRepo) -> DResult<()> {
     if let Some(t) = auto
         && ci != Ci::Failed
     {
-        match do_merge(app, &row.project, &row.task, &t, true).await {
+        match do_merge(app, &row.project, &row.task, &t, Strictness::Agent).await {
             Ok(_) => crate::http::tasks::changed(app),
             // Not yet mergeable (approvals, checks still running): try again next time.
             Err(DeliveryError::Invalid(_)) => {}
