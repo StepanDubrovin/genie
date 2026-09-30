@@ -152,8 +152,15 @@ async fn spawn(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<SpawnBody>) 
         return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) assembles teams"));
     }
     let slug = access.project.clone();
-    let req =
-        SpawnRequest { task: b.task, template: b.template, members: b.members, models: b.models, note: b.note, by: access.actor.clone() };
+    let req = SpawnRequest {
+        task: b.task,
+        template: b.template,
+        members: b.members,
+        models: b.models,
+        note: b.note,
+        by: access.actor.clone(),
+        initiator: None,
+    };
     let team = app.blocking(move |app| runtime::spawn_team(app, &slug, req)).await?;
     changed(&app);
     Ok((StatusCode::CREATED, Json(json!(team))))
@@ -534,6 +541,7 @@ async fn create_job(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<JobBody
             if app.agents().role_for(&slug, &b.role)?.class == Role::Orchestrator {
                 return Err(genie_core::GenieError::invalid("the orchestrator does not run one-shot jobs").into());
             }
+            let initiator = crate::llm_key::initiator_of(app, &slug, &access.actor, b.task.as_deref());
             app.with_server(|db| {
                 db.create_job(NewJob {
                     project: slug,
@@ -545,6 +553,7 @@ async fn create_job(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<JobBody
                     inputs: b.inputs,
                     output_schema: b.output_schema,
                     workspace: b.workspace.unwrap_or_else(|| "none".into()),
+                    initiator,
                 })
             })
         })

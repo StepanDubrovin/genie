@@ -70,6 +70,9 @@ pub struct Job {
     pub error: Option<String>,
     pub created: String,
     pub finished: Option<String>,
+    /// The person the job runs on behalf of (whose LiteLLM key it uses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initiator: Option<String>,
 }
 
 impl Job {
@@ -92,6 +95,7 @@ impl Job {
             error: r.get("error")?,
             created: r.get("created")?,
             finished: r.get("finished")?,
+            initiator: r.get("initiator")?,
         })
     }
 }
@@ -107,6 +111,8 @@ pub struct NewJob {
     pub inputs: Value,
     pub output_schema: Option<Value>,
     pub workspace: String,
+    /// The person the job runs on behalf of (a login).
+    pub initiator: Option<String>,
 }
 
 impl ServerDb {
@@ -174,8 +180,8 @@ impl ServerDb {
             return Err(GenieError::invalid("workspace must be none, read-only, worktree or scratch"));
         }
         self.conn().execute(
-            "INSERT INTO agent_jobs(project, task, run_step, role, model, goal, inputs, output_schema, workspace, status, created)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10)",
+            "INSERT INTO agent_jobs(project, task, run_step, role, model, goal, inputs, output_schema, workspace, status, created, initiator)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?11)",
             params![
                 j.project,
                 j.task,
@@ -186,7 +192,8 @@ impl ServerDb {
                 j.inputs.to_string(),
                 j.output_schema.map(|s| s.to_string()),
                 j.workspace,
-                now()
+                now(),
+                j.initiator
             ],
         )?;
         self.job(self.conn().last_insert_rowid())

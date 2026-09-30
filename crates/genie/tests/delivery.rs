@@ -105,6 +105,7 @@ async fn team(r: &Rig, title: &str) -> Team {
                 models: Default::default(),
                 note: None,
                 by: Actor::new("orchestrator", Role::Orchestrator),
+                initiator: None,
             },
         )
         .unwrap()

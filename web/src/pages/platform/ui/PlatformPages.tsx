@@ -1,5 +1,5 @@
 // Pages for the platform features of the server: answering questions (public
-// link), notifications, profile (Telegram, password, CLI token), automations
+// link), notifications, profile (Telegram, LiteLLM key, password, CLI token), automations
 // with runs and playbooks, and the review of knowledge proposals.
 
 import { useQueryClient } from "@tanstack/react-query";
@@ -13,6 +13,7 @@ import {
   RUN_STATUS,
   useAutomations,
   useChannels,
+  useLitellmKey,
   useNotifications,
   usePlaybooks,
   useProposal,
@@ -219,6 +220,8 @@ export function ProfilePage() {
   const [code, setCode] = useState<string>();
   const [token, setToken] = useState<string>();
   const [pw, setPw] = useState({ current: "", password: "" });
+  const litellm = useLitellmKey().data?.key;
+  const [litellmInput, setLitellmInput] = useState("");
   const telegram = channels?.links.find((l) => l.channel === "telegram");
   const local = session?.mode === "local";
   return (
@@ -274,6 +277,51 @@ export function ProfilePage() {
                   {code && <p className="secret">{code}</p>}
                 </>
               )}
+            </section>
+            <section>
+              <h2>Ключ LiteLLM</h2>
+              <p className="muted">
+                Агенты, которые работают от вашего имени — команды и задачи, запущенные вами или по вашим задачам, и оркестратор, когда отвечает вам, —
+                ходят в LiteLLM с этим ключом. Без него агенты на моделях <code>litellm/…</code> не запускаются. Ключ хранится на сервере в
+                зашифрованном виде и больше не показывается.
+              </p>
+              {litellm && (
+                <p>
+                  {litellm.unreadable ? (
+                    <span className="muted">Ключ сохранён, но сервер не может его прочитать (сменился ключ шифрования) — укажите его заново.</span>
+                  ) : (
+                    <>
+                      Ключ задан{litellm.hint ? ` (${litellm.hint})` : ""}, обновлён {timeAgo(litellm.updated)}.{" "}
+                    </>
+                  )}{" "}
+                  <button type="button" className="btn ghost" onClick={() => void act(() => request("DELETE", "/api/me/litellm-key"), "Ключ LiteLLM удалён")}>
+                    Удалить
+                  </button>
+                </p>
+              )}
+              <form
+                className="auth-form narrow"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void act(async () => {
+                    await request("PUT", "/api/me/litellm-key", { key: litellmInput });
+                    setLitellmInput("");
+                  }, "Ключ LiteLLM сохранён");
+                }}
+              >
+                <label className="field">
+                  {litellm ? "Новый ключ" : "Ключ"}
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    placeholder="sk-…"
+                    value={litellmInput}
+                    onChange={(e) => setLitellmInput(e.target.value)}
+                    required
+                  />
+                </label>
+                <button className="btn">{litellm ? "Заменить ключ" : "Сохранить ключ"}</button>
+              </form>
             </section>
             <section>
               <h2>Пароль</h2>

@@ -403,10 +403,12 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
                 return Err(invalid("agent: the orchestrator does not run one-shot jobs"));
             }
             let goal = input["goal"].as_str().unwrap_or_default().to_string();
+            let task = task_of(input, run);
+            let initiator = crate::llm_key::automation_initiator(app, run, task.as_deref());
             let job = app.with_server(|db| {
                 db.create_job(NewJob {
                     project: project.into(),
-                    task: task_of(input, run),
+                    task,
                     run_step: Some(state.id),
                     role,
                     model: input["model"].as_str().map(str::to_string),
@@ -414,6 +416,7 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
                     inputs: input["inputs"].clone(),
                     output_schema: input.get("output").cloned().filter(|v| !v.is_null()),
                     workspace: input["workspace"].as_str().unwrap_or("none").into(),
+                    initiator,
                 })
             })?;
             app.wake_runtime.notify_one();
@@ -429,6 +432,7 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
                 models: serde_json::from_value(input["models"].clone()).unwrap_or_default(),
                 note: input["note"].as_str().map(str::to_string),
                 by: actor.clone(),
+                initiator: crate::llm_key::automation_initiator(app, run, Some(&task)),
             };
             let team = runtime::spawn_team(app, project, req)?;
             let wait_for = strings(&input["waitFor"]);
