@@ -30,6 +30,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/agent-config", get(catalogue))
         .route("/agent-config/history", get(history))
+        .route("/agent-config/report", get(report))
         .route("/roles/{id}", get(role).put(put_role).delete(delete_role))
         .route("/templates/{id}", get(template).put(put_template).delete(delete_template))
         .route("/templates/{id}/preview", post(preview))
@@ -50,6 +51,16 @@ fn file_state(path: &FsPath) -> (Option<String>, String) {
     let content = std::fs::read_to_string(path).ok();
     let hash = content.as_deref().map(content_hash).unwrap_or_default();
     (content, hash)
+}
+
+/// Anyone with a project reads the catalogue; server admins read it without one too.
+/// Returns whether the caller is a server admin.
+async fn viewer(app: &Arc<App>, ctx: &Ctx) -> Result<bool, ApiError> {
+    if ctx.server_admin().is_ok() {
+        return Ok(true);
+    }
+    ctx.access(app, None).await?;
+    Ok(false)
 }
 
 fn not_found(what: String) -> ApiError {
@@ -237,6 +248,46 @@ async fn catalogue(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Valu
     Ok(Json(v))
 }
 
+/// What `genie agents check` and `genie agents list` show: the files as they are
+/// now (not waiting for the reload), whatever the project (server admins).
+async fn report(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    ctx.server_admin()?;
+    let out = app
+        .blocking(|app| {
+            let agents = AgentConfig::load(&app.data, &app.cfg, None);
+            let adapter = app.cfg.runtime.mcp_adapter();
+            let without_adapter: Vec<&str> =
+                agents.roles.values().filter(|r| !adapter && !r.mcp.is_empty()).map(|r| r.id.as_str()).collect();
+            let (active, note) = crate::sandbox::status(&app.cfg.runtime.sandbox);
+            let roles: Vec<Value> = agents
+                .roles
+                .values()
+                .map(|r| json!({ "id": r.id, "class": r.class, "origin": r.origin, "title": r.title, "capabilities": r.capabilities }))
+                .collect();
+            let teams: Vec<Value> = agents
+                .teams
+                .values()
+                .map(|t| {
+                    json!({ "id": t.id, "origin": t.origin, "title": t.title, "roles": t.members.iter().map(|m| &m.role).collect::<Vec<_>>() })
+                })
+                .collect();
+            Ok(json!({
+                "report": agent_config::report(&agents),
+                "problems": agents.problems,
+                "errors": agents.errors().count(),
+                "mcpWithoutAdapter": without_adapter,
+                "sandbox": { "active": active, "note": note },
+                "roles": roles,
+                "teams": teams,
+                "skills": agents.skills.keys().collect::<Vec<_>>(),
+                "mcp": agents.mcp.keys().collect::<Vec<_>>(),
+                "data": app.data,
+            }))
+        })
+        .await?;
+    Ok(Json(out))
+}
+
 #[derive(Deserialize, Default)]
 struct HistoryQuery {
     item: Option<String>,
@@ -253,8 +304,7 @@ async fn history(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<HistoryQ
 // --- roles ----------------------------------------------------------------------------
 
 async fn role(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    ctx.access(&app, None).await?;
-    let admin = ctx.server_admin().is_ok();
+    let admin = viewer(&app, &ctx).await?;
     app.blocking(move |app| {
         let agents = app.agents();
         let Some(def) = agents.roles.get(&id) else { return Ok(Err(not_found(format!("role {id} not found")))) };
@@ -321,8 +371,7 @@ async fn delete_role(
 // --- templates ----------------------------------------------------------------------
 
 async fn template(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    ctx.access(&app, None).await?;
-    let admin = ctx.server_admin().is_ok();
+    let admin = viewer(&app, &ctx).await?;
     app.blocking(move |app| {
         let agents = app.agents();
         let Some(def) = agents.teams.get(&id) else { return Ok(Err(not_found(format!("team template {id} not found")))) };
@@ -413,6 +462,8 @@ async fn preview(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, 
                 }))
                 .map_err(|e| AppError::Internal(e.to_string()))?,
             };
+            // An example task has no pages of its own; a real one gets its L1 context.
+            let docs = task_id.as_ref().and_then(|_| crate::context::l1(app, &slug, &task));
             let members: Vec<SpecMember> = t
                 .members
                 .iter()
@@ -445,6 +496,7 @@ async fn preview(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, 
                 note: None,
                 epic: None,
                 joining: false,
+                docs: docs.as_deref(),
             };
             let members: Vec<Value> =
                 spec.members.iter().map(|m| json!({ "key": m.key, "name": m.name, "role": m.role, "kickoff": k.text(m) })).collect();
@@ -457,8 +509,7 @@ async fn preview(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, 
 // --- skills ---------------------------------------------------------------------------
 
 async fn skill(State(app): State<Arc<App>>, ctx: Ctx, Path(name): Path<String>) -> ApiResult<Json<Value>> {
-    ctx.access(&app, None).await?;
-    let admin = ctx.server_admin().is_ok();
+    let admin = viewer(&app, &ctx).await?;
     app.blocking(move |app| {
         let agents = app.agents();
         let Some(def) = agents.skills.get(&name) else { return Ok(Err(not_found(format!("skill {name} not found")))) };
@@ -580,7 +631,7 @@ fn as_history(bytes: &[u8]) -> String {
 }
 
 async fn skill_file(State(app): State<Arc<App>>, ctx: Ctx, Path((name, rel)): Path<(String, String)>) -> ApiResult<Json<Value>> {
-    ctx.access(&app, None).await?;
+    viewer(&app, &ctx).await?;
     app.blocking(move |app| {
         let (dir, path, shown) = match skill_file_place(app, &name, &rel, false) {
             Ok(p) => p,
@@ -658,10 +709,11 @@ async fn delete_skill_file(State(app): State<Arc<App>>, ctx: Ctx, Path((name, re
 // --- MCP connections --------------------------------------------------------------------
 
 async fn mcp(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
-    let access = ctx.access(&app, None).await?;
-    let admin = ctx.server_admin().is_ok();
+    let admin = viewer(&app, &ctx).await?;
+    let project = if admin { None } else { Some(ctx.access(&app, None).await?.project) };
     let agents = app.agents();
-    let servers: Vec<&agent_config::McpServer> = agents.mcp.values().filter(|s| admin || s.available_in(&access.project)).collect();
+    let servers: Vec<&agent_config::McpServer> =
+        agents.mcp.values().filter(|s| project.as_deref().is_none_or(|p| s.available_in(p))).collect();
     let mut out = json!({ "servers": servers, "admin": admin });
     if admin {
         // The file holds commands and `${env:…}` references, never secret values.

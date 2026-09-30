@@ -2,7 +2,7 @@
 //! RPC mode, the genie-bus extension) against a scripted OpenAI-compatible model
 //! served by the test. The model follows instructions found in the mail it gets:
 //! `RUN: <command>` runs a shell command; a question carrying `ANSWER=<word>` is
-//! answered with `genie agent reply`.
+//! answered with `genie mail reply`.
 //!
 //! Skipped (with a note) when pi is not installed, except on CI.
 
@@ -65,10 +65,10 @@ fn decide(messages: &[(String, String)]) -> Value {
         let args: Value = serde_json::from_str(text[i + 5..].lines().next().unwrap_or_default().trim()).unwrap_or_default();
         return json!({ "tool": "mcp", "args": args });
     }
-    if let (Some(r), Some(a)) = (text.find("genie agent reply "), text.find("ANSWER=")) {
-        let id: String = text[r + 18..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    if let (Some(r), Some(a)) = (text.find("genie mail reply "), text.find("ANSWER=")) {
+        let id: String = text[r + 17..].chars().take_while(|c| c.is_ascii_digit()).collect();
         let answer: String = text[a + 7..].chars().take_while(|c| c.is_alphanumeric()).collect();
-        return json!({ "tool": "bash", "args": { "command": format!("genie agent reply {id} {answer}") } });
+        return json!({ "tool": "bash", "args": { "command": format!("genie mail reply {id} {answer}") } });
     }
     json!({ "content": "ok" })
 }
@@ -354,7 +354,7 @@ async fn mail_reaches_live_agents_between_steps_and_on_interrupt() {
     // Ask and wait: bender asks yoda; yoda answers; bender's command returns the answer.
     until("bender idle before asking", 30, || session_state(app, "bender").filter(|s| s.0 == "idle")).await;
     let sent = Instant::now();
-    mail(app, "anna", "human", "bender", "RUN: genie agent ask yoda 'Which export format? ANSWER=CSV'", None);
+    mail(app, "anna", "human", "bender", "RUN: genie mail ask yoda 'Which export format? ANSWER=CSV'", None);
     let req = until("the answer in bender's context", 60, || {
         log.lock().unwrap().iter().find(|r| r.model == "executor" && r.last().0 == "tool" && r.last().1.contains("yoda answered")).cloned()
     })
@@ -505,6 +505,15 @@ async fn a_role_gets_its_skills_and_the_guard_keeps_it_within_its_grants() {
     assert!(req.system.contains("<name>house-style</name>"), "the repository's skill");
     assert!(!req.system.contains("user-wide"), "no other skills");
     assert!(req.system.contains("## MCP connections") && req.system.contains("`docs`"), "{}", req.system);
+    // The command table of the role, from the catalog of operations.
+    assert!(
+        req.system.contains(
+            "| `genie_task` status | `genie task status <STATUS> [--task …] [--note …]` (your role may set: in_progress, review) |"
+        ),
+        "the command table:\n{}",
+        req.system
+    );
+    assert!(!req.system.contains("genie agent ") && !req.system.contains("--title"), "the catalog's commands, those of the role");
 
     // A denied command is blocked, the rest of the shell works.
     mail(app, "anna", "human", "bender", "RUN: echo one && git push origin main", None);
@@ -528,4 +537,90 @@ async fn a_role_gets_its_skills_and_the_guard_keeps_it_within_its_grants() {
     let out = tool_result(log, "curl https://example.com").await;
     assert!(out.contains("may not run `curl *`"), "{out}");
     assert_eq!(session_state(app, "bender").unwrap().2, pid, "the same session");
+}
+
+/// The orchestrator console: `genie orchestrate` runs pi (here in RPC mode, so
+/// the test sees its UI requests) with genie-bus in console mode — mail for the
+/// orchestrator reaches the idle session without anyone waking it — and the
+/// console extension's card of teams; when pi ends, the console is given back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_the_console_mail_reaches_the_idle_session_by_itself() {
+    let Some(pi) = pi_bin() else {
+        assert!(std::env::var("CI").is_err(), "pi is not installed: run `npm ci` before `cargo test`");
+        eprintln!("skipped: pi is not installed (npm ci)");
+        return;
+    };
+    let l = live(pi.clone(), |_| {}).await;
+    let (app, log) = (&l.app, &l.log);
+    install_dump(app, log);
+    let u = app.with_server(|db| db.create_user("anna", "Anna", None, Some("password-1"), false)).unwrap();
+    app.with_server(|db| db.set_membership("shop", u.id, genie_core::server_db::ProjectRole::Owner)).unwrap();
+    let anna = app.with_server(|db| db.create_user_token(u.id, "cli")).unwrap();
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_genie"))
+        .arg("--data")
+        .arg(&app.data)
+        .args(["--project", "shop", "orchestrate", "--pi"])
+        .arg(&pi)
+        .args(["--", "--mode", "rpc", "--no-skills"])
+        .env("GENIE_URL", format!("http://127.0.0.1:{}", app.cfg.port))
+        .env("GENIE_TOKEN", &anna)
+        .env("PI_CODING_AGENT_DIR", l._dir.path().join("pi-agent"))
+        .env("PI_OFFLINE", "1")
+        .env("PI_SKIP_VERSION_CHECK", "1")
+        .env("PI_TELEMETRY", "0")
+        .env("GENIE_BUS_POLL_MS", "300")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out: Arc<Mutex<Vec<String>>> = Arc::default();
+    let (stdout, lines) = (child.stdout.take().unwrap(), out.clone());
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut r = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = r.next_line().await {
+            lines.lock().unwrap().push(line);
+        }
+    });
+    until("the console taken", 30, || app.with_server(|db| db.console("shop")).unwrap()).await;
+
+    // A person's new task tells the orchestrator; nobody sends the session a command.
+    app.with_tracker("shop", |t| {
+        t.create(
+            &Actor::new("pm", Role::Human),
+            CreateInput { title: "CSV export".into(), status: Some(genie_core::Status::Inbox), ..Default::default() },
+        )
+    })
+    .unwrap();
+    let req = until("the mail in a request of the console's model", 30, || {
+        log.lock().unwrap().iter().find(|r| r.model == "orchestrator" && r.count("CSV export") > 0).cloned()
+    })
+    .await;
+    assert!(req.system.contains("## The console") && req.system.contains("@anna"), "the console's prompt:\n{}", req.system);
+
+    // The card of the project's teams, drawn by the console extension.
+    let card = until("the card of teams", 30, || {
+        out.lock().unwrap().iter().find(|l| l.contains("setWidget") && l.contains("genie · shop")).cloned()
+    })
+    .await;
+    assert!(card.contains("console: @anna") && card.contains("SHOP-1: bender (executor)"), "{card}");
+
+    // `/genie` shows the task board of the command line above the editor.
+    {
+        use tokio::io::AsyncWriteExt;
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(format!("{}\n", json!({ "type": "prompt", "message": "/genie" })).as_bytes()).await.unwrap();
+        stdin.flush().await.unwrap();
+    }
+    let board =
+        until("the task board", 30, || out.lock().unwrap().iter().find(|l| l.contains("setWidget") && l.contains("genie-board")).cloned())
+            .await;
+    assert!(board.contains("CSV export"), "{board}");
+
+    // pi ends: the console is given back.
+    drop(child.stdin.take());
+    let status = tokio::time::timeout(Duration::from_secs(30), child.wait()).await.expect("pi ends").unwrap();
+    assert!(status.success(), "{status:?}");
+    assert!(app.with_server(|db| db.console("shop")).unwrap().is_none(), "the console is given back");
 }

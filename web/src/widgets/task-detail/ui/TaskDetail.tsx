@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { DocDiagBadge, DocStaleBadge, DocStatusBadge } from "@/entities/doc";
 import { Avatar, Avatars } from "@/entities/member";
-import type { DocsImpactReason, DocsImpactResult } from "../../../../../src/docs/impact.ts";
+import type { DocsImpact, DocsImpactReason } from "@/shared/api";
 import {
   ArtifactThumb,
   EpicIcon,
@@ -486,7 +486,7 @@ function impactNoteText(note: string): string {
 }
 
 /** Mockup screen 9: pages the task's changes may have made stale. A hint, never a gate. */
-function DocsImpactBlock({ result }: { result: DocsImpactResult | undefined }) {
+function DocsImpactBlock({ result }: { result: DocsImpact | undefined }) {
   const navigate = useNavigate();
   if (!result) return null;
   const candidates = result.candidates;

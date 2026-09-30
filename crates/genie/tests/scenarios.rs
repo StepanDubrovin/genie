@@ -193,7 +193,7 @@ async fn done_task_updates_knowledge_changelog_and_tells_the_owners() {
     let proposals = app.with_server(|db| db.proposals(Some("open"), 10)).unwrap();
     assert_eq!(proposals.len(), 1, "agents' pages go to review by default");
     assert_eq!(proposals[0].path, "shop/features/export.md");
-    assert_eq!(proposals[0].task.as_deref(), None);
+    assert_eq!(proposals[0].task.as_deref(), Some("SHOP-1"), "the proposal names the task it documents");
     let changelog = std::fs::read_to_string(app.cfg.vault_path(&app.data).join("shop/changelog.md")).unwrap();
     assert!(changelog.contains("### Добавлено") && changelog.contains("- Экспорт заказов в CSV (SHOP-1)"), "{changelog}");
     let notes = app.with_server(|db| db.notifications(anna.id, false, 10)).unwrap();

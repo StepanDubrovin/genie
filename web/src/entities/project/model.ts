@@ -1,4 +1,4 @@
-import type { Status } from "../../../../src/tracker/model.ts";
+import type { Status } from "../../shared/api/types.ts";
 
 export interface Meta {
   prefix: string;

@@ -4,15 +4,13 @@ summary: The contract for genie's docs system: frontmatter fields, wiki-links, F
 type: reference
 status: current
 tags: [docs, contract, reference]
-paths: [src/docs/**, src/cli/genie.ts, bin/genie]
-verified: 2026-09-27
+paths: [crates/genie-core/src/vault.rs, crates/genie/src/knowledge.rs]
+verified: 2026-09-29
 ---
 
 # Genie project documentation contract
 
-**Schema frozen:** the docs index schema is frozen at `DOCS_SCHEMA_VERSION = 1` and its DDL is unchanged since G-8; frontmatter-contract changes follow their own path.
-
-Genie indexes Markdown files below the configured project docs root (`docs.root`, default `docs`). Markdown files remain the source of truth; the SQLite index is a rebuildable cache. The current index schema is intentionally independent of task tracking.
+Genie indexes the Markdown pages of its knowledge vault — a git repository with a space per project ([[platform/knowledge-vault]]). Markdown files remain the source of truth; the SQLite index (`vault-index.db`) is a rebuildable cache, independent of task tracking.
 
 ## Frontmatter
 
@@ -56,6 +54,6 @@ Use `[[architecture/auth]]` for a Genie wiki-link. A target may include a headin
 
 Search indexes title, summary, headings, body, tags, and aliases using SQLite FTS5. English diacritics are normalized by the tokenizer, and Russian `ё`/`е` are treated symmetrically. Heading reads return that heading's subtree and mark truncated content explicitly.
 
-Pages with `status: deprecated` are excluded from search results by default. They are returned only when explicitly requested: an explicit `status` filter (`genie docs search --status deprecated`), a page whose `related` list contains a requested task/epic id, or the service's `includeDeprecated: true` opt-in. The exclusion is applied before the result limit, so a default search never drops a non-deprecated match to make room for a deprecated one. Tree entries and page reads still list deprecated pages with their `deprecated` marker; backlinks are plain source paths with no marker.
+Pages with `status: deprecated` are excluded from search results by default. They are returned only when explicitly requested: an explicit `status` filter (`genie docs search --status deprecated`), a page whose `related` list contains a requested task/epic id, or a page chosen for a task's context because it names the task (L1, [[platform/knowledge-vault#Что агенты знают без запроса]]). The exclusion is applied before the result limit, so a default search never drops a non-deprecated match to make room for a deprecated one. Tree entries and page reads still list deprecated pages with their `deprecated` marker; backlinks are plain source paths with no marker.
 
-The index is scoped to the canonical project checkout, including linked worktrees. Configure `docs.root` as a non-empty relative path inside the project; traversal and symlink escapes are rejected. Rebuild recreates only the docs cache tables, leaving Genie task data untouched.
+The vault lives in `<data>/vault` (or `vault.path`); the `paths` of a page in a project's space are relative to that project's repository. Rebuilding recreates only the index, never the pages or task data.

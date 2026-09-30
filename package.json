@@ -2,23 +2,9 @@
   "name": "genie",
   "version": "0.3.0",
   "private": true,
-  "description": "Orchestrator + focus teams for pi: local task tracker, peer-to-peer team messaging, per-team worktrees, mixed-model teams.",
+  "description": "The web UI of the genie server, the pi extensions its agents run with, and their tests.",
   "type": "module",
-  "keywords": [
-    "pi-package"
-  ],
   "license": "MIT",
-  "bin": {
-    "genie": "./bin/genie"
-  },
-  "pi": {
-    "extensions": [
-      "./src/extension/index.ts"
-    ],
-    "skills": [
-      "./skills"
-    ]
-  },
   "scripts": {
     "test": "node --test test/*.test.ts",
     "build:web": "vite build --config web/vite.config.ts",
@@ -27,10 +13,6 @@
   },
   "engines": {
     "node": ">=23.6"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@dnd-kit/core": "^6.3.1",
