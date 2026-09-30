@@ -391,7 +391,7 @@ function RuleEditor({ initial, onClose }: { initial: { id?: number; text: string
         <div className="mb">
           <p className="muted" style={{ margin: 0 }}>
             Триггер: <code>event</code> (+ <code>where</code>), <code>schedule</code> (cron, <code>tz</code>), <code>manual</code>, <code>webhook</code>. Шаги: task.status, task.comment, task.create,
-            task.update, task.get, notify, agent, team, ask, wait, wake_orchestrator, changelog.add, release, http. Подстановки: <code>{"{{ event.task.id }}"}</code>,{" "}
+            task.update, task.get, task.ready, notify, agent, team, ask, wait, wake_orchestrator, changelog.add, release, http. Подстановки: <code>{"{{ event.task.id }}"}</code>,{" "}
             <code>{"{{ steps.<id>.output.… }}"}</code>.
           </p>
           {agents && (
