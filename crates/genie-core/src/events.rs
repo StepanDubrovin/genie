@@ -24,6 +24,8 @@ pub const TASK_ARTIFACT_ADDED: &str = "task.artifact_added";
 pub const TASK_BLOCKED: &str = "task.blocked";
 pub const TASK_UNBLOCKED: &str = "task.unblocked";
 pub const TASK_TEAM_ASSIGNED: &str = "task.team_assigned";
+/// A task was deleted for good (its earlier events stay in the journal).
+pub const TASK_DELETED: &str = "task.deleted";
 pub const MAIL_SENT: &str = "mail.sent";
 /// A tool call through the MCP gateway.
 pub const MCP_CALLED: &str = "mcp.called";

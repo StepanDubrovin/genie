@@ -186,8 +186,16 @@ async fn stop(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, bod
     Ok(Json(json!({ "ok": true, "report": report })))
 }
 
-fn remove_worktree(app: &App, slug: &str, team: &str) -> String {
+pub(super) fn remove_worktree(app: &App, slug: &str, team: &str) -> String {
     let Ok(Some(w)) = app.with_tracker(slug, |t| Ok(t.bus().get(team)?.worktree)) else { return "no worktree".into() };
+    // A workspace of the project's repositories (clones of the server's mirrors, not git worktrees):
+    // its work is on the git host, so the directory can go.
+    if std::path::Path::new(&w.path).starts_with(app.data.join("workspaces")) {
+        return match std::fs::remove_dir_all(&w.path) {
+            Ok(()) => format!("workspace {} removed (branches stay on the git host)", w.path),
+            Err(e) => format!("workspace {} not removed: {e}", w.path),
+        };
+    }
     let out = std::process::Command::new("git").args(["-C", &w.path, "worktree", "remove", "--force", &w.path]).output();
     match out {
         Ok(o) if o.status.success() => format!("worktree {} removed (branch {} kept)", w.path, w.branch),

@@ -364,6 +364,80 @@ async fn a_project_is_checked_before_anything_is_created() {
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
 }
 
+#[tokio::test]
+async fn admins_delete_tasks_for_good_with_their_subtasks_teams_and_dependencies() {
+    let h = Harness::new();
+    h.project("shop");
+    let (admin, member) = h
+        .app
+        .with_server(|db| {
+            let a = db.create_user("root", "Root", None, Some("password1"), true)?;
+            let m = db.create_user("pm", "PM", None, Some("password1"), false)?;
+            db.set_membership("shop", m.id, ProjectRole::Member)?;
+            Ok((db.create_user_token(a.id, "t")?, db.create_user_token(m.id, "t")?))
+        })
+        .unwrap();
+    let r = &h.router;
+    let create = |body: serde_json::Value| {
+        let admin = admin.clone();
+        async move {
+            let (s, t, _) = call(r, "POST", "/api/tasks").bearer(&admin).json(body).send().await;
+            assert_eq!(s, StatusCode::CREATED, "{t}");
+            t["id"].as_str().unwrap().to_string()
+        }
+    };
+    let epic = create(json!({ "title": "Эпик", "type": "epic" })).await;
+    let child = create(json!({ "title": "Подзадача", "parent": epic })).await;
+    let other = create(json!({ "title": "Зависит от подзадачи" })).await;
+    let (s, _, _) = call(r, "PATCH", &format!("/api/tasks/{other}")).bearer(&admin).json(json!({ "addDeps": [child] })).send().await;
+    assert_eq!(s, StatusCode::OK);
+    call(r, "POST", &format!("/api/tasks/{child}/comments")).bearer(&admin).json(json!({ "text": "заметка" })).send().await;
+
+    // Members do not delete.
+    let (s, _, _) = call(r, "DELETE", &format!("/api/tasks/{child}")).bearer(&member).send().await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, _) = call(r, "GET", &format!("/api/tasks/{child}")).bearer(&member).send().await;
+    assert_eq!(s, StatusCode::OK);
+
+    // A task with subtasks is refused unless they go with it.
+    let (s, e, _) = call(r, "DELETE", &format!("/api/tasks/{epic}")).bearer(&admin).send().await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("1 subtasks"), "{e}");
+
+    // A subtask goes alone; the task that depended on it stays, without the dependency.
+    let (s, d, _) = call(r, "DELETE", &format!("/api/tasks/{child}")).bearer(&admin).send().await;
+    assert_eq!(s, StatusCode::OK, "{d}");
+    assert_eq!(d["deleted"], json!([child]));
+    let (s, _, _) = call(r, "GET", &format!("/api/tasks/{child}")).bearer(&admin).send().await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, t, _) = call(r, "GET", &format!("/api/tasks/{other}")).bearer(&admin).send().await;
+    assert_eq!(t["deps"], json!([]));
+    let (_, t, _) = call(r, "GET", &format!("/api/tasks/{epic}")).bearer(&admin).send().await;
+    assert!(t["history"].as_array().unwrap().iter().any(|h| h["event"].as_str().unwrap().contains("deleted")));
+
+    // An epic with a subtask and a working team goes with everything under it.
+    let child2 = create(json!({ "title": "Ещё подзадача", "parent": epic })).await;
+    let (s, _, _) = call(r, "POST", &format!("/api/tasks/{child2}/status"))
+        .bearer(&admin)
+        .json(json!({ "status": "ready", "force": true }))
+        .send()
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, team, _) = call(r, "POST", "/api/teams").bearer(&admin).json(json!({ "task": child2, "template": "standard" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let team_id = team["id"].as_str().unwrap().to_string();
+    let (s, d, _) = call(r, "DELETE", &format!("/api/tasks/{epic}?cascade=1")).bearer(&admin).send().await;
+    assert_eq!(s, StatusCode::OK, "{d}");
+    assert_eq!(d["deleted"], json!([epic, child2]));
+    assert_eq!(h.app.with_tracker("shop", |t| Ok(t.bus().list(true)?.len())).unwrap(), 0, "team {team_id} is gone");
+    let (_, list, _) = call(r, "GET", "/api/tasks?closed=1").bearer(&admin).send().await;
+    assert_eq!(list.as_array().unwrap().len(), 1, "only the unrelated task is left: {list}");
+    let (_, j, _) = call(r, "GET", "/api/journal?after=0&limit=500").bearer(&admin).send().await;
+    let deleted: Vec<&str> =
+        j["events"].as_array().unwrap().iter().filter(|e| e["type"] == "task.deleted").map(|e| e["subject"].as_str().unwrap()).collect();
+    assert_eq!(deleted.len(), 3, "{deleted:?}");
+}
+
 /// `!image[docs/shot.png]` in the team chat: a raster file of the project's
 /// repository — or of the team's worktree — served inline, and nothing else.
 #[tokio::test]

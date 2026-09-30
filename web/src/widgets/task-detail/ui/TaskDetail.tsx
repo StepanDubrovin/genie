@@ -19,6 +19,7 @@ import {
   useArtifactViewer,
   useCheck,
   useComment,
+  useDeleteTask,
   useDocsImpact,
   useEpicMap,
   useMoveTask,
@@ -32,7 +33,7 @@ import { useSession } from "@/entities/session";
 import type { Team } from "@/entities/team";
 import { SpawnTeamDialog } from "@/features/spawn-team";
 import { plural, timeAgo, useTick } from "@/shared/lib";
-import { Icon, Markdown, useToast } from "@/shared/ui";
+import { ConfirmDialog, Icon, Markdown, useToast } from "@/shared/ui";
 import { TaskDelivery } from "./TaskDelivery.tsx";
 
 const KIND_NAME: Record<string, string> = { note: "заметка", progress: "прогресс", question: "вопрос", decision: "решение", review: "ревью", handoff: "передача", owner: "владелец" };
@@ -45,6 +46,8 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const patch = usePatchTask();
   const comment = useComment();
   const check = useCheck();
+  const del = useDeleteTask();
+  const [deleting, setDeleting] = useState(false);
   const [answer, setAnswer] = useState("");
   const [draft, setDraft] = useState("");
   const [editDesc, setEditDesc] = useState<string | undefined>();
@@ -55,12 +58,15 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
   const impact = useDocsImpact(id, impactEnabled);
   const session = useSession().data;
   const me = session?.mode === "users" ? session.user.login : undefined;
+  const myRole = session?.projects.find((p) => p.slug === session.project)?.role;
+  const canDelete = myRole === "admin" || myRole === "owner";
   const members = useMembers(me ? session?.project : undefined).data;
 
   useEffect(() => {
     setAnswer("");
     setDraft("");
     setEditDesc(undefined);
+    setDeleting(false);
   }, [id]);
 
   const fail = (e: Error) => toast(`Не удалось: ${e.message}`, "error");
@@ -133,6 +139,11 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
           <Link to={`/team/${encodeURIComponent(team.id)}`} style={{ fontSize: 12 }}>
             Команда {team.id}
           </Link>
+        )}
+        {canDelete && (
+          <button type="button" className="icon-btn" onClick={() => setDeleting(true)} aria-label="Удалить задачу" title="Удалить задачу">
+            <Icon.trash />
+          </button>
         )}
         <button type="button" className="icon-btn d-only" onClick={onClose} aria-label="Закрыть">
           <Icon.close />
@@ -452,6 +463,32 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
 
       {viewer.modal}
       {spawning && <SpawnTeamDialog task={t} onClose={() => setSpawning(false)} />}
+      {deleting && (
+        <ConfirmDialog
+          title={`Удалить ${t.id} навсегда?`}
+          confirmLabel="Удалить"
+          danger
+          busy={del.isPending}
+          onClose={() => setDeleting(false)}
+          onConfirm={() =>
+            del.mutate(
+              { id: t.id, cascade: t.children.length > 0 },
+              {
+                onSuccess: (r) => {
+                  toast(r.deleted.length > 1 ? `Удалено задач: ${r.deleted.length}` : `${t.id} удалена`);
+                  setDeleting(false);
+                  onClose();
+                },
+                onError: fail,
+              },
+            )
+          }
+        >
+          «{t.title}» исчезнет вместе с комментариями, артефактами и историей — восстановить не получится.
+          {t.children.length > 0 && ` Подзадачи (${t.children.length}) будут удалены вместе с ней.`}
+          {t.team && " Команда, которая над ней работает, будет остановлена и удалена (ветка git останется)."}
+        </ConfirmDialog>
+      )}
     </aside>
   );
 }

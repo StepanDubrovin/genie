@@ -106,6 +106,13 @@ pub struct ArtifactContent {
     pub text: Option<String>,
 }
 
+/// Tasks (id, title; the requested one first, then its subtasks) and teams that go with a deletion.
+#[derive(Debug, Clone, Default)]
+pub struct DeletePlan {
+    pub tasks: Vec<(String, String)>,
+    pub teams: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EpicContext {
     pub epic: Option<Task>,
@@ -1084,6 +1091,64 @@ impl Tracker {
             self.event(events::TASK_UNBLOCKED, &r.id, actor, json!({}))
         })?;
         self.get(&r.id)
+    }
+
+    /// What deleting a task removes: the task, its subtasks (all levels) and the
+    /// teams working on any of them. Without `cascade` a task with subtasks is refused.
+    pub fn delete_plan(&self, id: &str, cascade: bool) -> Result<DeletePlan> {
+        let root = self.row(id)?;
+        let mut tasks = vec![(root.id.clone(), root.title.clone())];
+        let mut i = 0;
+        while i < tasks.len() {
+            let mut stmt = self.conn().prepare_cached("SELECT id, title FROM tasks WHERE parent = ?1 ORDER BY seq")?;
+            let children = stmt.query_map([&tasks[i].0], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let children = children.collect::<rusqlite::Result<Vec<_>>>()?;
+            tasks.extend(children);
+            i += 1;
+        }
+        if tasks.len() > 1 && !cascade {
+            return Err(GenieError::invalid(format!(
+                "{} has {} subtasks: delete them together with it (cascade) or move them elsewhere first",
+                root.id,
+                tasks.len() - 1
+            )));
+        }
+        let mut teams = Vec::new();
+        for (task, _) in &tasks {
+            teams.extend(self.strings("SELECT id FROM teams WHERE task = ?1 ORDER BY created", task)?);
+        }
+        Ok(DeletePlan { tasks, teams })
+    }
+
+    /// Delete a task for good with its subtasks (`cascade`): comments, criteria,
+    /// artifacts and history go with it, tasks that depended on it lose that
+    /// dependency, mail about it is dropped. The teams working on it are removed
+    /// by the caller first (see `delete_plan`). A `task.deleted` event is journaled.
+    pub fn delete_tasks(&self, actor: &Actor, id: &str, cascade: bool) -> Result<DeletePlan> {
+        require_role(actor, "delete tasks", &[])?;
+        let plan = self.delete_plan(id, cascade)?;
+        let parent = self.row(id)?.parent;
+        self.db.tx(|| {
+            // Subtasks first: `parent` is a plain foreign key.
+            for (task, title) in plan.tasks.iter().rev() {
+                let row = self.row(task)?;
+                self.conn().execute("DELETE FROM deps WHERE dep = ?1", [task])?;
+                self.conn().execute("DELETE FROM mail WHERE task = ?1", [task])?;
+                self.conn().execute("DELETE FROM tasks WHERE id = ?1", [task])?;
+                self.event(
+                    events::TASK_DELETED,
+                    task,
+                    actor,
+                    json!({ "title": title, "type": row.task_type, "status": row.status, "parent": row.parent, "cascade": cascade }),
+                )?;
+            }
+            if let Some(p) = parent.filter(|p| !plan.tasks.iter().any(|(t, _)| t == p)) {
+                self.history(&p, actor, &format!("child {} deleted", plan.tasks[0].0), None, None, None)?;
+                self.touch(&p)?;
+            }
+            Ok(())
+        })?;
+        Ok(plan)
     }
 
     pub fn assign_team(

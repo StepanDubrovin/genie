@@ -21,5 +21,6 @@ pub use error::{GenieError, Result};
 pub use events::Event;
 pub use model::*;
 pub use tracker::{
-    ArtifactContent, ArtifactInput, ArtifactSource, CreateInput, EpicContext, ListFilter, Meta, StatusOptions, Tracker, UpdateInput,
+    ArtifactContent, ArtifactInput, ArtifactSource, CreateInput, DeletePlan, EpicContext, ListFilter, Meta, StatusOptions, Tracker,
+    UpdateInput,
 };

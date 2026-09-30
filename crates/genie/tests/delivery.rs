@@ -368,6 +368,23 @@ async fn requests_follow_the_policy_and_the_branch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_a_task_removes_its_workspace_and_stops_watching_its_request() {
+    let r = rig("github", json!({})).await;
+    let t = team(&r, "Throwaway").await;
+    let id = t.task.clone();
+    commit_and_push(&t);
+    http(&r, "POST", &format!("/api/tasks/{id}/repos/api/cr"), Some(&t.executor), Some(json!({}))).await;
+    assert_eq!(r.h.app.with_server(|db| db.open_deliveries()).unwrap().len(), 1);
+    assert!(t.ws.join("feature.txt").is_file());
+
+    let (s, b) = http(&r, "DELETE", &format!("/api/tasks/{id}"), None, None).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert!(r.h.app.with_server(|db| db.task_repos("shop", &id)).unwrap().is_empty(), "the delivery rows are gone");
+    assert!(r.h.app.with_server(|db| db.open_deliveries()).unwrap().is_empty(), "nobody watches the request any more");
+    assert!(!t.ws.exists(), "the team's clones are removed: the work is on the host");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn what_a_person_writes_on_the_request_reaches_the_task_and_the_team_once() {
     each_provider(async |kind| {
         let r = rig(kind, json!({})).await;
