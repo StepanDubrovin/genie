@@ -13,6 +13,7 @@ pub mod engine;
 pub mod git;
 pub mod http;
 pub mod knowledge;
+pub mod llm_key;
 pub mod mcp_gateway;
 pub mod notify;
 pub mod ops;

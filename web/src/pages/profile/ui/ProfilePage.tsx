@@ -1,13 +1,15 @@
 // The person's own settings, one tab each: the account (photo, name, login, mail),
-// signing in (password), Telegram, and personal tokens for the CLI and MCP.
+// signing in (password), Telegram, the LiteLLM key agents use on one's behalf, and
+// personal tokens for the CLI and MCP.
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { NavLink, useParams } from "react-router";
 import { PersonAvatar, PROJECT_ROLE_NAME, usePatchUser, useSetAvatar } from "@/entities/project";
-import { useChannels } from "@/entities/platform";
+import { useChannels, useLitellmKey } from "@/entities/platform";
 import { type SessionUser, useSession } from "@/entities/session";
 import { request } from "@/shared/api";
+import { timeAgo } from "@/shared/lib";
 import { Icon, useToast } from "@/shared/ui";
 import { TokensTab } from "./TokensTab.tsx";
 import "@/shared/ui/settings.css";
@@ -16,6 +18,7 @@ const TABS = [
   { id: "", title: "Аккаунт" },
   { id: "security", title: "Вход и пароль" },
   { id: "telegram", title: "Telegram" },
+  { id: "litellm", title: "Ключ LiteLLM" },
   { id: "tokens", title: "Токены CLI и MCP" },
 ] as const;
 
@@ -67,6 +70,8 @@ export function ProfilePage() {
           <SecurityTab />
         ) : tab === "telegram" ? (
           <TelegramTab />
+        ) : tab === "litellm" ? (
+          <LitellmTab />
         ) : tab === "tokens" ? (
           <TokensTab />
         ) : (
@@ -349,6 +354,69 @@ function TelegramTab() {
           )}
         </div>
       </section>
+    </div>
+  );
+}
+
+function LitellmTab() {
+  const key = useLitellmKey().data?.key;
+  const act = useAct();
+  const [value, setValue] = useState("");
+  return (
+    <div className="st-body">
+      <div className="st-head">
+        <h2>Ключ LiteLLM</h2>
+        <p>
+          Агенты, которые работают от вашего имени (команды и задачи, запущенные вами или по вашим задачам, и оркестратор, когда отвечает вам), ходят в LiteLLM с этим
+          ключом. Без него агенты на моделях <code>litellm/…</code> не запускаются.
+        </p>
+      </div>
+      <form
+        className="st-card"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void act(async () => {
+            await request("PUT", "/api/me/litellm-key", { key: value });
+            setValue("");
+          }, "Ключ LiteLLM сохранён");
+        }}
+      >
+        {key && (
+          <div className="st-row">
+            <div className="lbl">
+              <b>Сейчас</b>
+              <span>Ключ хранится на сервере в зашифрованном виде и больше не показывается.</span>
+            </div>
+            <div className="ctl" style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap" }}>
+              {key.unreadable ? (
+                <span className="pj-bad">Ключ сохранён, но сервер не может его прочитать (сменился ключ шифрования). Укажите его заново.</span>
+              ) : (
+                <span>
+                  Ключ задан{key.hint ? ` (${key.hint})` : ""}, обновлён {timeAgo(key.updated)}.
+                </span>
+              )}
+              <button type="button" className="btn ghost" onClick={() => void act(() => request("DELETE", "/api/me/litellm-key"), "Ключ LiteLLM удалён")}>
+                Удалить
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="st-row">
+          <label className="lbl" htmlFor="pf-litellm">
+            <b>{key ? "Новый ключ" : "Ключ"}</b>
+            <span>Агенты, которые ждали ключа, запустятся сразу после сохранения.</span>
+          </label>
+          <div className="ctl">
+            <input id="pf-litellm" type="password" className="st-input" autoComplete="off" placeholder="sk-…" value={value} onChange={(e) => setValue(e.target.value)} required />
+          </div>
+        </div>
+        <div className="st-foot">
+          <span className="grow" />
+          <button className="btn primary" disabled={!value.trim()}>
+            {key ? "Заменить ключ" : "Сохранить ключ"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

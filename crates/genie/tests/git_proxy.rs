@@ -82,6 +82,7 @@ async fn team(r: &Rig) -> (String, PathBuf, String, String) {
                 models: Default::default(),
                 note: None,
                 by: Actor::new("orchestrator", Role::Orchestrator),
+                initiator: None,
             },
         )
         .unwrap()

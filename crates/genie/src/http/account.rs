@@ -25,6 +25,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/auth/password", post(change_password))
         .route("/auth/tokens", get(list_tokens).post(create_token))
         .route("/auth/tokens/{id}", delete(revoke_token))
+        .route("/me/litellm-key", get(litellm_key).put(set_litellm_key).delete(delete_litellm_key))
         .route("/session/project", post(select_project))
         .route("/users", get(list_users).post(create_user))
         .route("/users/{id}", patch(update_user))
@@ -194,6 +195,46 @@ async fn revoke_token(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>
         return Err(ApiError::new(StatusCode::NOT_FOUND, "no such token"));
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// The caller's LiteLLM key, as far as it may be shown: set or not, its last characters.
+async fn litellm_key(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    let user = ctx.user()?.clone();
+    let info = app.blocking(move |app| app.with_server(|db| db.user_secret_info(user.id, genie_core::secrets::LITELLM))).await?;
+    Ok(Json(json!({ "key": info })))
+}
+
+#[derive(Deserialize)]
+struct LitellmKeyBody {
+    key: String,
+}
+
+/// Set the caller's LiteLLM key: the agents started on their behalf use it.
+async fn set_litellm_key(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<LitellmKeyBody>) -> ApiResult<Json<Value>> {
+    let user = ctx.user()?.clone();
+    if user.id == 0 {
+        return Err(ApiError::bad("a LiteLLM key needs a real user: genie user add <login> --admin"));
+    }
+    if b.key.trim().is_empty() {
+        return Err(ApiError::bad("the key is empty"));
+    }
+    let info = app
+        .blocking(move |app| {
+            app.with_server(|db| {
+                db.set_user_secret(user.id, genie_core::secrets::LITELLM, &b.key)?;
+                db.user_secret_info(user.id, genie_core::secrets::LITELLM)
+            })
+        })
+        .await?;
+    // Agents that waited for the key start now.
+    crate::sessions::retry_now(&app);
+    Ok(Json(json!({ "key": info })))
+}
+
+async fn delete_litellm_key(State(app): State<Arc<App>>, ctx: Ctx) -> ApiResult<Json<Value>> {
+    let user = ctx.user()?.clone();
+    app.blocking(move |app| app.with_server(|db| db.delete_user_secret(user.id, genie_core::secrets::LITELLM))).await?;
+    Ok(Json(json!({ "key": null })))
 }
 
 #[derive(Deserialize)]

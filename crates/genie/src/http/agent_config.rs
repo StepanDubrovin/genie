@@ -485,6 +485,7 @@ async fn preview(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, 
                 relations: t.relations.clone(),
                 charter: t.charter.clone(),
                 template_hash: None,
+                initiator: None,
             };
             let k = Kickoff {
                 team: &task.id,

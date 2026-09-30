@@ -72,6 +72,12 @@ impl Sched {
     fn with<T>(&self, f: impl FnOnce(&mut SchedState) -> T) -> T {
         f(&mut self.0.lock().unwrap_or_else(|e| e.into_inner()))
     }
+
+    /// Agents waiting out a backoff may run at once; their failures still count.
+    pub fn retry_now(&self) {
+        let now = Instant::now();
+        self.with(|s| s.backoff.values_mut().for_each(|b| b.1 = now));
+    }
 }
 
 /// Start background workers: crash recovery, then the scheduler.
@@ -247,6 +253,8 @@ struct Prepared {
     kit: Kit,
     /// Per-turn agent token, revoked when the turn ends.
     token: String,
+    /// Its `LITELLM_API_KEY`: its initiator's ([`crate::llm_key`]).
+    llm: crate::llm_key::Key,
 }
 
 /// Run one turn; returns whether it succeeded.
@@ -379,6 +387,8 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
             let agents = app.agents();
             let def = orchestrator_role(&agents)?;
             let (model, thinking) = role_model(app, &def, None, None);
+            let initiator = crate::llm_key::mail_initiator(app, slug, &mail);
+            let llm = turn_key(app, slug, turn, &label, initiator.as_deref(), model.as_deref())?;
             let cwd = project_workspace(app, &project, "orchestrator");
             Ok(Some(Prepared {
                 turn,
@@ -397,6 +407,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 prompt: agent_prompt(app, &agents, &project, &def, None, false, AgentKind::Orchestrator, &who(&def, None, None)),
                 message: orchestrator_message(&project, &mail),
                 token: String::new(),
+                llm,
             }))
         }
         AgentKey::Member { project: slug, team, member } => {
@@ -411,8 +422,10 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 return Ok(None);
             }
             app.with_server(|db| db.set_turn_mail(turn, &mail.iter().map(|m| m.id).collect::<Vec<_>>()))?;
-            app.with_tracker(slug, |t| t.bus().set_activity(team, member, "working", Some(json!({ "kind": "turn", "turn": turn }))))?;
             let (model, thinking) = role_model(app, &def, m.model.clone(), m.thinking.clone());
+            let initiator = crate::llm_key::team_initiator(app, slug, team);
+            let llm = turn_key(app, slug, turn, &label, initiator.as_deref(), model.as_deref())?;
+            app.with_tracker(slug, |t| t.bus().set_activity(team, member, "working", Some(json!({ "kind": "turn", "turn": turn }))))?;
             let cwd = member_workspace(app, &project, &def, &t.cwd, team, member);
             Ok(Some(Prepared {
                 turn,
@@ -440,6 +453,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 ),
                 message: member_message(&mail),
                 token: String::new(),
+                llm,
             }))
         }
         AgentKey::Job { project: slug, job } => {
@@ -467,10 +481,23 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
     }
 }
 
+/// The key of a turn's agent; when it cannot have one, the turn ends without
+/// running and its mail waits for the next attempt.
+fn turn_key(app: &App, slug: &str, turn: i64, label: &str, initiator: Option<&str>, model: Option<&str>) -> AppResult<crate::llm_key::Key> {
+    crate::llm_key::resolve(app, slug, label, initiator, model).map_err(|e| {
+        let _ = app.with_tracker(slug, |t| t.bus().release_lease(turn));
+        let _ = app.with_server(|db| db.finish_turn(turn, "failed", None, Some(&e), None));
+        GenieError::invalid(e).into()
+    })
+}
+
 fn prepare_job(app: &App, project: &Project, j: &Job, turn: i64) -> AppResult<Prepared> {
     let agents = app.agents();
     let def = running_role(&agents, &j.role)?;
     let (model, thinking) = role_model(app, &def, j.model.clone(), None);
+    let initiator = j.initiator.clone().or_else(|| j.task.as_deref().and_then(|t| crate::llm_key::task_person(app, &project.slug, t)));
+    let llm = crate::llm_key::resolve(app, &project.slug, &format!("job {}", j.id), initiator.as_deref(), model.as_deref())
+        .map_err(GenieError::invalid)?;
     let place = job_workspace(app, project, j, def.files)?;
     Ok(Prepared {
         turn,
@@ -490,6 +517,7 @@ fn prepare_job(app: &App, project: &Project, j: &Job, turn: i64) -> AppResult<Pr
         prompt: agent_prompt(app, &agents, project, &def, None, false, AgentKind::Job, &who(&def, None, Some(j.id))),
         message: job_message(j, &place.note),
         token: String::new(),
+        llm,
     })
 }
 
@@ -589,6 +617,7 @@ async fn execute(app: &Arc<App>, key: &AgentKey, p: &Prepared) -> Result<(Option
     let Some(program) = argv.first() else { return Err("runtime.command is empty".into()) };
     let who = Identity { role: p.role, role_id: &p.role_id, name: &p.name, team: p.team.as_deref(), task: p.task.as_deref(), job: p.job };
     let mut cmd = agent_command(app, &argv, &p.cwd, &dir, key.project(), &who, &token)?;
+    p.llm.apply(&mut cmd);
     kit_env(&mut cmd, &files, &argv);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
@@ -937,6 +966,8 @@ pub(crate) struct Spec {
     pub thinking: Option<String>,
     pub prompt: String,
     pub kit: Kit,
+    /// The person the agent works for now ([`crate::llm_key`]).
+    pub initiator: Option<String>,
 }
 
 impl Spec {
@@ -1006,6 +1037,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 model,
                 thinking,
                 prompt: agent_prompt(app, &agents, &project, &def, None, true, AgentKind::Orchestrator, &who(&def, None, None)),
+                initiator: crate::llm_key::orchestrator_initiator(app, slug),
             }))
         }
         AgentKey::Member { project: slug, team, member } => {
@@ -1040,6 +1072,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                     AgentKind::Member,
                     &who(&def, Some(team), None),
                 ),
+                initiator: crate::llm_key::team_initiator(app, slug, team),
             }))
         }
         AgentKey::Job { .. } => Ok(None),
@@ -1455,6 +1488,9 @@ pub struct SpawnRequest {
     pub models: std::collections::BTreeMap<String, String>,
     pub note: Option<String>,
     pub by: Actor,
+    /// The person the team works on behalf of; by default `by` when a person,
+    /// else the task's person ([`crate::llm_key::initiator_of`]).
+    pub initiator: Option<String>,
 }
 
 /// A free name for a role: from its pool, else numbered.
@@ -1599,7 +1635,7 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
         });
     }
     let classes: Vec<Role> = roles.iter().map(|r| r.class).collect();
-    let spec = match &template {
+    let mut spec = match &template {
         Some(t) if req.members.is_empty() => TeamSpec {
             template: Some(t.id.clone()),
             title: Some(t.title.clone()),
@@ -1610,6 +1646,7 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
             relations: t.relations.clone(),
             charter: t.charter.clone(),
             template_hash: Some(crate::agent_config::template_hash(t)),
+            initiator: None,
         },
         _ => TeamSpec {
             template: template.as_ref().map(|t| t.id.clone()),
@@ -1618,6 +1655,7 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
             ..TeamSpec::derived(spec_members, &classes, refinement)
         },
     };
+    spec.initiator = req.initiator.clone().or_else(|| crate::llm_key::initiator_of(app, slug, &req.by, Some(&task.id)));
     let system = Actor::new(req.by.name.clone(), if req.by.role == Role::Human { Role::Human } else { Role::Orchestrator });
     let created = app.with_tracker(slug, |t| {
         let team = t.bus().create(

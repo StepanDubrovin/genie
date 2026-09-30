@@ -7,7 +7,9 @@
 //! keeps projects isolated, portable and compatible with the TypeScript tools.
 //!
 //! Secrets are never stored: sessions, API tokens, invites and answer links are
-//! kept as SHA-256 hashes; passwords as Argon2id hashes.
+//! kept as SHA-256 hashes; passwords as Argon2id hashes. The one exception is a
+//! person's own keys for their agents, which must be read back: they are sealed
+//! (see `secrets`).
 
 use std::path::Path;
 
@@ -190,7 +192,8 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
   output TEXT,
   error TEXT,
   created TEXT NOT NULL,
-  finished TEXT
+  finished TEXT,
+  initiator TEXT
 );
 CREATE TABLE IF NOT EXISTS turns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -321,6 +324,8 @@ const SERVER_COLUMN_MIGRATIONS: &[(&str, &str, &str)] = &[
     ("users", "avatar_at", "ALTER TABLE users ADD COLUMN avatar_at TEXT"),
     // When a personal token was last presented, so its owner can tell which ones are stale.
     ("api_tokens", "last_used", "ALTER TABLE api_tokens ADD COLUMN last_used TEXT"),
+    // The person a job runs on behalf of (whose LiteLLM key it uses).
+    ("agent_jobs", "initiator", "ALTER TABLE agent_jobs ADD COLUMN initiator TEXT"),
 ];
 
 pub const SESSION_DAYS: i64 = 30;
@@ -550,6 +555,8 @@ pub fn valid_slug(s: &str) -> bool {
 
 pub struct ServerDb {
     db: Db,
+    /// The key people's secrets are sealed with (`secrets`).
+    pub(crate) secrets_key: std::path::PathBuf,
 }
 
 impl ServerDb {
@@ -558,6 +565,7 @@ impl ServerDb {
             std::fs::create_dir_all(dir)?;
         }
         let db = Db::open_with_schema(path, SERVER_SCHEMA)?;
+        db.conn().execute_batch(crate::secrets::SECRETS_SCHEMA)?;
         db.conn().execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema', '1')", [])?;
         for (table, column, ddl) in SERVER_COLUMN_MIGRATIONS {
             let has = db
@@ -573,7 +581,7 @@ impl ServerDb {
                 return Err(e.into());
             }
         }
-        Ok(ServerDb { db })
+        Ok(ServerDb { db, secrets_key: crate::secrets::key_path(path) })
     }
 
     pub fn conn(&self) -> &Connection {
