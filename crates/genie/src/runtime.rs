@@ -295,8 +295,17 @@ fn project_of(app: &App, slug: &str) -> AppResult<Project> {
     app.with_server(|db| db.project(slug))
 }
 
-/// Working directory for agents of a project without a specific workspace.
+/// Who an agent is for the repository rules.
+fn who(def: &RoleDef, team: Option<&String>, job: Option<i64>) -> crate::git::service::AgentId {
+    crate::git::service::AgentId { role: def.class, role_id: Some(def.id.clone()), team: team.cloned(), job }
+}
+
+/// Working directory for agents of a project without a specific workspace: a read-only
+/// view of the project's repositories, else the project's local repository, else an empty directory.
 fn project_workspace(app: &App, p: &Project, sub: &str) -> PathBuf {
+    if let Some(view) = crate::git::service::view_workspace(app, &p.slug) {
+        return view;
+    }
     match &p.repo {
         Some(r) => PathBuf::from(r),
         None => {
@@ -385,7 +394,7 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 session_id: format!("{slug}-orchestrator"),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &agents, &project, &def, None, false, AgentKind::Orchestrator),
+                prompt: agent_prompt(app, &agents, &project, &def, None, false, AgentKind::Orchestrator, &who(&def, None, None)),
                 message: orchestrator_message(&project, &mail),
                 token: String::new(),
             }))
@@ -419,7 +428,16 @@ fn prepare(app: &App, key: &AgentKey) -> AppResult<Option<Prepared>> {
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &agents, &project, &def, m.instructions.as_deref(), false, AgentKind::Member),
+                prompt: agent_prompt(
+                    app,
+                    &agents,
+                    &project,
+                    &def,
+                    m.instructions.as_deref(),
+                    false,
+                    AgentKind::Member,
+                    &who(&def, Some(team), None),
+                ),
                 message: member_message(&mail),
                 token: String::new(),
             }))
@@ -469,7 +487,7 @@ fn prepare_job(app: &App, project: &Project, j: &Job, turn: i64) -> AppResult<Pr
         session_id: format!("{}-job-{}-{}", project.slug, j.id, j.attempts + 1),
         model,
         thinking,
-        prompt: agent_prompt(app, &agents, project, &def, None, false, AgentKind::Job),
+        prompt: agent_prompt(app, &agents, project, &def, None, false, AgentKind::Job, &who(&def, None, Some(j.id))),
         message: job_message(j, &place.note),
         token: String::new(),
     })
@@ -496,6 +514,25 @@ fn job_workspace(app: &App, project: &Project, j: &Job, role_files: FileAccess) 
                 cwd.display()
             ),
             cwd,
+            files: role_files,
+        });
+    }
+    if j.workspace == "worktree" && !app.with_server(|db| db.repos(&project.slug))?.is_empty() {
+        let (root, placed) = crate::git::service::task_workspace(app, &project.slug, &format!("job-{}", j.id), j.task.as_deref())?;
+        let list: Vec<String> = placed
+            .iter()
+            .map(|p| match &p.branch {
+                Some(b) => format!("`{}` (branch `{b}`)", p.repo.mount),
+                None => format!("`{}` (read-only use)", p.repo.mount),
+            })
+            .collect();
+        return Ok(JobPlace {
+            note: format!(
+                "You work in `{}`, which holds the project's repositories: {}. Commit your changes in the branches named; the rules for pushing are in your instructions.",
+                root.display(),
+                list.join(", ")
+            ),
+            cwd: root,
             files: role_files,
         });
     }
@@ -638,6 +675,11 @@ pub(crate) fn agent_command(
         // Keep the TypeScript pi extension (if installed) out of server-run agents.
         .env("GENIE_ROLE", "off")
         .env_remove("GENIE_DIR");
+    // Agents hold no credentials for git hosts: their clones talk to the server's proxy.
+    let through_proxy = app.with_server(|db| db.repos(project)).is_ok_and(|r| !r.is_empty());
+    for var in crate::git::hosts::secret_vars(&app.data, through_proxy) {
+        cmd.env_remove(var);
+    }
     // The secrets of connections behind the gateway stay with the server.
     if app.cfg.runtime.mcp_gateway {
         for var in app.agents().mcp_secret_vars() {
@@ -930,7 +972,7 @@ pub(crate) fn console_spec(app: &App, slug: &str, user: &str) -> AppResult<Conso
     let agents = app.agents();
     let def = orchestrator_role(&agents)?;
     let (model, thinking) = role_model(app, &def, None, None);
-    let mut prompt = agent_prompt(app, &agents, &project, &def, None, true, AgentKind::Orchestrator);
+    let mut prompt = agent_prompt(app, &agents, &project, &def, None, true, AgentKind::Orchestrator, &who(&def, None, None));
     prompt.push_str(&format!(
         "\n## The console\n\nYou run in the pi session of @{user} at the orchestrator console of the project: they talk to you directly and see your work. Team mail arrives in this conversation as `[genie mail]` blocks — between your steps, or on its own when you are idle. The server's orchestrator waits while this session holds the console.\n"
     ));
@@ -963,7 +1005,7 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 session_id: format!("{slug}-orchestrator"),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &agents, &project, &def, None, true, AgentKind::Orchestrator),
+                prompt: agent_prompt(app, &agents, &project, &def, None, true, AgentKind::Orchestrator, &who(&def, None, None)),
             }))
         }
         AgentKey::Member { project: slug, team, member } => {
@@ -988,7 +1030,16 @@ pub(crate) fn session_spec(app: &App, key: &AgentKey) -> AppResult<Option<Spec>>
                 session_id: m.session_file.clone().unwrap_or_else(|| format!("{team}-{member}").to_lowercase()),
                 model,
                 thinking,
-                prompt: agent_prompt(app, &agents, &project, &def, m.instructions.as_deref(), true, AgentKind::Member),
+                prompt: agent_prompt(
+                    app,
+                    &agents,
+                    &project,
+                    &def,
+                    m.instructions.as_deref(),
+                    true,
+                    AgentKind::Member,
+                    &who(&def, Some(team), None),
+                ),
             }))
         }
         AgentKey::Job { .. } => Ok(None),
@@ -1203,6 +1254,7 @@ fn catalogue_section(agents: &AgentConfig, project: &Project) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn agent_prompt(
     app: &App,
     agents: &AgentConfig,
@@ -1211,6 +1263,7 @@ fn agent_prompt(
     instructions: Option<&str>,
     live: bool,
     reader: AgentKind,
+    who: &crate::git::service::AgentId,
 ) -> String {
     let lang = &app.cfg.language;
     let mut out = role.full_prompt();
@@ -1220,10 +1273,15 @@ fn agent_prompt(
         "\n## Project\n\nProject `{}` ({}). {}\n\nLanguage: write tasks, comments, artifacts and team mail in {}; anything addressed to people (questions for the owner, needs_owner notes) in {}.\n",
         project.slug,
         project.name,
-        if project.repo.is_some() { "It has a code repository." } else { "It has no code repository: deliver results as task artifacts and knowledge pages." },
+        if project.repo.is_some() || app.with_server(|db| db.repos(&project.slug)).is_ok_and(|r| !r.is_empty()) {
+            "It has a code repository."
+        } else {
+            "It has no code repository: deliver results as task artifacts and knowledge pages."
+        },
         lang.internal,
         lang.user,
     ));
+    out.push_str(&crate::git::service::prompt_section(app, &project.slug, who));
     out.push_str("\nTo reach a person, mention them as `@login` in a task comment: they get a notification (in the web, Telegram or e-mail). A task's person responsible (`assignee`) is the one to ask about it.\n");
     if (reader == AgentKind::Orchestrator || role.can(Capability::DocsRead))
         && let Some(l0) = crate::context::l0(app, &project.slug)
@@ -1493,11 +1551,27 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
     }
     let team_id = app.with_tracker(slug, |t| t.bus().free_id(&task.id))?;
     let workspace = template.as_ref().map(|t| t.workspace).unwrap_or(Workspace::Worktree);
+    let has_repos = !app.with_server(|db| db.repos(slug))?.is_empty();
     let worktree = match (&project.repo, workspace) {
+        _ if has_repos => match (workspace, refinement) {
+            // The project's repositories: a clone of each at its mount, on the task's branch.
+            (Workspace::Worktree, false) => {
+                let (root, placed) = crate::git::service::task_workspace(app, slug, &team_id, Some(&task.id))?;
+                let branch = placed.iter().find_map(|p| p.branch.clone()).unwrap_or_default();
+                Some(TeamWorktree { path: root.to_string_lossy().into_owned(), branch, base: None })
+            }
+            _ => None,
+        },
         (Some(repo), Workspace::Worktree) if !refinement => Some(create_worktree(app, Path::new(repo), &team_id, &task.id)?),
         _ => None,
     };
     let cwd = match (&worktree, &project.repo, workspace) {
+        (None, _, Workspace::Scratch) if has_repos => {
+            let d = app.data.join("workspaces").join(slug).join(&team_id);
+            std::fs::create_dir_all(&d).map_err(|e| AppError::Internal(format!("{}: {e}", d.display())))?;
+            d.to_string_lossy().into_owned()
+        }
+        (None, _, _) if has_repos => project_workspace(app, &project, &team_id).to_string_lossy().into_owned(),
         (Some(w), _, _) => w.path.clone(),
         (None, Some(_), Workspace::Scratch) => {
             let d = app.data.join("workspaces").join(slug).join(&team_id);

@@ -29,6 +29,19 @@ pub const TASK_DELETED: &str = "task.deleted";
 pub const MAIL_SENT: &str = "mail.sent";
 /// A tool call through the MCP gateway.
 pub const MCP_CALLED: &str = "mcp.called";
+/// An agent pushed to a repository through the repository proxy.
+pub const GIT_PUSHED: &str = "git.pushed";
+/// The proxy refused an agent's push or clone (policy).
+pub const GIT_DENIED: &str = "git.denied";
+/// A pull/merge request was opened for a task's branch.
+pub const CR_OPENED: &str = "cr.opened";
+/// A pull/merge request was merged.
+pub const CR_MERGED: &str = "cr.merged";
+/// A pull/merge request was closed without merging.
+pub const CR_CLOSED: &str = "cr.closed";
+/// The CI of a task's request failed / passed.
+pub const CI_FAILED: &str = "ci.failed";
+pub const CI_PASSED: &str = "ci.passed";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

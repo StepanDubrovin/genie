@@ -188,7 +188,7 @@ docker compose exec genie genie project add shop --name "Магазин" --repo 
 
 ### Доступ к git-серверу
 
-- **GitHub по HTTPS.** Задайте `GITHUB_TOKEN` (или `GH_TOKEN`; fine-grained токен на нужные репозитории, права Contents: read/write). Системный credential helper (`/etc/gitconfig`) подставляет его только для `https://github.com` и читает из окружения контейнера в момент использования: на диск токен не пишется, работает и у агентов, и в оболочке `docker exec`. Агенты видят токен в своём окружении.
+- **GitHub по HTTPS.** Задайте `GITHUB_TOKEN` (или `GH_TOKEN`; fine-grained токен на нужные репозитории, права Contents: read/write). Системный credential helper (`/etc/gitconfig`) подставляет его только для `https://github.com` и читает из окружения контейнера в момент использования: на диск токен не пишется, работает и у агентов, и в оболочке `docker exec`. Агенты проекта со старым локальным репозиторием (`--repo`) видят этот токен в своём окружении и пушат сами. Для репозиториев, подключённых как репозитории проекта ([[platform/git-repositories]]), токен настраивается в `git.json` и остаётся у сервера: из окружения агентов таких проектов `GITHUB_TOKEN` и другие привычные токены вырезаются, а push идёт через прокси сервера по политике.
 - **SSH.** Положите ключ в `/data/home/.ssh` (`id_ed25519`, права 600; каталог получит 700 при старте). Неизвестные хосты принимаются при первом подключении (`StrictHostKeyChecking accept-new`), запросов пароля нет.
 - **Автор коммитов.** По умолчанию `genie <genie@genie.local>`; меняется `GIT_AUTHOR_NAME/EMAIL` и `GIT_COMMITTER_NAME/EMAIL` в `.env`.
 

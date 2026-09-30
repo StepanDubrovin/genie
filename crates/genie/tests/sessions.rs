@@ -513,7 +513,8 @@ async fn a_role_gets_its_skills_and_the_guard_keeps_it_within_its_grants() {
         "the command table:\n{}",
         req.system
     );
-    assert!(!req.system.contains("genie agent ") && !req.system.contains("--title"), "the catalog's commands, those of the role");
+    // (`genie pr open --title` is the executor's own: it hands its work over.)
+    assert!(!req.system.contains("genie agent ") && !req.system.contains("genie task create"), "the catalog's commands, those of the role");
 
     // A denied command is blocked, the rest of the shell works.
     mail(app, "anna", "human", "bender", "RUN: echo one && git push origin main", None);

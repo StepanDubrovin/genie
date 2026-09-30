@@ -73,6 +73,27 @@
 .pj-checks .txt { min-width: 0; overflow-wrap: anywhere; }
 .pj-checks .hint { display: block; color: var(--muted); font-size: 12px; }
 .pj-bad { color: var(--red); }
+
+/* Repositories */
+.rp-list { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; }
+.rp { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.rp:last-child { border-bottom: 0; }
+.rp-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
+.rp-where { font: 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+.rp-where a { color: inherit; }
+.rp-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.rp .pj-hint, .rp .pj-bad { margin: 0; font-size: 12px; }
+.rp-json summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.rp-json textarea { display: block; width: min(640px, 100%); margin: 8px 0; font: 12px var(--mono); border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg-panel); color: var(--text); padding: 8px 10px; }
+.rp-json .btn { margin-right: 8px; }
+
+/* A task's delivery (the task card) */
+.td-delivery { display: flex; flex-direction: column; gap: 8px; }
+.td-repo { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; font-size: 12.5px; }
+.td-repo .mono { font: 12px var(--mono); }
+.td-repo .pill.ok { color: var(--green, #4cb782); }
+.td-repo .pill.warn { color: var(--amber, #f0a04b); }
+.td-repo .pill.fail { color: var(--red, #eb5757); }
 .pj-stats { padding: 12px 0; border-top: 1px solid var(--line); }
 .pj-stats:first-of-type { border-top: 0; }
 .pj-stats .pj-stats-head { font-weight: 600; color: var(--text); }

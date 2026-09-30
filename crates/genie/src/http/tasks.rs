@@ -365,6 +365,8 @@ async fn delete_task(
                         rusqlite::params![genie_core::db::now(), slug, task],
                     )?;
                     db.conn().execute("DELETE FROM notifications WHERE project = ?1 AND task = ?2", rusqlite::params![slug, task])?;
+                    // Its repositories and their requests are no longer watched (the branches and requests stay on the host).
+                    db.conn().execute("DELETE FROM task_repos WHERE project = ?1 AND task = ?2", rusqlite::params![slug, task])?;
                 }
                 Ok(())
             })?;
@@ -394,6 +396,12 @@ async fn status(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>, J
                 "people close tasks in this project (assisted): move the task to needs_owner with a short summary of the result and what to check",
             ));
         }
+    }
+    // What the task delivers to its repositories must be in order before review and close (people decide for themselves).
+    if !access.is_human() && matches!(to, Status::Review | Status::Done) {
+        let (slug, task_id) = (access.project.clone(), id.clone());
+        let verdict = app.blocking(move |app| Ok(crate::git::delivery::gate(app, &slug, &task_id, to))).await?;
+        verdict.map_err(|m| ApiError::new(StatusCode::CONFLICT, m))?;
     }
     let force = access.is_human() || (access.actor.role == Role::Orchestrator && b["force"] == json!(true));
     let opts = StatusOptions { note: b.get("note").and_then(text).filter(|n| !n.is_empty()), force };

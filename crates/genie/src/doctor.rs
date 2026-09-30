@@ -80,6 +80,7 @@ pub fn run(data: &Path, cfg: &Config, agents: &AgentConfig, web: Option<&Path>) 
         ),
     }
     git(&mut out, &repos);
+    git_hosts(&mut out, data);
     vault(&mut out, data, cfg);
     channels(&mut out, cfg);
     network(&mut out, cfg);
@@ -377,6 +378,69 @@ fn git(out: &mut Out, repos: &[(String, PathBuf)]) {
                 "agents commit as <name>@genie.local; set git config --global user.name/user.email for the server user to commit as the team",
             );
         }
+    }
+}
+
+/// The git hosts of `git.json` and the projects' repositories on them. Reachability and
+/// token rights are checked by `genie repos check` / the web (they need the network).
+fn git_hosts(out: &mut Out, data: &Path) {
+    use crate::git::hosts;
+    let h = hosts::load(data);
+    for e in &h.errors {
+        out.fail("git", format!("git.json: {e}"), "fix the entry in <data>/git.json; the host is ignored until then");
+    }
+    for host in h.map.values() {
+        for m in &host.missing {
+            out.fail(
+                "git",
+                format!("host {}: secret missing: {m}", host.id),
+                "set the environment variable of the server, or point token_file at a readable file",
+            );
+        }
+        for (what, path) in [("ssh_key", &host.ssh_key), ("ca_cert", &host.ca_cert), ("known_hosts", &host.known_hosts)] {
+            if let Some(p) = path
+                && !Path::new(p).is_file()
+            {
+                out.fail("git", format!("host {}: {what} {p} is not a file", host.id), "fix the path in git.json");
+            }
+        }
+        if host.insecure_skip_verify {
+            out.warn("git", format!("host {}: certificates are not verified (insecure_skip_verify)", host.id), "give ca_cert instead");
+        }
+        if host.missing.is_empty() {
+            out.ok(
+                "git",
+                format!("host {} ({}): {} over {}", host.id, host.kind.as_str(), host.url, if host.ssh { "ssh" } else { "https" }),
+            );
+        }
+    }
+    let Ok(db) = ServerDb::open(&data.join("server.db")) else { return };
+    let repos = db.all_repos().unwrap_or_default();
+    for r in &repos {
+        if !h.map.contains_key(&r.host) {
+            out.fail(
+                "git",
+                format!("{}: repository {} lives on host {}, which git.json does not define", r.project, r.name, r.host),
+                "add the host to <data>/git.json or move the repository",
+            );
+        } else if let Err(e) = crate::git::policy::Policy::parse(&r.policy) {
+            out.fail(
+                "git",
+                format!("{}: repository {}: {e}", r.project, r.name),
+                "PATCH /api/repos/<name> with a valid policy; until then agents get no access",
+            );
+        }
+    }
+    if !repos.is_empty() {
+        out.ok(
+            "git",
+            format!(
+                "{} repositor{} in {} project(s)",
+                repos.len(),
+                if repos.len() == 1 { "y" } else { "ies" },
+                repos.iter().map(|r| &r.project).collect::<BTreeSet<_>>().len()
+            ),
+        );
     }
 }
 

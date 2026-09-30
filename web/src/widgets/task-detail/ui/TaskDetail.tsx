@@ -34,6 +34,7 @@ import type { Team } from "@/entities/team";
 import { SpawnTeamDialog } from "@/features/spawn-team";
 import { plural, timeAgo, useTick } from "@/shared/lib";
 import { ConfirmDialog, Icon, Markdown, useToast } from "@/shared/ui";
+import { TaskDelivery } from "./TaskDelivery.tsx";
 
 const KIND_NAME: Record<string, string> = { note: "заметка", progress: "прогресс", question: "вопрос", decision: "решение", review: "ревью", handoff: "передача", owner: "владелец" };
 
@@ -372,6 +373,8 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
             <span className="muted">Оркестратор сформулирует критерии при уточнении</span>
           )}
         </section>
+
+        {!isEpic && <TaskDelivery task={t.id} />}
 
         {t.plan.trim() && (
           <section className="sec">

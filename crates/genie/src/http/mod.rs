@@ -13,10 +13,12 @@ pub mod automations;
 pub mod console;
 pub mod ctx;
 pub mod docs;
+pub mod git;
 pub mod images;
 pub mod live;
 pub mod mcp_gateway;
 pub mod mcp_server;
+pub mod repos;
 pub mod tasks;
 pub mod teams;
 pub mod web;
@@ -93,10 +95,13 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(console::routes())
         .merge(agent_config::routes())
         .merge(mcp_gateway::routes())
+        .merge(repos::routes())
         .merge(live::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not found") });
-    let router =
-        Router::new().nest("/api", api).route("/mcp", post(mcp_server::endpoint).get(mcp_server::no_stream).delete(mcp_server::no_stream));
+    let router = Router::new()
+        .nest("/api", api)
+        .merge(git::routes())
+        .route("/mcp", post(mcp_server::endpoint).get(mcp_server::no_stream).delete(mcp_server::no_stream));
     // Client-side routes (/board, /team/G-7…) fall back to the SPA entry.
     let router = match web::resolve(app.web_root.as_deref()) {
         web::WebUi::BuiltIn => {
@@ -119,7 +124,8 @@ async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Respons
     let write = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     let bearer = req.headers().contains_key(header::AUTHORIZATION);
     // Webhooks come from other services and carry their own secret instead.
-    let hook = req.uri().path().starts_with("/api/hooks/");
+    // The git proxy takes tokens only (never cookies), so it has no cross-site risk either.
+    let hook = req.uri().path().starts_with("/api/hooks/") || req.uri().path().starts_with("/git/");
     if write && !bearer && !hook && req.headers().get("x-genie").and_then(|v| v.to_str().ok()) != Some("1") {
         return ApiError::new(StatusCode::FORBIDDEN, "missing X-Genie header").into_response();
     }

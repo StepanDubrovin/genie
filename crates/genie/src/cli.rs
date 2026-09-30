@@ -191,6 +191,7 @@ pub async fn run() -> Result<(), String> {
             }
             app.print_agent_errors();
             crate::runtime::start(&app);
+            crate::git::delivery::spawn_poller(app.clone());
             crate::serve(app).await?;
         }
         Command::Orchestrate { force, pi, pi_args } => {

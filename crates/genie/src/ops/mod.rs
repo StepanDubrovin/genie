@@ -29,6 +29,7 @@ mod docs;
 mod mail;
 mod me;
 pub mod render;
+mod repos;
 mod tasks;
 mod teams;
 pub mod tools;
@@ -335,6 +336,8 @@ pub const GROUPS: &[(&str, &str)] = &[
     ("team", "Teams of agents: assemble, look at, steer and stop them"),
     ("mail", "Mail between the members of a team, the orchestrator and people"),
     ("docs", "The project's knowledge base: search, read, write pages"),
+    ("repos", "Git repositories of a project: hosts, attach, policy, checks, and what a task may do in them"),
+    ("pr", "Pull/merge requests of a task's branches: open, look at, comment, merge"),
     ("job", "One-shot jobs: start one, see what it did"),
     ("automation", "Automations: rules that act on events, schedules and webhooks, and their runs"),
     ("agents", "Roles, team templates, skills and MCP connections of the server"),
@@ -357,6 +360,7 @@ pub fn catalog() -> &'static [Entry] {
         agents::register(&mut all);
         admin::register(&mut all);
         me::register(&mut all);
+        repos::register(&mut all);
         all
     })
 }
