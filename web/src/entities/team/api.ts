@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { keys, request, useInvalidating } from "@/shared/api";
-import type { Mail, MailLevel, Team, TeamDetail, TeamView } from "./model.ts";
+import type { Mail, MailLevel, Peek, Team, TeamDetail, TeamView } from "./model.ts";
 
 export const useTeams = () => useQuery({ queryKey: keys.teams, queryFn: () => request<TeamView[]>("GET", "/api/teams?all=1") });
 
@@ -39,3 +39,43 @@ export function useTeamMap(): Map<string, Team> {
   const teams = useTeams().data;
   return useMemo(() => new Map((teams ?? []).map((t) => [t.id, t])), [teams]);
 }
+
+/** An agent's live session and the latest messages of its conversation. */
+export const usePeek = (team: string | undefined, member: string | undefined, working: boolean) =>
+  useQuery({
+    queryKey: ["peek", team ?? "", member ?? ""],
+    queryFn: () => request<Peek>("GET", `/api/agents/${encodeURIComponent(team!)}/${encodeURIComponent(member!)}/peek?deep=1&limit=40`),
+    enabled: !!team && !!member,
+    refetchInterval: working ? 2500 : 10_000,
+  });
+
+/** Pause a member (its session stops, mail waits) or let it go on with the mail that waited. */
+export const useSetPaused = () =>
+  useInvalidating((v: { team: string; member: string; paused: boolean }) =>
+    request<unknown>("POST", `/api/agents/${encodeURIComponent(v.team)}/${encodeURIComponent(v.member)}/${v.paused ? "pause" : "resume"}`, {}),
+  );
+
+/** Restart a member's session with the role's current settings; the conversation goes on. */
+export const useRestartMember = () =>
+  useInvalidating((v: { team: string; member: string }) => request<unknown>("POST", `/api/teams/${encodeURIComponent(v.team)}/members/${encodeURIComponent(v.member)}/restart`, {}));
+
+/** A model an agent can be given; `listed: false` when pi's catalogue does not have it. */
+export type ModelOption = { id: string; provider: string; name: string; listed: boolean };
+
+/** The models agents can be given and the thinking levels (pi's catalogue is read at most every few minutes). */
+export const useModels = (enabled = true) =>
+  useQuery({
+    queryKey: ["models"],
+    queryFn: () => request<{ catalogue: boolean; models: ModelOption[]; thinking: string[] }>("GET", "/api/models"),
+    enabled,
+    staleTime: 300_000,
+  });
+
+/** Give a member its own model and thinking level (`undefined`: as its role); it switches at the end of its current step. */
+export const useSetMemberModel = () =>
+  useInvalidating((v: { team: string; member: string; model?: string; thinking?: string }) =>
+    request<{ model?: string; thinking?: string }>("PATCH", `/api/teams/${encodeURIComponent(v.team)}/members/${encodeURIComponent(v.member)}`, {
+      model: v.model ?? null,
+      thinking: v.thinking ?? null,
+    }),
+  );

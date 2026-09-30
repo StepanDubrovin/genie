@@ -42,3 +42,26 @@ export interface TeamDetail extends TeamView {
   mail: Mail[];
   log: (Record<string, unknown> & { at: string; event: string })[];
 }
+
+/** One piece of an assistant message in the agent's conversation. */
+export type PeekPart = { type: "text"; text: string } | { type: "thinking"; text: string } | { type: "tool"; id?: string; name: string; args: string };
+
+/** One message of an agent's pi conversation, as `peek?deep=1` returns it. */
+export interface PeekMessage {
+  /** `user` | `assistant` | `toolResult` | `custom:<type>` (`custom:genie-mail` is delivered mail). */
+  role: string;
+  /** Short text for agents. */
+  text: string;
+  parts?: PeekPart[];
+  at?: string;
+  /** For a tool result: the call it answers. */
+  tool?: { id?: string; name?: string; error: boolean };
+  /** For delivered mail: the messages of the delivery. */
+  mailIds?: number[];
+}
+
+export interface Peek {
+  agent: string;
+  session: LiveSession | null;
+  conversation?: PeekMessage[];
+}

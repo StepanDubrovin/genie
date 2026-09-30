@@ -58,8 +58,8 @@ pub struct Member {
     pub instructions: Option<String>,
     pub status: String,
     pub status_at: String,
-    /// `active` | `stopped` | `error`
-    #[ts(type = r#""active" | "stopped" | "error""#)]
+    /// `active` | `paused` | `stopped` | `error`
+    #[ts(type = r#""active" | "paused" | "stopped" | "error""#)]
     pub state: String,
     /// `idle` | `working` | `error`
     #[ts(type = r#""idle" | "working" | "error""#)]
@@ -526,6 +526,21 @@ impl Bus<'_> {
             }
             self.conn().execute("UPDATE teams SET updated = ?1 WHERE id = ?2", params![now(), team])?;
             self.log(team, "status", json!({ "member": member, "status": status }))
+        })
+    }
+
+    /// The member's own model and thinking level; `None` goes back to its role's.
+    pub fn set_member_model(&self, team: &str, member: &str, model: Option<&str>, thinking: Option<&str>, by: &str) -> Result<()> {
+        self.t.tx(|| {
+            let n = self.conn().execute(
+                "UPDATE members SET model = ?1, thinking = ?2 WHERE team = ?3 AND name = ?4",
+                params![model, thinking, team, member],
+            )?;
+            if n == 0 {
+                return Err(GenieError::not_found(format!("team {team} has no member {member}")));
+            }
+            self.conn().execute("UPDATE teams SET updated = ?1 WHERE id = ?2", params![now(), team])?;
+            self.log(team, "member_model", json!({ "member": member, "model": model, "thinking": thinking, "by": by }))
         })
     }
 

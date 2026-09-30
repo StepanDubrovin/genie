@@ -379,6 +379,14 @@ async fn mail_reaches_live_agents_between_steps_and_on_interrupt() {
     let peek = get("/agents/SHOP-1/bender/peek?deep=1".into()).await;
     let conversation = peek["conversation"].as_array().cloned().unwrap_or_default();
     assert!(conversation.iter().any(|m| m["text"].as_str().unwrap_or_default().contains("yoda answered")), "{peek}");
+    // The web chat reads structured parts: delivered mail names its messages, tool calls come with a result.
+    assert!(
+        conversation.iter().any(|m| m["role"] == "custom:genie-mail" && m["mailIds"].as_array().is_some_and(|ids| !ids.is_empty())),
+        "{peek}"
+    );
+    assert!(conversation.iter().all(|m| m["parts"].is_array() && m["at"].is_string()), "{peek}");
+    let few = get("/agents/SHOP-1/bender/peek?deep=1&limit=2".into()).await;
+    assert_eq!(few["conversation"].as_array().map(Vec::len), Some(2), "{few}");
 
     // Only the orchestrator and people interrupt.
     let token = app

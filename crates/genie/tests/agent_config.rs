@@ -492,3 +492,48 @@ async fn admins_upload_the_files_of_a_skill_everyone_reads_them() {
     assert_eq!(rows[1], ("skills/owasp/logo.png".into(), Value::Null, json!("[6 bytes]")));
     assert_eq!(rows.len(), 4, "SKILL.md, two uploads, one removal: {hist}");
 }
+
+#[tokio::test]
+async fn a_person_gives_one_agent_its_own_model_and_takes_it_back() {
+    let h = Harness::new();
+    h.project("shop");
+    let id = ready_task(&h, "Pick a model");
+    let r = &h.router;
+    let (s, team, _) = call(r, "POST", "/api/teams").json(json!({ "task": id, "template": "pair" })).send().await;
+    assert_eq!(s, StatusCode::CREATED, "{team}");
+    let (exec, reviewer) = (member_named(&team, "executor"), member_named(&team, "reviewer"));
+
+    // The menu lists the models the configuration names, and the thinking levels.
+    let (s, models, _) = call(r, "GET", "/api/models").send().await;
+    assert_eq!(s, StatusCode::OK, "{models}");
+    let ids: Vec<&str> = models["models"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
+    assert!(ids.contains(&"openai-codex/gpt-6-luna"), "the roleModels of the configuration: {models}");
+    assert!(models["thinking"].as_array().unwrap().contains(&json!("xhigh")));
+
+    // One member switches; the rest of the team keeps its role's model.
+    let url = format!("/api/teams/{id}/members/{exec}");
+    let (s, v, _) = call(r, "PATCH", &url).json(json!({ "model": "fake/strong", "thinking": "xhigh" })).send().await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, team, _) = call(r, "GET", &format!("/api/teams/{id}")).send().await;
+    let member = |team: &Value, name: &str| team["members"].as_array().unwrap().iter().find(|m| m["name"] == name).cloned().unwrap();
+    assert_eq!((member(&team, &exec)["model"].clone(), member(&team, &exec)["thinking"].clone()), (json!("fake/strong"), json!("xhigh")));
+    assert!(member(&team, &reviewer)["model"].is_null(), "{team}");
+    assert!(team["log"].as_array().unwrap().iter().any(|e| e["event"] == "member_model" && e["member"] == exec.as_str()), "{team}");
+
+    // Nonsense is refused; a teammate may not switch another agent's model.
+    let (s, _, _) = call(r, "PATCH", &url).json(json!({ "thinking": "extreme" })).send().await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _, _) = call(r, "PATCH", &url).json(json!({ "model": "fake strong" })).send().await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let tok = token(&h, Role::Reviewer, "reviewer", &reviewer, &id);
+    let (s, _, _) = call(&h.remote, "PATCH", &url).bearer(&tok).json(json!({ "model": "fake/cheap" })).send().await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, e, _) = call(r, "PATCH", &format!("/api/teams/{id}/members/nobody")).json(json!({ "model": "fake/cheap" })).send().await;
+    assert!(s.is_client_error() && e["error"].as_str().unwrap().contains("has no member nobody"), "{e}");
+
+    // Empty values take the member back to its role.
+    let (s, _, _) = call(r, "PATCH", &url).json(json!({ "model": null, "thinking": "" })).send().await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, team, _) = call(r, "GET", &format!("/api/teams/{id}")).send().await;
+    assert!(member(&team, &exec)["model"].is_null() && member(&team, &exec)["thinking"].is_null(), "{team}");
+}

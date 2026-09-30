@@ -14,6 +14,7 @@ import { AnswerPage, AutomationsPage, NotificationsPage, ProfilePage, ProposalsP
 import { useSession } from "@/entities/session";
 import { TasksPage } from "@/pages/tasks";
 import { TeamView } from "@/pages/team";
+import { AgentChat } from "@/pages/agent";
 import { useLiveUpdates } from "@/shared/api";
 import { isTyping } from "@/shared/lib";
 import { Sidebar } from "@/widgets/sidebar";
@@ -104,7 +105,8 @@ function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [dialog, openTaskId, closeTask, actions, navigate, newTask]);
 
-  const cls = teamRoute ? "app team-view" : openTaskId ? "app with-detail" : "app";
+  const agentRoute = /^\/team\/[^/]+\/[^/]+/.test(location.pathname);
+  const cls = agentRoute ? "app team-view agent-view" : teamRoute ? "app team-view" : openTaskId ? "app with-detail" : "app";
   return (
     <div className={cls}>
       <Sidebar onNew={() => newTask()} online={online} />
@@ -164,6 +166,7 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/active" replace /> },
       { path: "team/:teamId", element: <TeamView /> },
+      { path: "team/:teamId/:member", element: <AgentChat /> },
       { path: "epics", element: <EpicsRoute /> },
       { path: "epic/:epicId", element: <EpicRoute /> },
       { path: "docs", element: <DocsPage /> },
