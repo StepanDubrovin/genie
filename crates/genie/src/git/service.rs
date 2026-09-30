@@ -99,7 +99,7 @@ pub fn ensure_task_repos(app: &App, project: &str, task: &str) -> AppResult<Vec<
         [] => Ok(have),
         [one] => Ok(app.with_server(|db| db.set_task_repos(project, task, &[(one.name.clone(), "write".to_string())]))?),
         many => Err(GenieError::invalid(format!(
-            "{task} must name the repositories it works in ({}): `genie agent repos set {} <repo>:write …` or PUT /api/tasks/{task}/repos",
+            "{task} must name the repositories it works in ({}): `genie repos use <repo>:write … --task {}` or PUT /api/tasks/{task}/repos",
             many.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", "),
             task
         ))
@@ -161,11 +161,11 @@ pub fn prompt_section(app: &App, project: &str, a: &AgentId) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "\n## Repositories\n\nThe project's code lives in these repositories, each in its own directory of your working directory. `git` works as usual; `origin` is the genie server, which checks every push against the rules below (a refused push says why). You hold no credentials for the git host and need none. Use `genie agent repos` to see the rules again.\n\n",
+        "\n## Repositories\n\nThe project's code lives in these repositories, each in its own directory of your working directory. `git` works as usual; `origin` is the genie server, which checks every push against the rules below (a refused push says why). You hold no credentials for the git host and need none. Use `genie repos list` to see the rules again.\n\n",
     );
     for e in &all {
         out.push_str(&format!("- {}\n", e.describe()));
     }
-    out.push_str("\nWhen your work is committed: `git push` your task's branch, then `genie agent pr open --repo <name> --title \"…\" --body \"…\"` for each repository you changed.\n");
+    out.push_str("\nWhen your work is committed: `git push` your task's branch, then `genie pr open --repo <name> --title \"…\" --body \"…\"` for each repository you changed.\n");
     out
 }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use genie::config::Config;
 use genie::state::App;
 use http_body_util::BodyExt;
@@ -89,6 +89,18 @@ impl<'a> Call<'a> {
         self
     }
     pub async fn send(self) -> (StatusCode, Value, Vec<String>) {
+        let (status, headers, bytes) = self.send_raw().await;
+        let cookies = headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap().to_string())
+            .collect();
+        let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()));
+        (status, body, cookies)
+    }
+    /// The response as it came: status, headers and body bytes.
+    pub async fn send_raw(self) -> (StatusCode, HeaderMap, Vec<u8>) {
         let mut req = Request::builder().method(self.method).uri(&self.uri);
         if !self.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")) {
             req = req.header(header::HOST, "127.0.0.1:7420");
@@ -105,16 +117,8 @@ impl<'a> Call<'a> {
             (None, None) => req.body(Body::empty()).unwrap(),
         };
         let res = self.router.clone().oneshot(req).await.unwrap();
-        let status = res.status();
-        let cookies = res
-            .headers()
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .map(|v| v.split(';').next().unwrap().to_string())
-            .collect();
+        let (status, headers) = (res.status(), res.headers().clone());
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()));
-        (status, body, cookies)
+        (status, headers, bytes.to_vec())
     }
 }

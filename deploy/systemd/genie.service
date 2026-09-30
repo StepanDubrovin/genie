@@ -24,7 +24,7 @@ Environment=PATH=/home/genie/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Secrets of MCP connections, referenced in mcp.json as ${env:NAME}: they stay with the server.
 EnvironmentFile=-/etc/genie/secrets.env
 WorkingDirectory=/var/lib/genie
-ExecStart=/opt/genie/bin/genie serve --web /opt/genie/web
+ExecStart=/opt/genie/bin/genie serve
 Restart=on-failure
 RestartSec=5
 # Agents are processes of the service and stop with it; a restart resumes their work.

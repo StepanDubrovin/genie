@@ -12,7 +12,6 @@
 set -euo pipefail
 
 GENIE_BIN=/opt/genie/bin/genie
-GENIE_WEB=/opt/genie/web
 GENIE_USER=genie
 
 log() { printf 'genie-entrypoint: %s\n' "$*" >&2; }
@@ -99,17 +98,17 @@ case "$cmd" in
       ! env | grep -Eq '^(ANTHROPIC|OPENAI|GEMINI|DEEPSEEK|MISTRAL|GROQ|XAI|OPENROUTER|AZURE_OPENAI|AWS_BEARER_TOKEN_BEDROCK|GOOGLE_CLOUD|CEREBRAS|TOGETHER|FIREWORKS|HF|COPILOT_GITHUB)[A-Z_]*=.+'; then
       log "note: no model credentials found (provider API key variables, auth.json or models.json in $agent_dir): the web UI works, agents cannot call models"
     fi
+    # The web UI is built into genie.
     args=(serve)
-    has_web=0 has_port=0
+    has_port=0
     for a in "$@"; do
-      case "$a" in --web | --web=*) has_web=1 ;; --port | --port=*) has_port=1 ;; esac
+      case "$a" in --port | --port=*) has_port=1 ;; esac
     done
-    [ "$has_web" = 1 ] || args+=(--web "$GENIE_WEB")
     [ "$has_port" = 1 ] || args+=(--port "$GENIE_PORT")
     log "starting: genie ${args[*]} $* (data $GENIE_DATA, uid $(id -u))"
     exec "$GENIE_BIN" "${args[@]}" "$@"
     ;;
-  project | user | member | invite | backup | vault | agents | agent | init | help | -h | --help | -V | --version)
+  task | team | mail | docs | job | automation | agents | project | user | me | server | orchestrate | member | invite | backup | stats | doctor | vault | agent | init | help | -h | --help | -V | --version)
     exec "$GENIE_BIN" "$cmd" "$@"
     ;;
   *)

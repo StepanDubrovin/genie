@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { isRasterFileName } from "../../../../../src/web/images.ts";
+import { isRasterFileName } from "@/shared/lib";
 import { Icon, ImagePreview } from "@/shared/ui";
 
 /**

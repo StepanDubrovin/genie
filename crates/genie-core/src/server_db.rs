@@ -295,6 +295,14 @@ CREATE TABLE IF NOT EXISTS task_repos (
   updated TEXT NOT NULL,
   PRIMARY KEY (project, task, repo)
 );
+-- A person's own agent session acting as a project's orchestrator (`genie orchestrate`).
+CREATE TABLE IF NOT EXISTS consoles (
+  project TEXT PRIMARY KEY,
+  user TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  taken TEXT NOT NULL,
+  until TEXT NOT NULL
+);
 "#;
 
 /// Columns added after the first server release; applied to existing databases on open.
@@ -418,6 +426,24 @@ pub struct ConfigChange {
     pub before: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+}
+
+/// The orchestrator console of a project: someone's own agent session acting as
+/// its orchestrator while the server's orchestrator waits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Console {
+    pub project: String,
+    /// The login of the person at the console.
+    pub user: String,
+    pub taken: String,
+    /// The console lapses at this time unless renewed.
+    pub until: String,
+}
+
+/// The secret part of a token (without its `gnu_` / `gna_` prefix).
+fn secret_of(token: &str) -> &str {
+    token.strip_prefix("gnu_").or_else(|| token.strip_prefix("gna_")).unwrap_or(token)
 }
 
 /// Who an API token speaks for.
@@ -682,7 +708,7 @@ impl ServerDb {
     }
 
     pub fn resolve_token(&self, token: &str) -> Result<Option<Principal>> {
-        let secret = token.strip_prefix("gnu_").or_else(|| token.strip_prefix("gna_")).unwrap_or(token);
+        let secret = secret_of(token);
         type Row = (String, Option<i64>, Option<String>, Option<Role>, Option<String>, Option<String>, Option<i64>, Option<String>);
         let row: Option<Row> = self
             .conn()
@@ -707,7 +733,7 @@ impl ServerDb {
 
     /// Revoke one token by its secret (an agent's per-turn token when the turn ends).
     pub fn revoke_token(&self, token: &str) -> Result<()> {
-        let secret = token.strip_prefix("gnu_").or_else(|| token.strip_prefix("gna_")).unwrap_or(token);
+        let secret = secret_of(token);
         self.conn().execute("UPDATE api_tokens SET revoked = 1 WHERE token_hash = ?1", [hash_secret(secret)])?;
         Ok(())
     }
@@ -892,6 +918,95 @@ impl ServerDb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    // --- the orchestrator console -----------------------------------------------
+
+    /// The console of a project, while someone holds it.
+    pub fn console(&self, project: &str) -> Result<Option<Console>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT project, user, taken, until FROM consoles WHERE project = ?1 AND until > ?2", params![project, now()], |r| {
+                Ok(Console { project: r.get(0)?, user: r.get(1)?, taken: r.get(2)?, until: r.get(3)? })
+            })
+            .optional()?)
+    }
+
+    /// Take the orchestrator console of a project: a fresh orchestrator token for
+    /// the person's session, valid as long as the console is held (`ttl`, then
+    /// renewals). Someone else's console is refused unless `force`; a replaced
+    /// console's token stops working.
+    pub fn take_console(
+        &self,
+        project: &str,
+        user: &str,
+        role_id: Option<&str>,
+        ttl: ChronoDuration,
+        force: bool,
+    ) -> Result<(Console, String)> {
+        self.tx(|| {
+            if let Some(c) = self.console(project)?
+                && c.user != user
+                && !force
+            {
+                return Err(GenieError::invalid(format!(
+                    "the orchestrator console of {project} is held by {} since {}; take it over with force",
+                    c.user, c.taken
+                )));
+            }
+            let old: Option<String> =
+                self.conn().query_row("SELECT token_hash FROM consoles WHERE project = ?1", [project], |r| r.get(0)).optional()?;
+            if let Some(hash) = old {
+                self.conn().execute("UPDATE api_tokens SET revoked = 1 WHERE token_hash = ?1", [hash])?;
+            }
+            let token = self.create_role_token(project, Role::Orchestrator, role_id, crate::team::ORCHESTRATOR, None, None, ttl)?;
+            let console = Console { project: project.to_string(), user: user.to_string(), taken: now(), until: time_in(ttl) };
+            self.conn().execute(
+                "INSERT INTO consoles(project, user, token_hash, taken, until) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(project) DO UPDATE SET user = excluded.user, token_hash = excluded.token_hash, taken = excluded.taken, until = excluded.until",
+                params![project, user, hash_secret(secret_of(&token)), console.taken, console.until],
+            )?;
+            Ok((console, token))
+        })
+    }
+
+    /// Whether `token` is the token of the project's console, held now.
+    pub fn is_console_token(&self, project: &str, token: &str) -> Result<bool> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM consoles WHERE project = ?1 AND token_hash = ?2 AND until > ?3",
+            params![project, hash_secret(secret_of(token)), now()],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Keep the console another `ttl`, its token too. Only its own token renews it.
+    pub fn renew_console(&self, project: &str, token: &str, ttl: ChronoDuration) -> Result<Console> {
+        self.tx(|| {
+            if !self.is_console_token(project, token)? {
+                return Err(GenieError::invalid(format!("this session no longer holds the orchestrator console of {project}")));
+            }
+            let (until, hash) = (time_in(ttl), hash_secret(secret_of(token)));
+            self.conn().execute("UPDATE consoles SET until = ?1 WHERE project = ?2", params![until, project])?;
+            self.conn().execute("UPDATE api_tokens SET expires = ?1 WHERE token_hash = ?2", params![until, hash])?;
+            self.console(project)?.ok_or_else(|| GenieError::not_found("the console lapsed"))
+        })
+    }
+
+    /// Give the console back — by its own token, or anyone's (`None`, an admin).
+    /// Its token stops working. Returns whether a console was released.
+    pub fn release_console(&self, project: &str, token: Option<&str>) -> Result<bool> {
+        self.tx(|| {
+            let hash: Option<String> =
+                self.conn().query_row("SELECT token_hash FROM consoles WHERE project = ?1", [project], |r| r.get(0)).optional()?;
+            let Some(hash) = hash else { return Ok(false) };
+            if token.is_some_and(|t| hash_secret(secret_of(t)) != hash) {
+                return Err(GenieError::invalid(format!("this session does not hold the orchestrator console of {project}")));
+            }
+            self.conn().execute("UPDATE api_tokens SET revoked = 1 WHERE token_hash = ?1", [&hash])?;
+            self.conn().execute("DELETE FROM consoles WHERE project = ?1", [project])?;
+            Ok(true)
+        })
+    }
+
     // --- leases --------------------------------------------------------------
 
     /// Take or renew a named lease (e.g. the orchestrator of a project). Returns
@@ -922,6 +1037,35 @@ impl ServerDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_console_is_held_renewed_taken_over_and_given_back() {
+        let (_d, db) = db();
+        let ttl = ChronoDuration::seconds(60);
+        let (c, anna) = db.take_console("shop", "anna", Some("orchestrator"), ttl, false).unwrap();
+        assert_eq!((c.project.as_str(), c.user.as_str()), ("shop", "anna"));
+        assert!(
+            matches!(db.resolve_token(&anna).unwrap(), Some(Principal::Agent { role: Role::Orchestrator, ref name, .. }) if name == "orchestrator")
+        );
+        assert!(db.is_console_token("shop", &anna).unwrap());
+        let e = db.take_console("shop", "bob", None, ttl, false).unwrap_err().to_string();
+        assert!(e.contains("held by anna"), "{e}");
+        db.renew_console("shop", &anna, ChronoDuration::seconds(120)).unwrap();
+
+        // Taken over: the earlier session's token stops working and cannot renew.
+        let (_, bob) = db.take_console("shop", "bob", None, ttl, true).unwrap();
+        assert!(db.resolve_token(&anna).unwrap().is_none(), "the replaced console's token is revoked");
+        assert!(db.renew_console("shop", &anna, ttl).is_err());
+        assert!(db.release_console("shop", Some(&anna)).is_err(), "only its own token gives it back");
+        assert!(db.release_console("shop", Some(&bob)).unwrap());
+        assert!(db.console("shop").unwrap().is_none() && db.resolve_token(&bob).unwrap().is_none());
+        assert!(!db.release_console("shop", None).unwrap(), "nothing to give back");
+
+        // A console nobody renews lapses.
+        db.take_console("shop", "anna", None, ChronoDuration::seconds(-1), false).unwrap();
+        assert!(db.console("shop").unwrap().is_none());
+        db.take_console("shop", "bob", None, ttl, false).unwrap();
+    }
 
     fn db() -> (tempfile::TempDir, ServerDb) {
         let dir = tempfile::tempdir().unwrap();

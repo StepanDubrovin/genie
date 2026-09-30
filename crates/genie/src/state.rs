@@ -44,7 +44,8 @@ pub struct ProjectRt {
 pub struct App {
     pub data: PathBuf,
     pub cfg: Config,
-    pub web_root: PathBuf,
+    /// A directory with the built web UI (`--web`); None: the one built into the binary.
+    pub web_root: Option<PathBuf>,
     server: Mutex<ServerDb>,
     /// The knowledge vault shared by all projects of this installation.
     pub vault: Mutex<Vault>,
@@ -59,6 +60,8 @@ pub struct App {
     pub exe: PathBuf,
     /// Live agent sessions (long-running harness processes).
     pub sessions: crate::sessions::Registry,
+    /// The scheduler of agent turns (whose turn is running, who waits after failures).
+    pub sched: crate::runtime::Sched,
     /// Roles, team templates, skills and MCP connections (reloaded when their files change).
     agents: RwLock<Arc<AgentConfig>>,
     /// The agents' connections through the MCP gateway.
@@ -68,7 +71,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn open(data: &Path, cfg: Config, web_root: PathBuf) -> AppResult<Arc<App>> {
+    pub fn open(data: &Path, cfg: Config, web_root: impl Into<Option<PathBuf>>) -> AppResult<Arc<App>> {
         std::fs::create_dir_all(data).map_err(|e| AppError::Internal(format!("{}: {e}", data.display())))?;
         let server = ServerDb::open(&data.join("server.db"))?;
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("genie"));
@@ -77,18 +80,10 @@ impl App {
             vault.ensure_space(&p.slug, p.repo.as_deref().map(Path::new))?;
         }
         let agents = AgentConfig::load(data, &cfg, None);
-        for p in agents.errors() {
-            eprintln!(
-                "genie: agent configuration: {}{}: {}",
-                p.item,
-                p.path.as_deref().map(|x| format!(" ({x})")).unwrap_or_default(),
-                p.message
-            );
-        }
         Ok(Arc::new(App {
             data: data.to_path_buf(),
             cfg,
-            web_root,
+            web_root: web_root.into(),
             server: Mutex::new(server),
             vault: Mutex::new(vault),
             projects: RwLock::new(HashMap::new()),
@@ -97,10 +92,23 @@ impl App {
             wake_outbox: Notify::new(),
             exe,
             sessions: Default::default(),
+            sched: Default::default(),
             agents: RwLock::new(Arc::new(agents)),
             mcp: Default::default(),
             git: Default::default(),
         }))
+    }
+
+    /// Print the errors of the agent configuration (when the server starts).
+    pub fn print_agent_errors(&self) {
+        for p in self.agents().errors() {
+            eprintln!(
+                "genie: agent configuration: {}{}: {}",
+                p.item,
+                p.path.as_deref().map(|x| format!(" ({x})")).unwrap_or_default(),
+                p.message
+            );
+        }
     }
 
     /// The current agent configuration (a snapshot: cheap to clone, never torn).

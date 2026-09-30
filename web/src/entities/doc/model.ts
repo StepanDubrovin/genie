@@ -1,18 +1,18 @@
-// UI-side view of the docs model. Types come straight from the core docs
-// service, so the API contract is checked by the compiler on both sides.
-//
-// The value lists (`DOC_TYPES`/`DOC_STATUSES`) are re-declared here on purpose:
-// `src/docs/parser.ts` imports `node:path` and `./glob.ts`, and pulling those
-// into the browser bundle is not possible — type-only imports are erased.
+// UI-side view of the knowledge model. Types are generated from the server's
+// Rust structs (`shared/api/types.ts`), so the API contract is checked by the
+// compiler on both sides.
 
-import type { DocStatus, DocType } from "../../../../src/docs/parser.ts";
-import type { DocLink, DocPage, DocReadResult, DocSearchResult } from "../../../../src/docs/service.ts";
+import type { DocLink, DocPage, DocRead, DocSearchResult } from "../../shared/api/types.ts";
 
-export type { DocLink, DocPage, DocReadResult, DocSearchResult, DocStatus, DocType };
+/** A page as the server reads it: the page with its text, links and policy. */
+export type DocReadResult = DocRead;
+export type DocType = NonNullable<DocPage["type"]>;
+export type DocStatus = NonNullable<DocPage["status"]>;
+export type { DocLink, DocPage, DocSearchResult };
 
-/** Follows the order of `DOC_TYPES` in `src/docs/parser.ts`. */
+/** Follows the order of `DOC_TYPES` in `crates/genie-core/src/vault.rs`. */
 export const DOC_TYPES: DocType[] = ["guide", "reference", "decision", "glossary", "runbook", "note"];
-/** Follows the order of `DOC_STATUSES` in `src/docs/parser.ts`. */
+/** Follows the order of `DOC_STATUSES` in `crates/genie-core/src/vault.rs`. */
 export const DOC_STATUSES: DocStatus[] = ["current", "draft", "deprecated"];
 
 /** Short badge text, as in the mockups (`ref`, `dec`, `note`). */

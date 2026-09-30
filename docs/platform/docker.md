@@ -17,8 +17,7 @@ verified: 2026-09-29
 
 | Слой | Зачем |
 |---|---|
-| `genie` (Rust, release) | сервер, CLI, встроенные роли, шаблоны и расширения pi |
-| `web/dist` | веб-интерфейс |
+| `genie` (Rust, release) | сервер, CLI, веб-интерфейс, встроенные роли, шаблоны и расширения pi |
 | Node 24 + **pi** (версия зафиксирована `PI_VERSION`) | харнесс агентов: по процессу `pi --mode rpc` на агента |
 | `pi-mcp-adapter` | подключения MCP для ролей; регистрируется в настройках pi при старте |
 | git, ssh, ripgrep, jq, curl, procps | всё, чем пользуются агенты и сам сервер (`kill`, worktree, vault) |
@@ -142,7 +141,7 @@ docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
 
 Для любой переменной вида `*_API_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET` работает суффикс `_FILE`: `GITHUB_TOKEN_FILE=/run/secrets/github` превращается в `GITHUB_TOKEN`, прочитанный из файла (пробельный хвост отбрасывается). Явно заданная переменная приоритетнее файла. Файл читается на старте от root, поэтому права `0400` не мешают. Так же передаются секреты MCP-серверов из `mcp.json` (`${env:JIRA_API_TOKEN}` → `JIRA_API_TOKEN_FILE`): сервер держит их у себя, а агентам не отдаёт, если подключение идёт через шлюз (см. [[platform/getting-started]]).
 
-После настройки запустите `docker compose exec genie genie doctor --web /opt/genie/web`: он сверяет модели ролей с тем, что доступно pi (`litellm/gpt-6-sol: available`), и сразу покажет, если в `roleModels` остались недоступные (`openai-codex/…`).
+После настройки запустите `docker compose exec genie genie doctor`: он сверяет модели ролей с тем, что доступно pi (`litellm/gpt-6-sol: available`), и сразу покажет, если в `roleModels` остались недоступные (`openai-codex/…`).
 
 Проверено сквозным тестом с поддельным LiteLLM на хосте: оркестратор стартует на `litellm/gpt-6-sol`, запрос уходит на `host.docker.internal` с `Authorization: Bearer <ключ из файла>`, ответ доходит до сессии.
 
@@ -165,7 +164,7 @@ docker compose exec -u genie genie genie agents check     # sandbox: agents run 
 | Защита хоста от кода в контейнере | стандартный seccomp и замаскированный `/proc` | seccomp выключен, `/proc` не замаскирован |
 | `genie doctor` | предупреждение «sandbox off» | «agents run in a bubblewrap sandbox» |
 
-Выбирайте оверлей, когда на сервере несколько проектов и людей и данные сервера ценнее, чем запас прочности контейнера (агенты выполняют команды, которые придумала модель). Если ядро хоста запрещает пространства имён пользователя, песочница не заработает и с оверлеем: агенты не запустятся, `genie doctor` объяснит причину (на Ubuntu 24.04 и новее см. `kernel.apparmor_restrict_unprivileged_userns`). Проверка готовности сервера в целом: `docker compose exec genie genie doctor --web /opt/genie/web` (без `-u`: обёртка сама понижает права и подставляет ключи из `*_FILE`).
+Выбирайте оверлей, когда на сервере несколько проектов и людей и данные сервера ценнее, чем запас прочности контейнера (агенты выполняют команды, которые придумала модель). Если ядро хоста запрещает пространства имён пользователя, песочница не заработает и с оверлеем: агенты не запустятся, `genie doctor` объяснит причину (на Ubuntu 24.04 и новее см. `kernel.apparmor_restrict_unprivileged_userns`). Проверка готовности сервера в целом: `docker compose exec genie genie doctor` (без `-u`: обёртка сама понижает права и подставляет ключи из `*_FILE`).
 
 ## Репозитории проектов
 

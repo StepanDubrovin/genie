@@ -1,7 +1,7 @@
 //! A task's delivery: the pull/merge request of its branch, the checks, the merge.
 //!
 //! The state lives in `task_repos` (one row per task and repository). Agents open and
-//! merge requests through the server (`genie agent pr …`), which checks the effective
+//! merge requests through the server (`genie pr …`), which checks the effective
 //! policy first and calls the host with the host's token. A watcher polls open
 //! requests, records merges, closures and CI results, tells the orchestrator (a merge
 //! is owner activity there) and the team (a failed check), and merges by itself where
@@ -92,7 +92,7 @@ fn load(app: &App, project: &str, task: &str, repo: &str, caller: &Caller) -> DR
     let record = store::resolved(app, &record);
     let host = store::host_of(app, &record).map_err(DeliveryError::Internal)?;
     let Some(row) = app.with_server(|db| db.task_repo(project, task, repo))? else {
-        return Err(DeliveryError::NotFound(format!("{task} does not use the repository {repo}: name it first (`genie agent repos set`)")));
+        return Err(DeliveryError::NotFound(format!("{task} does not use the repository {repo}: name it first (`genie repos use`)")));
     };
     // People act with the write rights of the task's row; agents with their role's.
     let eff = match &caller.agent {
@@ -480,14 +480,14 @@ pub fn gate(app: &App, project: &str, task: &str, to: Status) -> Result<(), Stri
                     .is_some_and(|e| e.policy.push == super::policy::Push::PrOnly && e.policy.change_request.open);
                 if wants_request {
                     return Err(format!(
-                        "the branch {} of {} is pushed but has no pull/merge request: `genie agent pr open --repo {}`, then move the task to review",
+                        "the branch {} of {} is pushed but has no pull/merge request: `genie pr open --repo {}`, then move the task to review",
                         row.branch, row.repo, row.repo
                     ));
                 }
             }
             Status::Done if row.cr_state.as_deref() == Some("open") => {
                 return Err(format!(
-                    "the request #{} of {} is not merged yet: it is merged by a person (move the task to needs_owner and say so) or by you (`genie agent pr merge --repo {}`) when the policy allows",
+                    "the request #{} of {} is not merged yet: it is merged by a person (move the task to needs_owner and say so) or by you (`genie pr merge --repo {}`) when the policy allows",
                     row.cr_number.unwrap_or_default(),
                     row.repo,
                     row.repo

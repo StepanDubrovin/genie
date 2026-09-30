@@ -335,7 +335,7 @@ impl TeamSpec {
     /// Why mail from the member named `from` to `to` (a member name,
     /// `orchestrator` or `all`) leaves the template's route in a `flow` team.
     /// `None`: it follows the route, the team's mail is open, or the sender is
-    /// not a member (the orchestrator, a person). Answers (`genie agent reply`)
+    /// not a member (the orchestrator, a person). Answers (`genie mail reply`)
     /// are not checked: they always go back to whoever asked.
     pub fn flow_refusal(&self, from: &str, to: &str, intent: Option<&str>) -> Option<String> {
         if self.mail != MailMode::Flow {
@@ -345,7 +345,7 @@ impl TeamSpec {
         let targets = self.flow_targets(&me.key);
         let voice = self.is_voice(&me.key);
         let route = format!(
-            "You may write to {}{}; answer questions with `genie agent reply <id>`",
+            "You may write to {}{}; answer questions with `genie mail reply <id>`",
             if targets.is_empty() {
                 "no teammate".to_string()
             } else {

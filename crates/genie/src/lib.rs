@@ -3,11 +3,11 @@
 //! `genie serve` runs the web UI and API, the agent runtime, the automation
 //! engine and the delivery channels in one process. See docs/platform/backend.md.
 
-pub mod agent_cli;
 pub mod agent_config;
 pub mod channels;
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod doctor;
 pub mod engine;
 pub mod git;
@@ -15,6 +15,8 @@ pub mod http;
 pub mod knowledge;
 pub mod mcp_gateway;
 pub mod notify;
+pub mod ops;
+pub mod orchestrate;
 pub mod questions;
 pub mod runtime;
 pub mod sandbox;

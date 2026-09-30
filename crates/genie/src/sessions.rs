@@ -648,7 +648,7 @@ async fn settled(app: &Arc<App>, s: &Arc<Session>) {
                     &k,
                     task.as_deref(),
                     &format!(
-                        "{} failed {max} runs in a row ({}). Its mail is kept. Restart it (`genie agent restart <team> <member>`) or replace it.",
+                        "{} failed {max} runs in a row ({}). Its mail is kept. Restart it (`genie team restart <team> <member>`) or replace it.",
                         k.label(),
                         error.as_deref().unwrap_or("error")
                     ),
@@ -746,7 +746,7 @@ async fn on_exit(app: &Arc<App>, s: &Arc<Session>, code: Option<i32>) {
                     &k,
                     task.as_deref(),
                     &format!(
-                        "The session of {} ended unexpectedly {failures} times in a row (exit {code:?}). Its mail is kept. Restart it (`genie agent restart <team> <member>`) or replace it.\n{stderr_tail}",
+                        "The session of {} ended unexpectedly {failures} times in a row (exit {code:?}). Its mail is kept. Restart it (`genie team restart <team> <member>`) or replace it.\n{stderr_tail}",
                         k.label()
                     ),
                 );
@@ -808,7 +808,7 @@ async fn watchdog(app: &Arc<App>, s: &Arc<Session>, what: &str) {
     let (k, task, text) = (
         s.key.clone(),
         s.task.clone(),
-        format!("Watchdog: {} {what}. Peek at it (`genie agent peek`) and steer or interrupt it.", s.key.label()),
+        format!("Watchdog: {} {what}. Peek at it (`genie team peek`) and steer or interrupt it.", s.key.label()),
     );
     let _ = app
         .blocking(move |app| {

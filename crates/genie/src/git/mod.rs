@@ -9,7 +9,7 @@
 //! Design: docs/platform/git-repositories.md. Agents hold no credentials for hosts:
 //! their clones point at the proxy of the server (`crate::http::git`), which
 //! checks every push against the effective policy and forwards it with the host's
-//! token; requests are opened and merged by the server (`genie agent pr`).
+//! token; requests are opened and merged by the server (`genie pr`).
 
 pub mod check;
 pub mod delivery;

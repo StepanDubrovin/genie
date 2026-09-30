@@ -31,6 +31,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/notifications", get(notifications))
         .route("/notifications/read", post(read))
         .route("/questions", get(my_questions))
+        .route("/questions/{id}/answer", post(answer_mine))
         .route("/answer/{token}", get(answer_form).post(answer))
         .route("/me/channels", get(channels))
         .route("/me/channels/telegram/code", post(telegram_code))
@@ -295,23 +296,55 @@ struct AnswerBody {
     answers: std::collections::BTreeMap<String, String>,
 }
 
+/// Record the answers to questions still open; whether they completed the questionnaire.
+fn answer_all(
+    app: &App,
+    qn: &genie_core::inbox::Questionnaire,
+    answers: &std::collections::BTreeMap<String, String>,
+    via: &str,
+) -> crate::state::AppResult<bool> {
+    let mut done = false;
+    for (n, text) in answers.iter().filter(|(_, t)| !t.trim().is_empty()) {
+        let n: i64 = n.parse().map_err(|_| genie_core::GenieError::invalid(format!("bad question number {n}")))?;
+        if qn.questions.iter().any(|q| q.n == n && q.answer.is_none()) {
+            done = crate::questions::answer(app, qn.id, n, text, via)?.1;
+        }
+    }
+    Ok(done)
+}
+
 async fn answer(State(app): State<Arc<App>>, Path(token): Path<String>, Json(b): Json<AnswerBody>) -> ApiResult<Json<Value>> {
     let result = app
         .blocking(move |app| {
             let Some(qn) = app.with_server(|db| db.questionnaire_by_secret(&token))? else {
                 return Ok(None);
             };
-            let mut done = false;
-            for (n, text) in b.answers.iter().filter(|(_, t)| !t.trim().is_empty()) {
-                let n: i64 = n.parse().map_err(|_| genie_core::GenieError::invalid(format!("bad question number {n}")))?;
-                if qn.questions.iter().any(|q| q.n == n && q.answer.is_none()) {
-                    done = crate::questions::answer(app, qn.id, n, text, "web")?.1;
-                }
-            }
+            let done = answer_all(app, &qn, &b.answers, "web")?;
             Ok(Some((app.with_server(|db| db.questionnaire(qn.id))?, done)))
         })
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "the link is invalid or was replaced by a newer reminder"))?;
+    Ok(Json(json!({ "questionnaire": result.0, "complete": result.1 })))
+}
+
+/// The person asked answers with their session or token (`genie me answer`, their MCP client).
+async fn answer_mine(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<i64>, Json(b): Json<AnswerBody>) -> ApiResult<Json<Value>> {
+    let user = ctx.user()?.clone();
+    let result = app
+        .blocking(move |app| {
+            let qn = match app.with_server(|db| db.questionnaire(id)) {
+                Ok(qn) if qn.recipient == user.id => qn,
+                Ok(_) | Err(crate::state::AppError::Genie(genie_core::GenieError::NotFound(_))) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            if qn.status != "open" {
+                return Err(genie_core::GenieError::invalid(format!("questionnaire {id} is {}", qn.status)).into());
+            }
+            let done = answer_all(app, &qn, &b.answers, "api")?;
+            Ok(Some((app.with_server(|db| db.questionnaire(qn.id))?, done)))
+        })
+        .await?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "no such questionnaire for you"))?;
     Ok(Json(json!({ "questionnaire": result.0, "complete": result.1 })))
 }
 

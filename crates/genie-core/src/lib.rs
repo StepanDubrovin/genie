@@ -1,8 +1,8 @@
 //! Genie domain core.
 //!
-//! The Rust port of the TypeScript tracker (`src/tracker`) plus the event
-//! journal the platform is built on. See `docs/platform/backend.md` for the
-//! migration plan.
+//! The task tracker (ported from the TypeScript version, which opened the same
+//! database) plus the event journal the platform is built on. See
+//! `docs/platform/backend.md`.
 
 pub mod automation;
 pub mod db;

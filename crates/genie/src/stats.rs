@@ -11,9 +11,9 @@ use std::path::Path;
 use chrono::{DateTime, SecondsFormat, Utc};
 use genie_core::server_db::ServerDb;
 use rusqlite::{Connection, OpenFlags, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectStats {
     pub project: String,
@@ -51,7 +51,7 @@ pub struct ProjectStats {
     pub people: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
     pub days: i64,

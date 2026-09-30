@@ -10,7 +10,10 @@
 //   of after its whole run;
 // - by the `/genie-mail` command, which the server sends to wake an idle
 //   session (it does nothing while the agent is working: the next boundary
-//   takes the mail).
+//   takes the mail);
+// - at the orchestrator console (`genie orchestrate`, GENIE_CONSOLE=1), where
+//   the session is a person's pi in their terminal and nobody sends commands:
+//   by looking for mail every few seconds while the session is idle.
 //
 // A fresh session is woken with a prompt instead (the mail goes alongside): a
 // turn started by `sendMessage` skips pi's prompt preparation, so its first
@@ -27,6 +30,8 @@ const TOKEN = process.env.GENIE_TOKEN ?? "";
 const MAIL = "genie-mail";
 const SEEN_LIMIT = 300;
 const DEBUG = process.env.GENIE_BUS_DEBUG === "1";
+const CONSOLE = process.env.GENIE_CONSOLE === "1";
+const POLL_MS = Number(process.env.GENIE_BUS_POLL_MS ?? 3000);
 
 interface Delivery {
   delivery: number;
@@ -42,6 +47,8 @@ export default function genieBus(pi: any) {
   const unacked = new Set<number>();
   /** The session's transcript holds pi's system prompt (a fresh one does not yet). */
   let primed = false;
+  /** The latest context, for the console's own checks between events. */
+  let lastCtx: any;
 
   function report(what: string, e: unknown): void {
     console.error(`[genie-bus] ${what}: ${e instanceof Error ? e.message : String(e)}`);
@@ -78,6 +85,7 @@ export default function genieBus(pi: any) {
   const asMessage = (d: Delivery) => ({ customType: MAIL, content: d.text, display: true, details: { delivery: d.delivery, mailIds: d.ids } });
 
   pi.on("session_start", (_event: any, ctx: any) => {
+    lastCtx = ctx;
     try {
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry?.type === "custom_message" && entry.customType === MAIL) {
@@ -119,19 +127,40 @@ export default function genieBus(pi: any) {
     return undefined;
   });
 
+  /** Wake an idle session with its mail. */
+  async function wake(ctx: any): Promise<void> {
+    if (!ctx?.isIdle?.()) return; // working: the next step boundary takes the mail
+    const d = await lease();
+    if (!d) return;
+    if (primed) {
+      pi.sendMessage(asMessage(d), { triggerTurn: true });
+      return;
+    }
+    primed = true;
+    pi.sendMessage(asMessage(d), { deliverAs: "nextTurn" });
+    pi.sendUserMessage("Your genie session has started; your mail follows.");
+  }
+
   pi.registerCommand("genie-mail", {
     description: "Deliver pending genie mail (sent by genie serve to wake the session)",
     handler: async (_args: string, ctx: any) => {
-      if (!ctx.isIdle()) return; // working: the next step boundary takes the mail
-      const d = await lease();
-      if (!d) return;
-      if (primed) {
-        pi.sendMessage(asMessage(d), { triggerTurn: true });
-        return;
-      }
-      primed = true;
-      pi.sendMessage(asMessage(d), { deliverAs: "nextTurn" });
-      pi.sendUserMessage("Your genie session has started; your mail follows.");
+      lastCtx = ctx;
+      await wake(ctx);
     },
   });
+
+  if (CONSOLE) {
+    let busy = false;
+    const timer = setInterval(async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        await wake(lastCtx);
+      } finally {
+        busy = false;
+      }
+    }, POLL_MS);
+    timer.unref?.();
+    pi.on("session_shutdown", () => clearInterval(timer));
+  }
 }

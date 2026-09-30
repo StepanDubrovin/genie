@@ -1,5 +1,5 @@
 //! The whole thing with processes: an orchestrator and a team of scripted agents that use
-//! plain `git` and `genie agent pr` in their workspaces, a real proxy, a fake host. What
+//! plain `git` and `genie pr` in their workspaces, a real proxy, a fake host. What
 //! they may not do is refused; a person merges on the host; the watcher tells the
 //! orchestrator, which closes the task.
 

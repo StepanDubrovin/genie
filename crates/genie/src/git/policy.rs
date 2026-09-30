@@ -30,7 +30,7 @@ pub enum Push {
 #[serde(rename_all = "snake_case")]
 pub enum Merge {
     Human,
-    /// An agent merges (`genie agent pr merge`) once the task is approved and the host's conditions hold.
+    /// An agent merges (`genie pr merge`) once the task is approved and the host's conditions hold.
     AgentAfterApproval,
     /// The server merges by itself when the task is approved and the host's conditions hold.
     Auto,
@@ -341,11 +341,11 @@ impl Effective {
         out.push_str(" Force-push and branch deletion are ");
         out.push_str(if self.policy.force_push || self.policy.delete_branches { "restricted by the policy." } else { "not allowed." });
         if self.policy.change_request.open && self.policy.push != Push::Direct {
-            out.push_str(" Open the request with `genie agent pr open`.");
+            out.push_str(" Open the request with `genie pr open`.");
         }
         out.push_str(match self.policy.change_request.merge {
             Merge::Human => " A person merges it.",
-            Merge::AgentAfterApproval => " After the reviewer approves the task and the checks pass, merge it with `genie agent pr merge`.",
+            Merge::AgentAfterApproval => " After the reviewer approves the task and the checks pass, merge it with `genie pr merge`.",
             Merge::Auto => " The server merges it once the task is approved and the checks pass.",
         });
         out

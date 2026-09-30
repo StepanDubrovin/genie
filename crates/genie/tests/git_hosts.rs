@@ -178,7 +178,7 @@ async fn doctor_reports_hosts_and_repositories_that_cannot_work() {
         .unwrap();
     let cfg = genie::config::Config::load(h.dir.path()).unwrap();
     let agents = genie::agent_config::AgentConfig::load(h.dir.path(), &cfg, None);
-    let checks = genie::doctor::run(h.dir.path(), &cfg, &agents, std::path::Path::new("/nonexistent"));
+    let checks = genie::doctor::run(h.dir.path(), &cfg, &agents, None);
     let git: Vec<String> = checks.iter().filter(|c| c.area == "git").map(|c| format!("{:?} {}", c.level, c.text)).collect();
     let all = git.join("\n");
     assert!(all.contains("Fail git.json: host typo"), "{all}");

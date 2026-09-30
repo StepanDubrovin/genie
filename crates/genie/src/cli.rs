@@ -1,14 +1,15 @@
-//! Command line: server administration (works on the data directory directly,
-//! with or without a running server) and `genie serve`.
+//! Command line: the operations of the catalog (`genie task …`, `genie team …`,
+//! see [`crate::ops`]), server administration (works on the data directory
+//! directly, with or without a running server) and `genie serve`.
 
-use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use genie_core::Tracker;
-use genie_core::server_db::{ProjectRole, ServerDb};
+use genie_core::server_db::ServerDb;
 
 use crate::config::Config;
+use crate::ops::{self, Auth, Cx, InProcess, Remote};
 use crate::state::App;
 
 #[derive(Parser)]
@@ -17,6 +18,12 @@ pub struct Cli {
     /// Data directory (default: $GENIE_DATA or ~/.local/share/genie).
     #[arg(long, global = true)]
     data: Option<PathBuf>,
+    /// The project to act in (default: $GENIE_PROJECT, else your first project).
+    #[arg(long, global = true)]
+    project: Option<String>,
+    /// Print the answer as JSON.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -27,22 +34,25 @@ enum Command {
     Serve {
         #[arg(long)]
         port: Option<u16>,
-        /// Built web UI (`npm run build:web`).
-        #[arg(long, default_value = "web/dist")]
-        web: PathBuf,
+        /// Serve the web UI built in this directory (`npm run build:web` → web/dist) instead of the one built into genie.
+        #[arg(long)]
+        web: Option<PathBuf>,
         /// Do not start agents (UI and automations only).
         #[arg(long)]
         no_agents: bool,
     },
-    /// Projects of this server.
-    #[command(subcommand)]
-    Project(ProjectCmd),
-    /// People with access to this server.
-    #[command(subcommand)]
-    User(UserCmd),
-    /// Git repositories of projects and the hosts they live on (`git.json`).
-    #[command(subcommand)]
-    Repos(ReposCmd),
+    /// Your pi session becomes the orchestrator of the project (--project) on the running server; the server's orchestrator waits until pi ends.
+    Orchestrate {
+        /// Take the console from whoever holds it.
+        #[arg(long)]
+        force: bool,
+        /// The pi command (default: $GENIE_PI, else pi).
+        #[arg(long)]
+        pi: Option<String>,
+        /// More arguments for pi, after `--`.
+        #[arg(last = true)]
+        pi_args: Vec<String>,
+    },
     /// Give a user a role in a project (viewer, member, admin, owner).
     Member { project: String, login: String, role: String },
     /// Print an invitation link for a project.
@@ -60,115 +70,26 @@ enum Command {
         #[arg(long)]
         keep: Option<usize>,
     },
-    /// What happened over the last days, for reviewing a pilot: tasks, decisions, reviews, agent runs, knowledge.
+    /// What happened over the last days, for reviewing a pilot: tasks, decisions, reviews, agent runs, knowledge (--project: one project only).
     Stats {
         #[arg(long, default_value_t = 7)]
         days: i64,
-        /// One project only.
-        #[arg(long)]
-        project: Option<String>,
-        /// JSON instead of text.
-        #[arg(long)]
-        json: bool,
     },
     /// Check that the server is ready: data, web UI, people, projects, pi and the models, sandbox, git, channels, network.
     Doctor {
-        /// Built web UI the server serves.
-        #[arg(long, default_value = "web/dist")]
-        web: PathBuf,
+        /// The web UI directory the server is started with (`serve --web`), if any.
+        #[arg(long)]
+        web: Option<PathBuf>,
     },
     /// Knowledge vault maintenance.
     #[command(subcommand)]
     Vault(VaultCmd),
-    /// Roles, team templates, skills and MCP connections of this server.
-    #[command(subcommand)]
-    Agents(AgentsCmd),
-    /// Act as an agent (or script genie) through the server API.
-    #[command(subcommand)]
-    Agent(crate::agent_cli::AgentCmd),
-    /// Create a standalone tracker directory (legacy layout).
+    /// Create a standalone tracker directory (legacy layout; --project names it).
     Init {
         #[arg(long, default_value = ".genie")]
         dir: PathBuf,
         #[arg(long)]
         prefix: Option<String>,
-        #[arg(long)]
-        project: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum ProjectCmd {
-    /// Add a project. With --repo, a repository's existing `.genie/` tracker is reused.
-    Add {
-        slug: String,
-        #[arg(long, default_value = "")]
-        name: String,
-        /// Git repository of the project (omit for projects without code).
-        #[arg(long)]
-        repo: Option<PathBuf>,
-        /// Existing tracker directory to register in place.
-        #[arg(long)]
-        tracker: Option<PathBuf>,
-        /// Task id prefix for a new tracker (G, PAY…).
-        #[arg(long)]
-        prefix: Option<String>,
-    },
-    List,
-}
-
-#[derive(Subcommand)]
-enum ReposCmd {
-    /// The hosts of <data>/git.json and what is wrong with them (add --check to ask each host).
-    Hosts {
-        #[arg(long)]
-        check: bool,
-    },
-    /// Repositories of a project (all projects without an argument).
-    List { project: Option<String> },
-    /// Attach a repository to a project; the mirror is fetched at once.
-    Add {
-        project: String,
-        /// The repository's alias in the project (api, web…).
-        name: String,
-        /// A host of git.json.
-        host: String,
-        /// Path on the host: group/subgroup/repo.
-        remote: String,
-        /// Where it sits in the project's workspace (default: the root).
-        #[arg(long)]
-        mount: Option<String>,
-        /// The most agents may do: read or write (default write).
-        #[arg(long)]
-        access: Option<String>,
-        /// The policy as JSON (default: only the task's branch, requests, a person merges).
-        #[arg(long)]
-        policy: Option<String>,
-    },
-    /// Change a repository's mount, access, default branch or policy.
-    Set {
-        project: String,
-        name: String,
-        #[arg(long)]
-        mount: Option<String>,
-        #[arg(long)]
-        access: Option<String>,
-        #[arg(long)]
-        default_branch: Option<String>,
-        #[arg(long)]
-        policy: Option<String>,
-    },
-    /// Detach a repository (refused while a delivery of it is unmerged).
-    Remove { project: String, name: String },
-    /// Fetch a repository's mirror from its host now.
-    Sync { project: String, name: String },
-    /// Check a repository against its host: reachable, the token's rights, protected default branch.
-    Check {
-        project: String,
-        name: String,
-        /// Push a throw-away branch (and delete it) to prove the token can push.
-        #[arg(long)]
-        probe_push: bool,
     },
 }
 
@@ -186,141 +107,71 @@ enum VaultCmd {
     Sync,
 }
 
-#[derive(Subcommand)]
-enum AgentsCmd {
-    /// Check the configuration files in the data directory; exits with an error when something is broken.
-    Check,
-    /// Roles and team templates as the server sees them.
-    Ls,
+fn env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-#[derive(Subcommand)]
-enum UserCmd {
-    /// Add a user; the password is read from stdin when --password-stdin is given.
-    Add {
-        login: String,
-        #[arg(long, default_value = "")]
-        name: String,
-        #[arg(long)]
-        email: Option<String>,
-        #[arg(long)]
-        admin: bool,
-        #[arg(long)]
-        password_stdin: bool,
-    },
-    List,
-    /// Set a password (read from stdin).
-    Passwd {
-        login: String,
-    },
-    /// Print a personal API token for the CLI.
-    Token {
-        login: String,
-    },
-}
-
-fn read_password() -> Result<String, String> {
-    let mut s = String::new();
-    std::io::stdin().read_to_string(&mut s).map_err(|e| e.to_string())?;
-    Ok(s.trim_end_matches(['\n', '\r']).to_string())
-}
-
-/// `genie repos …`: repositories of projects, worked on the data directory directly.
-async fn repos_cmd(data: &std::path::Path, cmd: ReposCmd) -> Result<(), String> {
-    use crate::git::{check, hosts, policy::Policy, service, store};
-    use genie_core::repos::{NewRepo, RepoPatch};
-    let cfg = Config::load(data)?;
-    let app = App::open(data, cfg, PathBuf::new()).map_err(|e| e.to_string())?;
-    let policy_arg = |s: Option<String>| -> Result<Option<serde_json::Value>, String> {
-        let v = s.map(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| format!("--policy must be JSON: {e}"))).transpose()?;
-        if let Some(v) = &v {
-            Policy::parse(v)?;
-        }
-        Ok(v)
-    };
-    let show = |lines: &[check::Line]| {
-        for l in lines {
-            println!("{:<4} {}", l.level, l.text);
-        }
-    };
-    match cmd {
-        ReposCmd::Hosts { check: ask } => {
-            let h = hosts::load(data);
-            for e in &h.errors {
-                println!("FAIL git.json: {e}");
-            }
-            if h.map.is_empty() && h.errors.is_empty() {
-                println!("(no hosts: create {} — see docs/platform/git-repositories.md)", data.join("git.json").display());
-            }
-            for host in h.map.values() {
-                println!("{:<14} {:<7} {} over {}", host.id, host.kind.as_str(), host.url, if host.ssh { "ssh" } else { "https" });
-                if ask {
-                    show(&check::host(&app, &host.id).await);
-                } else {
-                    for m in &host.missing {
-                        println!("  FAIL secret missing: {m}");
-                    }
-                }
-            }
-        }
-        ReposCmd::List { project } => {
-            let repos = app
-                .with_server(|db| match &project {
-                    Some(p) => db.repos(p),
-                    None => db.all_repos(),
-                })
-                .map_err(|e| e.to_string())?;
-            if repos.is_empty() {
-                println!("(no repositories)");
-            }
-            for r in repos {
-                let push = r.policy["push"].as_str().unwrap_or("pr_only");
-                println!("{:<12} {:<10} {:<18} {}:{} · {} · push {push}", r.project, r.name, r.mount, r.host, r.remote, r.access);
-            }
-        }
-        ReposCmd::Add { project, name, host, remote, mount, access, policy } => {
-            let new = NewRepo { name, host, remote, mount, access, policy: policy_arg(policy)?, default_branch: None };
-            let (repo, warning) = service::add_repo(&app, &project, new).map_err(|e| e.to_string())?;
-            println!(
-                "{}/{} added at {} (default branch {})",
-                repo.project,
-                repo.name,
-                repo.mount,
-                if repo.default_branch.is_empty() { "not known yet" } else { &repo.default_branch }
-            );
-            if let Some(w) = warning {
-                println!("warning: {w}");
-            }
-        }
-        ReposCmd::Set { project, name, mount, access, default_branch, policy } => {
-            let patch = RepoPatch { mount, default_branch, access, policy: policy_arg(policy)? };
-            let r = app.with_server(|db| db.update_repo(&project, &name, patch)).map_err(|e| e.to_string())?;
-            println!("{}/{}: {} · {} · {}", r.project, r.name, r.mount, r.access, r.policy);
-        }
-        ReposCmd::Remove { project, name } => {
-            app.with_server(|db| db.remove_repo(&project, &name)).map_err(|e| e.to_string())?;
-            println!("{project}/{name} detached (the mirror stays on disk: it may serve other projects)");
-        }
-        ReposCmd::Sync { project, name } => {
-            let repo = app.with_server(|db| db.repo(&project, &name)).map_err(|e| e.to_string())?;
-            let info = store::sync(&app, &repo)?;
-            println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
-        }
-        ReposCmd::Check { project, name, probe_push } => {
-            let lines = check::repo(&app, &project, &name, probe_push).await;
-            show(&lines);
-            if check::failed(&lines) {
-                return Err("the repository has problems".into());
-            }
-        }
+/// Where the operations of the command line go: with `GENIE_TOKEN`, to the
+/// server at `GENIE_URL` as that token's person or agent; without, straight to
+/// the data directory as its operator (a server admin), with or without a
+/// running server.
+pub fn op_context(data: &Path, project: Option<String>, setup: bool) -> Result<Cx, String> {
+    let (task, team) = (env("GENIE_TASK"), env("GENIE_TEAM"));
+    if let Some(token) = env("GENIE_TOKEN") {
+        let base = env("GENIE_URL").unwrap_or_else(|| format!("http://127.0.0.1:{}", Config::load(data).map(|c| c.port).unwrap_or(7420)));
+        return Ok(Cx { api: Box::new(Remote::new(&base, &token, project.clone())), project, task, team, local: true });
     }
-    Ok(())
+    // Setting up (people, projects) may start a data directory; anything else needs one.
+    if !setup && !data.join("server.db").exists() {
+        return Err(format!(
+            "no genie server data in {}: pass --data, or reach a server with GENIE_URL and GENIE_TOKEN (genie user token <login>)",
+            data.display()
+        ));
+    }
+    let cfg = Config::load(data)?;
+    let port = cfg.port;
+    let app = App::open(data, cfg, None).map_err(|e| e.to_string())?;
+    Ok(Cx {
+        api: Box::new(InProcess::new(crate::http::router(app), port, Auth::Operator, project.clone())),
+        project,
+        task,
+        team,
+        local: true,
+    })
+}
+
+async fn run_op(entry: &ops::Entry, args: &ArgMatches, data: &Path, project: Option<String>, json: bool) -> Result<(), String> {
+    let cx = op_context(data, project, matches!(entry.group, "user" | "project"))?;
+    let out = entry.run_cli(args, &cx).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&out.data).map_err(|e| e.to_string())?);
+    } else if !out.text.is_empty() {
+        println!("{}", out.text);
+    }
+    out.failed.map_or(Ok(()), Err)
+}
+
+/// A command kept from before the catalog, done by its operation.
+async fn legacy_op(group: &str, name: &str, args: serde_json::Value, data: &Path) -> Result<String, String> {
+    let entry = ops::find(group, name).ok_or(format!("no operation {group} {name}"))?;
+    Ok(entry.run_json(args, &op_context(data, None, true)?).await?.text)
+}
+
+/// The whole command line: the commands below and the catalog's.
+pub fn command() -> clap::Command {
+    ops::commands(Cli::command())
 }
 
 pub async fn run() -> Result<(), String> {
-    let cli = Cli::parse();
+    let matches = command().get_matches();
+    if let Some((entry, args)) = ops::chosen(&matches) {
+        let data = matches.get_one::<PathBuf>("data").cloned().unwrap_or_else(crate::default_data_dir);
+        let project = matches.get_one::<String>("project").cloned().or_else(|| env("GENIE_PROJECT"));
+        return run_op(entry, args, &data, project, matches.get_flag("json")).await;
+    }
+    let cli = Cli::from_arg_matches(&matches).map_err(|e| e.to_string())?;
     let data = cli.data.unwrap_or_else(crate::default_data_dir);
-    let server_db = || ServerDb::open(&data.join("server.db")).map_err(|e| e.to_string());
+    let (project, json) = (cli.project, cli.json);
     match cli.command {
         Command::Serve { port, web, no_agents } => {
             let mut cfg = Config::load(&data)?;
@@ -331,91 +182,37 @@ pub async fn run() -> Result<(), String> {
                 cfg.runtime.enabled = false;
             }
             let app = App::open(&data, cfg, web).map_err(|e| e.to_string())?;
+            match (crate::http::web::resolve(app.web_root.as_deref()), &app.web_root) {
+                (crate::http::web::WebUi::BuiltIn, Some(dir)) => {
+                    eprintln!("genie: no web UI in {}: serving the one built into genie", dir.display())
+                }
+                (crate::http::web::WebUi::Missing(why), _) => eprintln!("genie: {why}"),
+                _ => {}
+            }
+            app.print_agent_errors();
             crate::runtime::start(&app);
             crate::git::delivery::spawn_poller(app.clone());
             crate::serve(app).await?;
         }
-        Command::Project(ProjectCmd::Add { slug, name, repo, tracker, prefix }) => {
-            let cfg = Config::load(&data)?;
-            let app = App::open(&data, cfg, PathBuf::new()).map_err(|e| e.to_string())?;
-            let tracker = tracker.or_else(|| repo.as_ref().map(|r| r.join(".genie")).filter(|d| d.join("genie.db").exists()));
-            let p = app
-                .create_project(
-                    &slug,
-                    &name,
-                    repo.as_deref().and_then(|r| r.to_str()),
-                    tracker.as_deref().and_then(|t| t.to_str()),
-                    prefix.as_deref(),
-                )
-                .map_err(|e| e.to_string())?;
-            println!(
-                "project {} ({}) — tracker {}{}",
-                p.slug,
-                p.name,
-                p.tracker_dir,
-                p.repo.map(|r| format!(", repo {r}")).unwrap_or_default()
-            );
-        }
-        Command::Repos(cmd) => repos_cmd(&data, cmd).await?,
-        Command::Project(ProjectCmd::List) => {
-            for p in server_db()?.projects().map_err(|e| e.to_string())? {
-                println!(
-                    "{:<16} {:<24} {:<10} {}  tracker {}",
-                    p.slug,
-                    p.name,
-                    p.autonomy,
-                    p.repo.unwrap_or_else(|| "(no code)".into()),
-                    p.tracker_dir
-                );
+        Command::Orchestrate { force, pi, pi_args } => {
+            let cx = op_context(&data, project.clone(), false)?;
+            let url =
+                env("GENIE_URL").unwrap_or_else(|| format!("http://127.0.0.1:{}", Config::load(&data).map(|c| c.port).unwrap_or(7420)));
+            let pi = pi.or_else(|| env("GENIE_PI")).unwrap_or_else(|| "pi".into());
+            let run = crate::orchestrate::Orchestrate { api: cx.api, url: url.trim_end_matches('/').to_string(), force, pi, pi_args };
+            let code = crate::orchestrate::run(run).await?;
+            if code != 0 {
+                std::process::exit(code);
             }
         }
-        Command::User(UserCmd::Add { login, name, email, admin, password_stdin }) => {
-            let password = if password_stdin { Some(read_password()?) } else { None };
-            let u = server_db()?.create_user(&login, &name, email.as_deref(), password.as_deref(), admin).map_err(|e| e.to_string())?;
-            println!("user {} ({}){}", u.login, u.name, if u.is_admin { ", admin" } else { "" });
-            if password.is_none() {
-                println!("no password yet: echo '<password>' | genie user passwd {}", u.login);
-            }
+        Command::Member { project: slug, login, role } => {
+            let args = serde_json::json!({ "project": slug, "login": login, "role": role });
+            println!("{}", legacy_op("project", "member", args, &data).await?);
         }
-        Command::User(UserCmd::List) => {
-            for u in server_db()?.users().map_err(|e| e.to_string())? {
-                println!(
-                    "{:<16} {:<24} {}{}",
-                    u.login,
-                    u.name,
-                    if u.is_admin { "admin" } else { "" },
-                    if u.disabled { " (disabled)" } else { "" }
-                );
-            }
+        Command::Invite { project: slug, role, email } => {
+            let args = serde_json::json!({ "project": slug, "role": role, "email": email });
+            println!("{}", legacy_op("project", "invite", args, &data).await?);
         }
-        Command::User(UserCmd::Passwd { login }) => {
-            let db = server_db()?;
-            let u = db.user_by_login(&login).map_err(|e| e.to_string())?.ok_or(format!("no user {login}"))?;
-            db.set_password(u.id, &read_password()?).map_err(|e| e.to_string())?;
-            println!("password of {login} updated");
-        }
-        Command::User(UserCmd::Token { login }) => {
-            let db = server_db()?;
-            let u = db.user_by_login(&login).map_err(|e| e.to_string())?.ok_or(format!("no user {login}"))?;
-            println!("{}", db.create_user_token(u.id, "cli").map_err(|e| e.to_string())?);
-        }
-        Command::Member { project, login, role } => {
-            let db = server_db()?;
-            let u = db.user_by_login(&login).map_err(|e| e.to_string())?.ok_or(format!("no user {login}"))?;
-            db.project(&project).map_err(|e| e.to_string())?;
-            db.set_membership(&project, u.id, ProjectRole::parse(&role).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-            println!("{login} is {role} in {project}");
-        }
-        Command::Invite { project, role, email } => {
-            let cfg = Config::load(&data)?;
-            let db = server_db()?;
-            db.project(&project).map_err(|e| e.to_string())?;
-            let token = db
-                .create_invite(None, Some(&project), ProjectRole::parse(&role).map_err(|e| e.to_string())?, email.as_deref())
-                .map_err(|e| e.to_string())?;
-            println!("{}/invite?token={token}", cfg.public_url());
-        }
-        Command::Agent(cmd) => crate::agent_cli::run(cmd).await?,
         Command::Backup { dir, keep } => {
             let cfg = Config::load(&data)?;
             let report = backup(&data, &cfg, &dir)?;
@@ -426,7 +223,7 @@ pub async fn run() -> Result<(), String> {
                 }
             }
         }
-        Command::Stats { days, project, json } => {
+        Command::Stats { days } => {
             let stats = crate::stats::collect(&data, days, project.as_deref())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())?);
@@ -437,7 +234,7 @@ pub async fn run() -> Result<(), String> {
         Command::Doctor { web } => {
             let cfg = Config::load(&data)?;
             let agents = crate::agent_config::AgentConfig::load(&data, &cfg, None);
-            let (report, failed) = crate::doctor::print(&crate::doctor::run(&data, &cfg, &agents, &web));
+            let (report, failed) = crate::doctor::print(&crate::doctor::run(&data, &cfg, &agents, web.as_deref()));
             println!("{report}");
             if failed > 0 {
                 return Err(format!("{failed} check(s) failed"));
@@ -494,7 +291,7 @@ pub async fn run() -> Result<(), String> {
                     println!("{copied} page(s) imported into {}/{space}", vault_dir.display());
                 }
                 VaultCmd::Sync => {
-                    let app = App::open(&data, cfg.clone(), PathBuf::new()).map_err(|e| e.to_string())?;
+                    let app = App::open(&data, cfg.clone(), None).map_err(|e| e.to_string())?;
                     match crate::vault_sync::sync(&app).map_err(|e| e.to_string())? {
                         None => return Err("vault.remote is not set in config.json".into()),
                         Some(st) if !st.ok => return Err(st.error.unwrap_or_default()),
@@ -514,56 +311,7 @@ pub async fn run() -> Result<(), String> {
                 }
             }
         }
-        Command::Agents(cmd) => {
-            let cfg = Config::load(&data)?;
-            let agents = crate::agent_config::AgentConfig::load(&data, &cfg, None);
-            match cmd {
-                AgentsCmd::Check => {
-                    println!("{}", crate::agent_config::report(&agents));
-                    let with_mcp: Vec<&str> = agents.roles.values().filter(|r| !r.mcp.is_empty()).map(|r| r.id.as_str()).collect();
-                    if !with_mcp.is_empty() && !cfg.runtime.mcp_adapter() {
-                        println!(
-                            "warning: roles {} have MCP connections, but pi does not load pi-mcp-adapter: `pi install npm:pi-mcp-adapter` (or set runtime.mcpAdapter)",
-                            with_mcp.join(", ")
-                        );
-                    }
-                    match crate::sandbox::status(&cfg.runtime.sandbox) {
-                        (true, note) => println!("sandbox: {note}"),
-                        (false, note) => println!("warning: {note}"),
-                    }
-                    let errors = agents.errors().count();
-                    if errors > 0 {
-                        return Err(format!("{errors} error(s) in the agent configuration of {}", data.display()));
-                    }
-                }
-                AgentsCmd::Ls => {
-                    println!("Roles:");
-                    for r in agents.roles.values() {
-                        let caps: Vec<&str> = r.capabilities.iter().map(|c| c.as_str()).filter(|c| c.starts_with("status.")).collect();
-                        println!(
-                            "  {:<20} {:<12} {:<9} {}{}",
-                            r.id,
-                            r.class.as_str(),
-                            format!("{:?}", r.origin).to_lowercase(),
-                            r.title,
-                            if caps.is_empty() { String::new() } else { format!(" · {}", caps.join(", ")) }
-                        );
-                    }
-                    println!("Team templates:");
-                    for t in agents.teams.values() {
-                        let roles: Vec<&str> = t.members.iter().map(|m| m.role.as_str()).collect();
-                        println!("  {:<20} {:<9} {} · {}", t.id, format!("{:?}", t.origin).to_lowercase(), t.title, roles.join(", "));
-                    }
-                    if !agents.skills.is_empty() {
-                        println!("Skills: {}", agents.skills.keys().cloned().collect::<Vec<_>>().join(", "));
-                    }
-                    if !agents.mcp.is_empty() {
-                        println!("MCP connections: {}", agents.mcp.keys().cloned().collect::<Vec<_>>().join(", "));
-                    }
-                }
-            }
-        }
-        Command::Init { dir, prefix, project } => {
+        Command::Init { dir, prefix } => {
             let t = Tracker::init(&dir, prefix.as_deref(), project.as_deref()).map_err(|e| e.to_string())?;
             let m = t.meta().map_err(|e| e.to_string())?;
             println!("genie tracker in {} (project {}, prefix {})", dir.display(), m.project, m.prefix);
@@ -666,4 +414,12 @@ pub fn prune_backups(dir: &std::path::Path, keep: usize) -> Result<Vec<PathBuf>,
         std::fs::remove_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_command_line_is_consistent() {
+        super::command().debug_assert();
+    }
 }
