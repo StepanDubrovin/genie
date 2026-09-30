@@ -113,6 +113,9 @@ async fn stats_count_tasks_decisions_and_answers() {
     assert!(p.answer_hours_median.is_some(), "the answer to the agent's question is timed: {p:?}");
     assert_eq!((p.comments_by_people, p.comments_by_agents), (1, 0));
     assert!(p.cycle_hours_median.is_some());
+    assert_eq!(p.daily.len(), 8, "a week and today: {:?}", p.daily);
+    let today = p.daily.last().unwrap();
+    assert_eq!((today.created, today.done), (3, 1), "{today:?}");
     assert!(genie::stats::render(&stats).contains("agents asked people 1 time(s)"));
     let (s, j, _) = call(r, "GET", "/api/stats?days=30").send().await;
     assert_eq!(s, StatusCode::OK, "{j}");

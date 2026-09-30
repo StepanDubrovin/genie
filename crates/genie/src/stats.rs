@@ -49,6 +49,21 @@ pub struct ProjectStats {
     pub proposals_rejected: usize,
     /// People who did something in the project (created, commented, moved, answered).
     pub people: Vec<String>,
+    /// The same period day by day (UTC dates, oldest first, every day present), for charts.
+    #[serde(default)]
+    pub daily: Vec<DayStats>,
+}
+
+/// One day of a project's period.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayStats {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    pub created: usize,
+    pub done: usize,
+    pub runs: usize,
+    pub runs_failed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +151,17 @@ fn tracker_stats(p: &mut ProjectStats, db: &Path, since: &str) -> rusqlite::Resu
     p.mcp_calls = count(&conn, "SELECT COUNT(*) FROM events WHERE type = 'mcp.called' AND at >= ?1", since)?;
     let mut stmt = conn.prepare("SELECT DISTINCT actor FROM events WHERE actor_role = 'human' AND at >= ?1 ORDER BY actor")?;
     p.people = stmt.query_map(params![since], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT substr(e.at, 1, 10), SUM(e.type = 'task.created'), SUM(e.type = 'task.status_changed' AND json_extract(e.payload, '$.to') = 'done')
+         FROM events e WHERE e.at >= ?1 AND e.type IN ('task.created', 'task.status_changed') AND {not_epic} GROUP BY 1"
+    ))?;
+    for row in stmt.query_map(params![since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?)))? {
+        let (day, created, done) = row?;
+        if let Some(d) = p.daily.iter_mut().find(|d| d.day == day) {
+            d.created = created.unwrap_or(0) as usize;
+            d.done = done.unwrap_or(0) as usize;
+        }
+    }
     Ok(())
 }
 
@@ -151,12 +177,41 @@ fn server_stats(p: &mut ProjectStats, conn: &Connection, since: &str) -> rusqlit
     let (proposals, approved) = pair("SELECT COUNT(*), SUM(status = 'approved') FROM proposals WHERE project = ?1 AND created >= ?2")?;
     let (_, rejected) = pair("SELECT COUNT(*), SUM(status = 'rejected') FROM proposals WHERE project = ?1 AND created >= ?2")?;
     (p.proposals, p.proposals_approved, p.proposals_rejected) = (proposals, approved, rejected);
+    let mut stmt = conn.prepare(
+        "SELECT substr(started, 1, 10), COUNT(*), SUM(status = 'failed') FROM turns
+         WHERE project = ?1 AND started >= ?2 AND status != 'skipped' GROUP BY 1",
+    )?;
+    for row in
+        stmt.query_map(params![p.project, since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?)))?
+    {
+        let (day, runs, failed) = row?;
+        if let Some(d) = p.daily.iter_mut().find(|d| d.day == day) {
+            d.runs = runs as usize;
+            d.runs_failed = failed.unwrap_or(0) as usize;
+        }
+    }
     Ok(())
+}
+
+/// Every day from `since` to `now`, both included, with nothing counted yet.
+fn empty_days(since: DateTime<Utc>, now: DateTime<Utc>) -> Vec<DayStats> {
+    let mut out = Vec::new();
+    let mut day = since.date_naive();
+    while day <= now.date_naive() {
+        out.push(DayStats { day: day.format("%Y-%m-%d").to_string(), ..Default::default() });
+        day = day.succ_opt().unwrap_or(day);
+        if out.len() > 400 {
+            break;
+        }
+    }
+    out
 }
 
 /// The statistics of every project (or one) over the last `days` days.
 pub fn collect(data: &Path, days: i64, only: Option<&str>) -> Result<Stats, String> {
-    let since = (Utc::now() - chrono::Duration::days(days.max(1))).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let now = Utc::now();
+    let since_at = now - chrono::Duration::days(days.max(1));
+    let since = since_at.to_rfc3339_opts(SecondsFormat::Millis, true);
     let server = ServerDb::open(&data.join("server.db")).map_err(|e| e.to_string())?;
     let raw = Connection::open_with_flags(data.join("server.db"), OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
     let mut projects = Vec::new();
@@ -164,7 +219,8 @@ pub fn collect(data: &Path, days: i64, only: Option<&str>) -> Result<Stats, Stri
         if only.is_some_and(|o| o != pr.slug) {
             continue;
         }
-        let mut p = ProjectStats { project: pr.slug.clone(), name: pr.name.clone(), ..Default::default() };
+        let mut p =
+            ProjectStats { project: pr.slug.clone(), name: pr.name.clone(), daily: empty_days(since_at, now), ..Default::default() };
         tracker_stats(&mut p, &Path::new(&pr.tracker_dir).join("genie.db"), &since).map_err(|e| format!("{}: {e}", pr.slug))?;
         server_stats(&mut p, &raw, &since).map_err(|e| format!("{}: {e}", pr.slug))?;
         projects.push(p);
@@ -227,5 +283,13 @@ mod tests {
         assert_eq!(quantile(&[1.0, 2.0, 3.0, 4.0, 100.0], 0.9), Some(100.0));
         assert_eq!(hours("2026-09-29T10:00:00.000Z", "2026-09-29T13:30:00.000Z"), Some(3.5));
         assert_eq!(h(Some(72.0)), "3.0 d");
+    }
+
+    #[test]
+    fn a_period_lists_every_day() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let days = empty_days(at("2026-09-23T15:00:00Z"), at("2026-09-30T15:00:00Z"));
+        assert_eq!(days.len(), 8);
+        assert_eq!((days[0].day.as_str(), days[7].day.as_str()), ("2026-09-23", "2026-09-30"));
     }
 }
