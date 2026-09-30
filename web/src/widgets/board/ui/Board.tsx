@@ -36,7 +36,7 @@ function CardBody({ t, team }: { t: TaskSummary; team?: Team }) {
           </span>
         )}
       </span>
-      <span className="t">
+      <span className="t" title={t.title}>
         {t.type === "epic" && (
           <span className="epic-mark">
             <EpicIcon size={12} />
@@ -45,8 +45,13 @@ function CardBody({ t, team }: { t: TaskSummary; team?: Team }) {
         )}
         {t.title}
       </span>
-      {t.needsOwner && <span className="q">{t.needsOwner.question}</span>}
-      {t.openDeps.length > 0 && <span className="muted" style={{ fontSize: 12 }}>ждёт {t.openDeps.join(", ")}</span>}
+      {t.needsOwner ? (
+        <span className="note q" title={t.needsOwner.question}>
+          {t.needsOwner.question}
+        </span>
+      ) : (
+        <span className="note">{t.openDeps.length > 0 && `ждёт ${t.openDeps.join(", ")}`}</span>
+      )}
       <span className="foot">
         <EpicChip id={t.parent} text />
         <Labels labels={t.labels} />
