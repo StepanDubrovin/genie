@@ -64,35 +64,35 @@ export interface Preset {
 
 /** The usual policies, so that nobody writes JSON to get the common cases. */
 export const PRESETS: Preset[] = [
-  { id: "read", name: "Только чтение", hint: "агенты читают код и ничего не публикуют", policy: { push: "none" } },
+  { id: "read", name: "Только чтение", hint: "Агенты читают код и ничего не отправляют.", policy: { push: "none" } },
   {
     id: "pr-human",
     name: "Запрос на слияние, сливает человек",
-    hint: "агент пушит только в ветку своей задачи и открывает PR/MR; сливает человек",
+    hint: "Агент отправляет только ветку своей задачи и открывает запрос на слияние. Сливает человек.",
     policy: {},
   },
   {
     id: "pr-agent",
     name: "Запрос на слияние, после ревью сливает агент",
-    hint: "слияние — после одобрения задачи ревьюером, зелёных проверок и одобрений на хостинге",
+    hint: "Агент сливает сам, когда ревьюер одобрил задачу, проверки зелёные и хостинг разрешает.",
     policy: { change_request: { merge: "agent_after_approval" } },
   },
   {
     id: "pr-auto",
     name: "Запрос на слияние, сервер сливает сам",
-    hint: "сервер сливает, когда задача одобрена и условия хостинга выполнены",
+    hint: "Сервер сливает, как только задача одобрена и условия хостинга выполнены.",
     policy: { change_request: { merge: "auto" } },
   },
   {
     id: "direct",
-    name: "Прямой push в ветки",
-    hint: "агент пушит в ветку задачи без обязательного PR/MR; защищённые ветки остаются защищёнными",
+    name: "Прямая отправка в ветки",
+    hint: "Агент отправляет в ветку задачи без запроса на слияние. Защищённые ветки остаются защищёнными.",
     policy: { push: "branches" },
   },
   {
     id: "direct-main",
-    name: "Прямой push, в том числе в основную ветку",
-    hint: "снимает защиту основной ветки на стороне genie — включайте, только если так задумано",
+    name: "Прямая отправка, в том числе в основную ветку",
+    hint: "Осторожно: основную ветку защищают только настройки самого хостинга.",
     policy: { push: "direct", protected: [] },
     risky: true,
   },
@@ -107,7 +107,79 @@ export function presetOf(policy: RepoPolicy | undefined): string {
 }
 
 export function presetName(id: string): string {
-  return PRESETS.find((p) => p.id === id)?.name ?? "Своя политика (JSON)";
+  return PRESETS.find((p) => p.id === id)?.name ?? "Своё правило (JSON)";
+}
+
+/** What a pasted repository link names: a host of `git.json` and the path on it. */
+export type RepoLink =
+  | { kind: "empty" }
+  | { kind: "ok"; host: string; remote: string }
+  /** A bare `group/repo`: fine when the server has one host, otherwise the host is asked. */
+  | { kind: "path"; remote: string }
+  | { kind: "unknown"; hostname: string }
+  | { kind: "bad" };
+
+const cleanPath = (path: string) =>
+  path
+    .split(/[?#]/)[0]
+    .replace(/\/-(\/.*)?$/, "") // GitLab's pages inside a repository: /-/tree/main, /-/merge_requests…
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/\.git$/, "");
+
+const validPath = (p: string) => /^[\w.-]+(\/[\w.-]+)+$/.test(p) && !p.split("/").includes("..");
+
+/**
+ * Read a link as people copy it: the repository's page in a browser (any page inside it),
+ * the https clone address, `git@host:group/repo.git` or `ssh://git@host/group/repo`.
+ */
+export function parseRepoLink(text: string, hosts: { id: string; kind?: string; url: string }[]): RepoLink {
+  const t = text.trim();
+  if (!t) return { kind: "empty" };
+  let hostname = "";
+  let path = "";
+  const ssh = t.match(/^ssh:\/\/[\w.-]+@([^:/\s]+)(?::\d+)?\/(.+)$/) ?? t.match(/^[\w.-]+@([^:/\s]+):(.+)$/);
+  if (ssh) {
+    hostname = ssh[1];
+    path = ssh[2];
+  } else if (/^https?:\/\//i.test(t)) {
+    try {
+      const u = new URL(t);
+      hostname = u.hostname;
+      path = u.pathname;
+    } catch {
+      return { kind: "bad" };
+    }
+  } else {
+    const p = cleanPath(t);
+    return validPath(p) ? { kind: "path", remote: p } : { kind: "bad" };
+  }
+  hostname = hostname.toLowerCase();
+  for (const h of hosts) {
+    let base: URL;
+    try {
+      base = new URL(h.url);
+    } catch {
+      continue;
+    }
+    if (base.hostname.toLowerCase() !== hostname) continue;
+    // A host served under a path (https://example.com/gitlab) keeps that prefix out of the repository's path.
+    const prefix = base.pathname.replace(/\/+$/, "");
+    const rest = ssh || !prefix || !path.startsWith(`${prefix}/`) ? path : path.slice(prefix.length);
+    let remote = cleanPath(rest);
+    // On GitHub a repository is always owner/name: whatever follows is a page inside it.
+    if (h.kind === "github") remote = remote.split("/").slice(0, 2).join("/");
+    return validPath(remote) ? { kind: "ok", host: h.id, remote } : { kind: "bad" };
+  }
+  return { kind: "unknown", hostname };
+}
+
+/** A name for the project from the repository's path: its last part, as names are allowed. */
+export function repoNameFrom(remote: string): string {
+  const last = remote.split("/").pop() ?? "";
+  return last
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[-_]+|-+$/g, "");
 }
 
 /** A task's delivery in one repository (`task_repos`). */

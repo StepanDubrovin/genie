@@ -86,10 +86,6 @@ export function ProjectPage() {
           <AgentsTab key={`${project.slug}:${project.integration}`} project={project} admin={admin} />
         ) : tab === "repos" ? (
           <div className="st-body">
-            <div className="st-head">
-              <h2>Репозитории</h2>
-              <p>Код проекта. Агенты работают с ним через сервер: у них нет доступа к хостингу, а что и куда они могут отправить, решает политика репозитория.</p>
-            </div>
             <RepositoriesSection admin={admin} />
           </div>
         ) : tab === "people" ? (

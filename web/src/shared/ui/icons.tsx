@@ -159,4 +159,31 @@ export const Icon = {
       <path d="M7.6 8.4L13.5 2.5M11.5 4.5l1.5 1.5M10 6l1.2 1.2" />
     </svg>
   ),
+  info: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.4}>
+      <circle cx="8" cy="8" r="6.2" />
+      <path d="M8 7.2v4" />
+      <circle cx="8" cy="5" r="0.8" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+  branch: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <circle cx="4.5" cy="3.5" r="1.6" />
+      <circle cx="4.5" cy="12.5" r="1.6" />
+      <circle cx="11.5" cy="5.5" r="1.6" />
+      <path d="M4.5 5.1v5.8M11.5 7.1c0 2.4-2 3.2-7 3.9" />
+    </svg>
+  ),
+  external: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)}>
+      <path d="M6 3H3v10h10v-3M9 3h4v4M13 3L7 9" />
+    </svg>
+  ),
+  dots: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} fill="currentColor" stroke="none">
+      <circle cx="3.5" cy="8" r="1.3" />
+      <circle cx="8" cy="8" r="1.3" />
+      <circle cx="12.5" cy="8" r="1.3" />
+    </svg>
+  ),
 };
