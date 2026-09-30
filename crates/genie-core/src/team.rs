@@ -529,6 +529,21 @@ impl Bus<'_> {
         })
     }
 
+    /// The member's own model and thinking level; `None` goes back to its role's.
+    pub fn set_member_model(&self, team: &str, member: &str, model: Option<&str>, thinking: Option<&str>, by: &str) -> Result<()> {
+        self.t.tx(|| {
+            let n = self.conn().execute(
+                "UPDATE members SET model = ?1, thinking = ?2 WHERE team = ?3 AND name = ?4",
+                params![model, thinking, team, member],
+            )?;
+            if n == 0 {
+                return Err(GenieError::not_found(format!("team {team} has no member {member}")));
+            }
+            self.conn().execute("UPDATE teams SET updated = ?1 WHERE id = ?2", params![now(), team])?;
+            self.log(team, "member_model", json!({ "member": member, "model": model, "thinking": thinking, "by": by }))
+        })
+    }
+
     /// Runtime bookkeeping: `working` while a turn runs, `idle` after, `error` when it failed for good.
     /// Pause (`paused`) or resume (`active`) a member: a paused member keeps its mail
     /// but gets no deliveries and its session is stopped.
