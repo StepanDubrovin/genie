@@ -1,6 +1,7 @@
 //! Teams, mail and agent turns. The team JSON matches the TypeScript server so
 //! the SPA's team screen works unchanged.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -29,8 +30,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/teams/{id}/stop", post(stop))
         .route("/teams/{id}/mail", post(send))
         .route("/teams/{id}/members", post(add_member))
-        .route("/teams/{id}/members/{member}", delete(remove_member))
+        .route("/teams/{id}/members/{member}", delete(remove_member).patch(set_model))
         .route("/teams/{id}/members/{member}/restart", post(restart_member))
+        .route("/models", get(models))
         .route("/agent/status", post(member_status))
         .route("/agent/output", post(job_output))
         .route("/turns", get(turns))
@@ -349,6 +351,105 @@ async fn restart_member(State(app): State<Arc<App>>, ctx: Ctx, Path((id, member)
     let slug = access.project.clone();
     app.blocking(move |app| runtime::restart_member(app, &slug, &id, &member)).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Thinking levels a member can be given (pi's, plus `off`).
+pub const THINKING: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+#[derive(Deserialize, Default)]
+struct ModelBody {
+    /// `provider/model`; empty or absent: the role's model.
+    model: Option<String>,
+    /// A thinking level; empty or absent: the role's.
+    thinking: Option<String>,
+}
+
+/// Give one member its own model (and thinking level), or take it back to its
+/// role's. The member keeps its conversation: a busy one switches when its
+/// current step ends, an idle one on its next mail.
+async fn set_model(
+    State(app): State<Arc<App>>,
+    ctx: Ctx,
+    Path((id, member)): Path<(String, String)>,
+    Json(b): Json<ModelBody>,
+) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    access.write()?;
+    if access.agent && access.actor.role != Role::Orchestrator {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only the orchestrator (or a person) changes a member's model"));
+    }
+    let clean = |v: Option<String>| v.map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+    let (model, thinking) = (clean(b.model), clean(b.thinking));
+    if let Some(m) = &model
+        && m.chars().any(char::is_whitespace)
+    {
+        return Err(ApiError::bad(format!("invalid model \"{m}\"; expected provider/model")));
+    }
+    if let Some(t) = &thinking
+        && !THINKING.contains(&t.as_str())
+    {
+        return Err(ApiError::bad(format!("invalid thinking level \"{t}\"; expected one of {}", THINKING.join(", "))));
+    }
+    let (slug, by, t2, m2, model2, thinking2) =
+        (access.project.clone(), access.actor.name.clone(), id.clone(), member.clone(), model.clone(), thinking.clone());
+    app.blocking(move |app| app.with_tracker(&slug, |t| t.bus().set_member_model(&t2, &m2, model2.as_deref(), thinking2.as_deref(), &by)))
+        .await?;
+    let key = runtime::AgentKey::Member { project: access.project.clone(), team: id, member };
+    crate::sessions::reload(&app, &key);
+    app.wake_runtime.notify_one();
+    changed(&app);
+    Ok(Json(json!({ "ok": true, "agent": key.label(), "model": model, "thinking": thinking })))
+}
+
+/// `provider/model:high` names a thinking level too; model ids may hold a `:` of their own.
+fn without_thinking(model: &str) -> &str {
+    match model.rsplit_once(':') {
+        Some((id, level)) if THINKING.contains(&level) => id,
+        _ => model,
+    }
+}
+
+/// pi's catalogue, read at most every few minutes (it starts a process).
+static PI_MODELS: std::sync::Mutex<Option<(std::time::Instant, Option<BTreeSet<String>>)>> = std::sync::Mutex::new(None);
+const PI_MODELS_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+#[derive(Deserialize, Default)]
+struct ModelsQuery {
+    refresh: Option<String>,
+}
+
+/// The models an agent can be given: pi's catalogue and the models the agent
+/// configuration already names (`listed: false` when pi does not list them).
+async fn models(State(app): State<Arc<App>>, ctx: Ctx, Query(q): Query<ModelsQuery>) -> ApiResult<Json<Value>> {
+    ctx.access(&app, None).await?;
+    let cached = PI_MODELS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .filter(|(at, _)| q.refresh.as_deref() != Some("1") && at.elapsed() < PI_MODELS_TTL)
+        .map(|(_, list)| list);
+    let catalogue = match cached {
+        Some(list) => list,
+        None => {
+            let list = app.blocking(|app| Ok(crate::doctor::pi_models(&app.cfg))).await?;
+            *PI_MODELS.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), list.clone()));
+            list
+        }
+    };
+    let agents = app.agents();
+    let mut named: BTreeSet<String> = app.cfg.role_models.values().filter_map(|m| m.model.clone()).collect();
+    named.extend(agents.roles.values().filter_map(|r| r.model.clone()));
+    named.extend(agents.teams.values().flat_map(|t| t.members.iter().filter_map(|m| m.model.clone())));
+    let listed = catalogue.clone().unwrap_or_default();
+    let all: BTreeSet<String> = listed.iter().cloned().chain(named.into_iter().map(|m| without_thinking(&m).to_string())).collect();
+    let models: Vec<Value> = all
+        .iter()
+        .map(|id| {
+            let (provider, name) = id.split_once('/').unwrap_or(("", id));
+            json!({ "id": id, "provider": provider, "name": name, "listed": listed.contains(id) })
+        })
+        .collect();
+    Ok(Json(json!({ "catalogue": catalogue.is_some(), "models": models, "thinking": THINKING })))
 }
 
 #[derive(Deserialize)]

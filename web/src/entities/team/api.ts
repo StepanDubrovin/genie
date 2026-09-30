@@ -58,3 +58,24 @@ export const useSetPaused = () =>
 /** Restart a member's session with the role's current settings; the conversation goes on. */
 export const useRestartMember = () =>
   useInvalidating((v: { team: string; member: string }) => request<unknown>("POST", `/api/teams/${encodeURIComponent(v.team)}/members/${encodeURIComponent(v.member)}/restart`, {}));
+
+/** A model an agent can be given; `listed: false` when pi's catalogue does not have it. */
+export type ModelOption = { id: string; provider: string; name: string; listed: boolean };
+
+/** The models agents can be given and the thinking levels (pi's catalogue is read at most every few minutes). */
+export const useModels = (enabled = true) =>
+  useQuery({
+    queryKey: ["models"],
+    queryFn: () => request<{ catalogue: boolean; models: ModelOption[]; thinking: string[] }>("GET", "/api/models"),
+    enabled,
+    staleTime: 300_000,
+  });
+
+/** Give a member its own model and thinking level (`undefined`: as its role); it switches at the end of its current step. */
+export const useSetMemberModel = () =>
+  useInvalidating((v: { team: string; member: string; model?: string; thinking?: string }) =>
+    request<{ model?: string; thinking?: string }>("PATCH", `/api/teams/${encodeURIComponent(v.team)}/members/${encodeURIComponent(v.member)}`, {
+      model: v.model ?? null,
+      thinking: v.thinking ?? null,
+    }),
+  );

@@ -144,6 +144,9 @@ pub struct Live {
     repeat: (String, u32),
     #[serde(skip)]
     tool_at: Option<Instant>,
+    /// Start again once the running step ends (the model changed).
+    #[serde(skip)]
+    reload: bool,
 }
 
 impl Live {
@@ -171,6 +174,7 @@ impl Live {
             last_stop: None,
             repeat: (String::new(), 0),
             tool_at: None,
+            reload: false,
         }
     }
     fn set_state(&mut self, state: &str) {
@@ -659,6 +663,12 @@ async fn settled(app: &Arc<App>, s: &Arc<Session>) {
             Ok(())
         })
         .await;
+    if s.with_live(|l| std::mem::take(&mut l.reload)) {
+        // The next step runs with the new settings; the conversation goes on.
+        s.stop("settings changed");
+        app.wake_runtime.notify_one();
+        return;
+    }
     if stalled && !interrupted {
         let secs = app.cfg.runtime.turn_timeout_secs;
         s.send(json!({
@@ -893,6 +903,18 @@ pub fn reset(app: &App, key: &AgentKey) {
     app.sessions.clear_failures(key);
     if let Some(s) = app.sessions.get(key) {
         s.stop("restart");
+    }
+}
+
+/// Let the session of `key` pick up new settings (a model) without cutting its
+/// step short: an idle session stops now, a busy one when its step ends. The
+/// next start resumes the same conversation.
+pub fn reload(app: &App, key: &AgentKey) {
+    let Some(s) = app.sessions.get(key) else { return };
+    if s.is("working") {
+        s.with_live(|l| l.reload = true);
+    } else {
+        s.stop("settings changed");
     }
 }
 

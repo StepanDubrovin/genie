@@ -79,7 +79,7 @@
 .ac-statebox.working .line { color: var(--accent-text); }
 .ac-statebox.error { border-color: var(--amber-line); background: var(--amber-bg); }
 .ac-statebox.error .line { color: var(--red); }
-.ac-props { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px 12px; margin: 0; font-size: 12.5px; }
+.ac-props { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px 12px; align-items: center; margin: 0; font-size: 12.5px; }
 .ac-props dt { color: var(--muted); }
 .ac-props dd { margin: 0; color: var(--text-2); overflow-wrap: anywhere; }
 .ac-help { margin: 0; font-size: 12px; line-height: 1.55; color: var(--muted); }

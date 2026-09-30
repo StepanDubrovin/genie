@@ -1,0 +1,179 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { displayName, ROLE_TITLE_RU } from "@/entities/member";
+import { useMeta } from "@/entities/project";
+import { type ModelOption, useModels, useSetMemberModel } from "@/entities/team";
+import { useToast } from "@/shared/ui";
+import "./model-menu.css";
+
+const short = (id: string) => id.replace(/^[^/]+\//, "");
+const capitalized = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+/** Thinking levels offered in the menu; `""` is the role's. */
+const THINKING = ["", "off", "low", "medium", "high", "xhigh"];
+
+/**
+ * The model of one agent: the button shows what it runs on (its own choice or
+ * its role's); the menu picks another model and thinking level for this agent
+ * alone. The agent keeps its conversation and switches after its current step.
+ */
+export function ModelMenu({ team, member }: { team: string; member: { name: string; role: string; model?: string; thinking?: string } }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; right: number }>();
+  const btn = useRef<HTMLButtonElement>(null);
+  const meta = useMeta().data;
+  const ofRole = meta?.roleModels?.[member.role];
+  const own = !!(member.model || member.thinking);
+  const model = member.model ?? ofRole?.model;
+  const thinking = member.thinking ?? ofRole?.thinking;
+
+  useLayoutEffect(() => {
+    if (!open || !btn.current) return;
+    const place = () => {
+      const r = btn.current!.getBoundingClientRect();
+      setPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [open]);
+
+  return (
+    <>
+      <button ref={btn} type="button" className={`mm-trigger${open ? " open" : ""}`} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(!open)} title={`${model ?? "модель pi по умолчанию"}${thinking ? ` · ${thinking}` : ""}: сменить модель этого агента`}>
+        <span className="mono">{model ? `${short(model)}${thinking ? ` · ${thinking}` : ""}` : "по умолчанию"}</span>
+        <span className={`mm-src${own ? " own" : ""}`}>{own ? "своя" : "роль"}</span>
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 6l4 4 4-4" />
+        </svg>
+      </button>
+      {open && pos && (
+        <Popover
+          team={team}
+          member={member}
+          roleModel={ofRole?.model}
+          roleThinking={ofRole?.thinking}
+          pos={pos}
+          onClose={() => {
+            setOpen(false);
+            btn.current?.focus();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function Popover({
+  team,
+  member,
+  roleModel,
+  roleThinking,
+  pos,
+  onClose,
+}: {
+  team: string;
+  member: { name: string; role: string; model?: string; thinking?: string };
+  roleModel?: string;
+  roleThinking?: string;
+  pos: { top: number; right: number };
+  onClose: () => void;
+}) {
+  const models = useModels();
+  const save = useSetMemberModel();
+  const toast = useToast();
+  const [pick, setPick] = useState(member.model ?? "");
+  const [think, setThink] = useState(member.thinking ?? "");
+  const [query, setQuery] = useState("");
+  const who = displayName(member.name);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Models by provider; the one the agent has now stays listed even if pi does not know it.
+  const groups = useMemo(() => {
+    const all = [...(models.data?.models ?? [])];
+    if (member.model && !all.some((m) => m.id === member.model)) {
+      const [provider, name] = member.model.includes("/") ? member.model.split(/\/(.*)/s) : ["", member.model];
+      all.push({ id: member.model, provider, name, listed: false });
+    }
+    const q = query.trim().toLowerCase();
+    const by = new Map<string, ModelOption[]>();
+    for (const m of all.filter((m) => !q || m.id.toLowerCase().includes(q))) by.set(m.provider, [...(by.get(m.provider) ?? []), m]);
+    return [...by.entries()];
+  }, [models.data, member.model, query]);
+
+  const changed = pick !== (member.model ?? "") || think !== (member.thinking ?? "");
+  const apply = () =>
+    save.mutate(
+      { team, member: member.name, model: pick || undefined, thinking: think || undefined },
+      {
+        onSuccess: () => {
+          const now = pick || roleModel;
+          toast(pick || think ? `${who} перейдёт на ${now ? short(now) : "модель роли"}${think ? ` · ${think}` : ""} со следующего шага` : `${who} вернётся к модели роли со следующего шага`);
+          onClose();
+        },
+        onError: (e) => toast(`Модель не сменилась: ${e.message}`, "error"),
+      },
+    );
+
+  return (
+    <>
+      <div className="mm-scrim" onMouseDown={onClose} />
+      <div className="mm-pop" role="dialog" aria-label={`Модель ${who}`} style={{ top: pos.top, right: pos.right }}>
+        <div className="mm-hd">
+          <b>Модель {who}</b>
+          <span>Только для этого агента. Роль и остальная команда не меняются.</span>
+        </div>
+        <input className="mm-search" type="search" placeholder="Найти модель" aria-label="Найти модель" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <div className="mm-list" role="radiogroup" aria-label="Модель">
+          <button type="button" role="radio" aria-checked={!pick} className={`mm-opt role${!pick ? " on" : ""}`} onClick={() => setPick("")}>
+            <span className="mm-radio" />
+            <span className="mm-role">
+              <span>Как у роли «{capitalized(ROLE_TITLE_RU[member.role] ?? member.role)}»</span>
+              <span className="mono muted">
+                {roleModel ? short(roleModel) : "модель pi по умолчанию"}
+                {roleThinking ? ` · ${roleThinking}` : ""}
+              </span>
+            </span>
+          </button>
+          {groups.map(([provider, items]) => (
+            <div key={provider} className="mm-group">
+              {provider && <span className="mm-provider">{provider}</span>}
+              {items.map((m) => (
+                <button key={m.id} type="button" role="radio" aria-checked={pick === m.id} className={`mm-opt${pick === m.id ? " on" : ""}`} onClick={() => setPick(m.id === roleModel ? "" : m.id)}>
+                  <span className="mm-radio" />
+                  <span className="mono">{m.name}</span>
+                  <span className="mm-note">{m.id === roleModel ? "у роли" : !m.listed && models.data?.catalogue ? "нет у pi" : ""}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+          {models.isPending && <p className="mm-empty">Загрузка моделей…</p>}
+          {models.data && !groups.length && <p className="mm-empty">{query ? "Ничего не найдено" : "pi не назвал ни одной модели"}</p>}
+          {models.data && !models.data.catalogue && <p className="mm-empty">Список pi недоступен: показаны модели из настроек агентов.</p>}
+        </div>
+        <div className="mm-think">
+          <span>Размышление</span>
+          <div role="radiogroup" aria-label="Размышление" className="mm-seg">
+            {THINKING.map((t) => (
+              <button key={t || "role"} type="button" role="radio" aria-checked={think === t} className={think === t ? "on" : ""} onClick={() => setThink(t)}>
+                {t || "как у роли"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="mm-ft">
+          <span className="muted">{changed ? "Со следующего шага, разговор сохранится" : "Выберите модель"}</span>
+          <button type="button" className="btn sm" onClick={onClose}>
+            Отмена
+          </button>
+          <button type="button" className="btn sm primary" onClick={apply} disabled={!changed || save.isPending}>
+            Применить
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}

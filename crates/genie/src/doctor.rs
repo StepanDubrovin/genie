@@ -217,6 +217,31 @@ fn find_program(program: &str, cfg: &Config) -> Option<PathBuf> {
     std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
 }
 
+/// The models pi can use (`provider/model`), from `pi --list-models`.
+fn list_models(pi: &Path, cfg: &Config) -> Option<BTreeSet<String>> {
+    let list = output(pi, &["--list-models"], cfg)?;
+    Some(
+        list.lines()
+            .skip(1)
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                Some(format!("{}/{}", w.next()?, w.next()?))
+            })
+            .collect(),
+    )
+}
+
+/// The models agents can be given: pi's catalogue when pi answers (`None` when
+/// it is not on the PATH or does not answer).
+pub fn pi_models(cfg: &Config) -> Option<BTreeSet<String>> {
+    let pi = [&cfg.runtime.session_command, &cfg.runtime.command]
+        .iter()
+        .filter_map(|c| c.first().and_then(|g| g.first()))
+        .filter_map(|program| find_program(program, cfg))
+        .find(|p| p.file_name().is_some_and(|n| n == "pi"))?;
+    list_models(&pi, cfg)
+}
+
 /// A command's output within a time limit (pi reading its catalogue, git).
 fn output(program: &Path, args: &[&str], cfg: &Config) -> Option<String> {
     let mut cmd = Command::new(program);
@@ -324,18 +349,10 @@ fn agents_and_models(out: &mut Out, cfg: &Config, agents: &AgentConfig) {
         );
     }
     let Some(pi) = pi else { return };
-    let Some(list) = output(&pi, &["--list-models"], cfg) else {
+    let Some(available) = list_models(&pi, cfg) else {
         out.warn("models", "pi --list-models did not answer", "run it as the server user to see why");
         return;
     };
-    let available: BTreeSet<String> = list
-        .lines()
-        .skip(1)
-        .filter_map(|l| {
-            let mut w = l.split_whitespace();
-            Some(format!("{}/{}", w.next()?, w.next()?))
-        })
-        .collect();
     let mut by_model: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
     for (model, who) in &wanted {
         if !model.is_empty() {

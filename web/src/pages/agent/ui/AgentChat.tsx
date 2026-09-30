@@ -2,6 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import { Link, useParams } from "react-router";
 import { Avatar, displayName, ROLE_TITLE_RU } from "@/entities/member";
 import { type LiveSession, type Mail, type MailLevel, MessageText, type PeekMessage, type TeamDetail, usePeek, useRestartMember, useSendMail, useSetPaused, useTeam } from "@/entities/team";
+import { ModelMenu } from "@/features/agent-model";
 import { clock, plural, timeAgo, useTick } from "@/shared/lib";
 import { Icon, Markdown, useToast } from "@/shared/ui";
 import "./agent.css";
@@ -435,15 +436,17 @@ function AgentInfo({ member, team, live, st, queued }: { member: Member; team: T
         <span className="sub">{live?.tool ? live.tool.args : st.sub}</span>
       </div>
       <dl className="ac-props">
-        {member.model && (
-          <>
-            <dt>Модель</dt>
-            <dd>
-              {member.model.replace(/^[^/]+\//, "")}
+        <dt>Модель</dt>
+        <dd>
+          {team.state === "active" && member.state !== "stopped" ? (
+            <ModelMenu team={team.id} member={member} />
+          ) : (
+            <span className="mono">
+              {member.model ? member.model.replace(/^[^/]+\//, "") : "как у роли"}
               {member.thinking ? ` · ${member.thinking}` : ""}
-            </dd>
-          </>
-        )}
+            </span>
+          )}
+        </dd>
         {live?.contextTokens !== undefined && (
           <>
             <dt>Контекст</dt>

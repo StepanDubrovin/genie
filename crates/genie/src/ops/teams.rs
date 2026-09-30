@@ -22,6 +22,7 @@ pub fn register(all: &mut Vec<Entry>) {
         Restart,
         Pause,
         Resume,
+        SetModel,
         Interrupt,
         SetStatus,
         Templates,
@@ -321,6 +322,36 @@ impl Op for Resume {
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let v = cx.call("POST", &format!("/agents/{}/{}/resume", enc(&self.team), enc(&self.member)), Some(json!({}))).await?;
         Ok(Out::new(format!("{} resumed", self.member), v))
+    }
+}
+
+/// Give one agent its own model and thinking level; without them it goes back to its role's (orchestrator).
+#[derive(clap::Args, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetModel {
+    pub team: String,
+    pub member: String,
+    /// `provider/model` (`genie doctor` checks what pi can use); omit for the role's.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// off, minimal, low, medium, high, xhigh or max; omit for the role's.
+    #[arg(long)]
+    pub thinking: Option<String>,
+}
+
+impl Op for SetModel {
+    const GROUP: &'static str = "team";
+    const NAME: &'static str = "set-model";
+    const NEED: Need = Need::Orchestrator;
+    const LISTED: Listed = Listed::Agents;
+    async fn run(self, cx: &Cx) -> Result<Out, String> {
+        let body = json!({ "model": self.model, "thinking": self.thinking });
+        let v = cx.call("PATCH", &format!("/teams/{}/members/{}", enc(&self.team), enc(&self.member)), Some(body)).await?;
+        let now = match (v["model"].as_str(), v["thinking"].as_str()) {
+            (None, None) => "its role's model".to_string(),
+            (m, t) => format!("{}{}", m.unwrap_or("its role's model"), t.map(|t| format!(" · thinking {t}")).unwrap_or_default()),
+        };
+        Ok(Out::new(format!("{} runs on {now} from its next step; its conversation goes on", self.member), v))
     }
 }
 
