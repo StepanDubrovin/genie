@@ -9,12 +9,16 @@ import "./agent.css";
 
 type Member = TeamDetail["members"][number];
 
-/** One row of the agent's feed: its conversation, then the mail still on the way to it. */
+/** One step of the agent's work: a thought or a tool call. */
+type Step =
+  | { kind: "think"; key: string; text: string }
+  | { kind: "tool"; key: string; name: string; args: string; at?: string; out?: string; error?: boolean; took?: number; running?: boolean; since?: string };
+
+/** One row of the agent's feed: its conversation, then the mail still on the way to it. Steps in a row fold into one. */
 type Row =
   | { kind: "mail"; key: string; mail: Mail[]; text: string; at?: string; pending?: boolean }
-  | { kind: "think"; key: string; text: string }
   | { kind: "say"; key: string; text: string; at?: string }
-  | { kind: "tool"; key: string; name: string; args: string; out?: string; error?: boolean; running?: boolean; since?: string }
+  | { kind: "steps"; key: string; steps: Step[] }
   | { kind: "note"; key: string; text: string; at?: string };
 
 const INTENT_LABEL: Record<NonNullable<Mail["intent"]>, string> = { question: "вопрос", blocker: "блокер", verdict: "вердикт", done: "готово", fyi: "к сведению" };
@@ -38,27 +42,38 @@ function argsLine(name: string, args: string): string {
 function toRows(conversation: PeekMessage[], team: TeamDetail, member: string, live?: LiveSession): Row[] {
   const byId = new Map(team.mail.map((m) => [m.id, m]));
   const rows: Row[] = [];
-  const tools = new Map<string, Extract<Row, { kind: "tool" }>>();
+  const calls: Extract<Step, { kind: "tool" }>[] = [];
+  const tools = new Map<string, Extract<Step, { kind: "tool" }>>();
+  // Thoughts and tool calls with nothing said between them share one row.
+  const step = (s: Step) => {
+    const last = rows[rows.length - 1];
+    if (last?.kind === "steps") last.steps.push(s);
+    else rows.push({ kind: "steps", key: `s${s.key}`, steps: [s] });
+  };
   conversation.forEach((m, i) => {
-    const key = `${i}`;
+    // The conversation is a sliding window: key by time so an opened step stays open as it moves.
+    const key = m.at ? `${m.role}@${m.at}` : `${i}`;
     if (m.role === "custom:genie-mail") {
       const mail = (m.mailIds ?? []).map((id) => byId.get(id)).filter((x): x is Mail => !!x);
       rows.push({ kind: "mail", key, mail, text: m.text, at: m.at });
     } else if (m.role === "assistant") {
       (m.parts ?? []).forEach((p, j) => {
-        if (p.type === "thinking") rows.push({ kind: "think", key: `${key}.${j}`, text: p.text });
+        if (p.type === "thinking") step({ kind: "think", key: `${key}.${j}`, text: p.text });
         else if (p.type === "text") rows.push({ kind: "say", key: `${key}.${j}`, text: p.text, at: m.at });
         else {
-          const row: Extract<Row, { kind: "tool" }> = { kind: "tool", key: `${key}.${j}`, name: p.name, args: argsLine(p.name, p.args) };
-          if (p.id) tools.set(p.id, row);
-          rows.push(row);
+          const s: Extract<Step, { kind: "tool" }> = { kind: "tool", key: `${key}.${j}`, name: p.name, args: argsLine(p.name, p.args), at: m.at };
+          if (p.id) tools.set(p.id, s);
+          calls.push(s);
+          step(s);
         }
       });
     } else if (m.role === "toolResult") {
-      const row = m.tool?.id ? tools.get(m.tool.id) : undefined;
-      if (row) {
-        row.out = m.text;
-        row.error = m.tool?.error;
+      const s = m.tool?.id ? tools.get(m.tool.id) : undefined;
+      if (s) {
+        s.out = m.text;
+        s.error = m.tool?.error;
+        // The call's message is stamped when the agent made it, the result when the tool answered.
+        if (s.at && m.at) s.took = Math.max(0, Date.parse(m.at) - Date.parse(s.at));
       }
     } else if (m.role === "user") {
       rows.push({ kind: "note", key, text: m.text, at: m.at });
@@ -66,12 +81,19 @@ function toRows(conversation: PeekMessage[], team: TeamDetail, member: string, l
   });
   // The call running now has no result yet.
   if (live?.state === "working" && live.tool) {
-    const open = [...rows].reverse().find((r): r is Extract<Row, { kind: "tool" }> => r.kind === "tool" && r.out === undefined);
+    const open = [...calls].reverse().find((s) => s.out === undefined);
     if (open) Object.assign(open, { running: true, since: live.tool.since });
   }
   const pending = team.mail.filter((m) => m.to === member && !m.deliveredAt);
   for (const m of pending) rows.push({ kind: "mail", key: `p${m.id}`, mail: [m], text: m.text, at: m.at, pending: true });
   return rows;
+}
+
+/** How long a step took, short: «0,3 с», «14 с», «2 мин». */
+function took(ms: number): string {
+  if (ms < 1000) return `${(ms / 1000).toFixed(1).replace(".", ",")} с`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)} с`;
+  return `${Math.round(ms / 60_000)} мин`;
 }
 
 function stateOf(m: Member, s: LiveSession | undefined, teamActive: boolean): { cls: string; text: string; sub: string } {
@@ -89,7 +111,7 @@ function stateOf(m: Member, s: LiveSession | undefined, teamActive: boolean): { 
   return { cls: "idle", text: "свободен", sub: "Письмо его разбудит." };
 }
 
-const quoteOf = (r: Extract<Row, { kind: "tool" }>) => `${r.name} · ${r.args.length > 48 ? `${r.args.slice(0, 48)}…` : r.args}`;
+const quoteOf = (r: Extract<Step, { kind: "tool" }>) => `${r.name} · ${r.args.length > 48 ? `${r.args.slice(0, 48)}…` : r.args}`;
 
 export function AgentChat() {
   useTick(15_000);
@@ -120,6 +142,7 @@ export function AgentChat() {
   const conversation = fresh?.length ? fresh : (seen.current.get(agentKey) ?? []);
   const live = peek.data?.session ?? session;
   const rows = useMemo(() => (team && name ? toRows(conversation, team, name, live ?? undefined) : []), [conversation, team, name, live]);
+  const toggle = (key: string) => setOpen((s) => new Set(s.has(key) ? [...s].filter((k) => k !== key) : [...s, key]));
 
   useEffect(() => {
     setQuote(undefined);
@@ -238,17 +261,6 @@ export function AgentChat() {
             {rows.map((r) => (
               <Fragment key={r.key}>
                 {r.kind === "mail" && <MailRow row={r} team={team} paused={paused} />}
-                {r.kind === "think" && (
-                  <button
-                    type="button"
-                    className={`ac-think${open.has(r.key) ? " open" : ""}`}
-                    aria-expanded={open.has(r.key)}
-                    onClick={() => setOpen((s) => new Set(s.has(r.key) ? [...s].filter((k) => k !== r.key) : [...s, r.key]))}
-                  >
-                    <Icon.chevron size={10} />
-                    <span>{r.text}</span>
-                  </button>
-                )}
                 {r.kind === "say" && (
                   <div className="ac-say">
                     <Avatar role={member.role} name={member.name} size="md" />
@@ -258,23 +270,14 @@ export function AgentChat() {
                     <span className="t">{r.at ? clock(r.at) : ""}</span>
                   </div>
                 )}
-                {r.kind === "tool" && (
-                  <div className={`ac-tool${r.running ? " running" : ""}${r.error ? " error" : ""}`}>
-                    <div className="ac-thd">
-                      <span className="name">{r.name}</span>
-                      <span className="args" title={r.args}>
-                        {r.args}
-                      </span>
-                      {r.running && <span className="spin" />}
-                      <span className="st">{r.running ? `идёт ${timeAgo(r.since) === "сейчас" ? "" : timeAgo(r.since)}`.trim() : r.error ? "ошибка" : r.out !== undefined ? "готово" : paused ? "остановлено паузой" : ""}</span>
-                      {active && (
-                        <button type="button" className="quote" onClick={() => (setQuote(quoteOf(r)), inputRef.current?.focus())}>
-                          Поправить отсюда
-                        </button>
-                      )}
-                    </div>
-                    {r.out && <pre className="out">{r.out}</pre>}
-                  </div>
+                {r.kind === "steps" && (
+                  <Steps
+                    row={r}
+                    open={open}
+                    toggle={toggle}
+                    paused={paused}
+                    onQuote={active ? (t) => (setQuote(quoteOf(t)), inputRef.current?.focus()) : undefined}
+                  />
                 )}
                 {r.kind === "note" && (
                   <div className="sys">
@@ -373,6 +376,106 @@ export function AgentChat() {
         )}
       </aside>
     </>
+  );
+}
+
+const stepsWord = (n: number) => plural(n, "шаг", "шага", "шагов");
+
+/**
+ * A run of the agent's steps. One step is one faded line: a tool call names its
+ * tool, arguments, time and outcome; a thought is «Thinking…». Several steps in
+ * a row fold into one line that counts them and names their tools. A click
+ * opens the run, a step, its output or its thought.
+ */
+function Steps({ row, open, toggle, paused, onQuote }: { row: Extract<Row, { kind: "steps" }>; open: Set<string>; toggle: (key: string) => void; paused: boolean; onQuote?: (t: Extract<Step, { kind: "tool" }>) => void }) {
+  const list = (
+    <div className="ac-steplist">
+      {row.steps.map((s) => (
+        <StepLine key={s.key} step={s} open={open.has(s.key)} toggle={() => toggle(s.key)} paused={paused} onQuote={onQuote} />
+      ))}
+    </div>
+  );
+  if (row.steps.length === 1) return <div className="ac-steps">{list}</div>;
+
+  const calls = row.steps.filter((s): s is Extract<Step, { kind: "tool" }> => s.kind === "tool");
+  const thoughts = row.steps.length - calls.length;
+  const names = new Map<string, { n: number; bad: boolean }>();
+  for (const c of calls) {
+    const x = names.get(c.name) ?? { n: 0, bad: false };
+    names.set(c.name, { n: x.n + 1, bad: x.bad || !!c.error });
+  }
+  const now = calls.find((c) => c.running);
+  const failed = calls.some((c) => c.error);
+  const unfinished = !now && calls.some((c) => c.out === undefined);
+  const ms = calls.reduce((a, c) => a + (c.took ?? 0), 0);
+  const on = open.has(row.key);
+  return (
+    <div className={`ac-steps${on ? " open" : ""}`}>
+      <button type="button" className={`ac-step group${now ? " running" : ""}${on ? " open" : ""}`} aria-expanded={on} onClick={() => toggle(row.key)} title={on ? "Свернуть шаги" : "Показать шаги"}>
+        <Icon.chevron size={10} />
+        <svg className="stack" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+          <rect x="2.5" y="2.5" width="11" height="3.2" rx="1" />
+          <rect x="2.5" y="6.4" width="11" height="3.2" rx="1" />
+          <rect x="2.5" y="10.3" width="11" height="3.2" rx="1" />
+        </svg>
+        <span className="count">
+          {row.steps.length} {stepsWord(row.steps.length)}
+        </span>
+        <span className="chips">
+          {[...names].map(([name, x]) => (
+            <span key={name} className={`ac-chip${x.bad ? " bad" : ""}`}>
+              {x.n > 1 ? `${name} ×${x.n}` : name}
+            </span>
+          ))}
+          {thoughts > 0 && <span className="ac-chip think">{thoughts > 1 ? `Thinking ×${thoughts}` : "Thinking"}</span>}
+        </span>
+        <span className="args">{now?.args}</span>
+        {!now && ms > 0 && <span className="took">{took(ms)}</span>}
+        {now && <span className="spin" />}
+        <span className={`st${now ? " live" : failed ? " bad" : ""}`}>{now ? `идёт ${sinceShort(now.since)}`.trim() : failed ? "ошибка" : unfinished ? (paused ? "остановлено паузой" : "") : "готово"}</span>
+      </button>
+      {on && list}
+    </div>
+  );
+}
+
+/** «идёт 2 мин» rather than «идёт сейчас». */
+const sinceShort = (since?: string) => (since && timeAgo(since) !== "сейчас" ? timeAgo(since) : "");
+
+function StepLine({ step, open, toggle, paused, onQuote }: { step: Step; open: boolean; toggle: () => void; paused: boolean; onQuote?: (t: Extract<Step, { kind: "tool" }>) => void }) {
+  if (step.kind === "think") {
+    return (
+      <div className="ac-stepitem">
+        <button type="button" className={`ac-step${open ? " open" : ""}`} aria-expanded={open} onClick={toggle}>
+          <Icon.chevron size={10} />
+          <span className="ac-chip think">Thinking…</span>
+        </button>
+        {open && <p className="ac-thought">{step.text}</p>}
+      </div>
+    );
+  }
+  const st = step.running ? `идёт ${sinceShort(step.since)}`.trim() : step.error ? "ошибка" : step.out !== undefined ? "готово" : paused ? "остановлено паузой" : "";
+  return (
+    <div className="ac-stepitem">
+      <div className="ac-steprow">
+        <button type="button" className={`ac-step${step.running ? " running" : ""}${open ? " open" : ""}`} aria-expanded={open} onClick={toggle} disabled={!step.out} title={step.args}>
+          <Icon.chevron size={10} />
+          <span className={`ac-chip${step.error ? " bad" : ""}`}>{step.name}</span>
+          <span className="args">{step.args}</span>
+          {step.took !== undefined && <span className="took">{took(step.took)}</span>}
+          {step.running && <span className="spin" />}
+          <span className={`st${step.running ? " live" : step.error ? " bad" : ""}`}>{st}</span>
+        </button>
+        {onQuote && (
+          <button type="button" className="quote" aria-label="Поправить с этого шага" title="Поправить с этого шага" onClick={() => onQuote(step)}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 4v5a3 3 0 0 0 3 3h7M10 9l3 3-3 3" />
+            </svg>
+          </button>
+        )}
+      </div>
+      {open && step.out && <pre className="out">{step.out}</pre>}
+    </div>
   );
 }
 

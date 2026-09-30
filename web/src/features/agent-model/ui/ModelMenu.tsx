@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { displayName, ROLE_TITLE_RU } from "@/entities/member";
 import { useMeta } from "@/entities/project";
 import { type ModelOption, useModels, useSetMemberModel } from "@/entities/team";
+import { plural } from "@/shared/lib";
 import { useToast } from "@/shared/ui";
 import "./model-menu.css";
 
@@ -9,6 +10,13 @@ const short = (id: string) => id.replace(/^[^/]+\//, "");
 const capitalized = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 /** Thinking levels offered in the menu; `""` is the role's. */
 const THINKING = ["", "off", "low", "medium", "high", "xhigh"];
+/** Where the menu opens: under the button or over it, and how tall it may grow there. */
+type Pos = { top?: number; bottom?: number; right: number; maxHeight: number };
+const MARGIN = 12;
+/** Room below that is enough for the menu to open downwards. */
+const ROOMY = 480;
+/** The menu never grows taller than this: a long list scrolls. */
+const TALLEST = 640;
 
 /**
  * The model of one agent: the button shows what it runs on (its own choice or
@@ -17,7 +25,7 @@ const THINKING = ["", "off", "low", "medium", "high", "xhigh"];
  */
 export function ModelMenu({ team, member }: { team: string; member: { name: string; role: string; model?: string; thinking?: string } }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; right: number }>();
+  const [pos, setPos] = useState<Pos>();
   const btn = useRef<HTMLButtonElement>(null);
   const meta = useMeta().data;
   const ofRole = meta?.roleModels?.[member.role];
@@ -27,9 +35,13 @@ export function ModelMenu({ team, member }: { team: string; member: { name: stri
 
   useLayoutEffect(() => {
     if (!open || !btn.current) return;
+    // Below the button while the menu fits there, else above it; the list scrolls inside whatever height is left.
     const place = () => {
       const r = btn.current!.getBoundingClientRect();
-      setPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+      const right = Math.max(8, window.innerWidth - r.right);
+      const below = window.innerHeight - r.bottom - 6 - MARGIN;
+      const above = r.top - 6 - MARGIN;
+      setPos(below >= Math.min(ROOMY, above) ? { top: r.bottom + 6, right, maxHeight: Math.min(TALLEST, below) } : { bottom: window.innerHeight - r.top + 6, right, maxHeight: Math.min(TALLEST, above) });
     };
     place();
     window.addEventListener("resize", place);
@@ -74,7 +86,7 @@ function Popover({
   member: { name: string; role: string; model?: string; thinking?: string };
   roleModel?: string;
   roleThinking?: string;
-  pos: { top: number; right: number };
+  pos: Pos;
   onClose: () => void;
 }) {
   const models = useModels();
@@ -103,6 +115,7 @@ function Popover({
     for (const m of all.filter((m) => !q || m.id.toLowerCase().includes(q))) by.set(m.provider, [...(by.get(m.provider) ?? []), m]);
     return [...by.entries()];
   }, [models.data, member.model, query]);
+  const total = models.data?.models.length ?? 0;
 
   const changed = pick !== (member.model ?? "") || think !== (member.thinking ?? "");
   const apply = () =>
@@ -121,12 +134,12 @@ function Popover({
   return (
     <>
       <div className="mm-scrim" onMouseDown={onClose} />
-      <div className="mm-pop" role="dialog" aria-label={`Модель ${who}`} style={{ top: pos.top, right: pos.right }}>
+      <div className="mm-pop" role="dialog" aria-label={`Модель ${who}`} style={pos}>
         <div className="mm-hd">
           <b>Модель {who}</b>
           <span>Только для этого агента. Роль и остальная команда не меняются.</span>
         </div>
-        <input className="mm-search" type="search" placeholder="Найти модель" aria-label="Найти модель" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <input className="mm-search" type="search" placeholder={total ? `Найти среди ${total} ${plural(total, "модели", "моделей", "моделей")}` : "Найти модель"} aria-label="Найти модель" value={query} onChange={(e) => setQuery(e.target.value)} />
         <div className="mm-list" role="radiogroup" aria-label="Модель">
           <button type="button" role="radio" aria-checked={!pick} className={`mm-opt role${!pick ? " on" : ""}`} onClick={() => setPick("")}>
             <span className="mm-radio" />
@@ -140,7 +153,11 @@ function Popover({
           </button>
           {groups.map(([provider, items]) => (
             <div key={provider} className="mm-group">
-              {provider && <span className="mm-provider">{provider}</span>}
+              {provider && (
+                <span className="mm-provider">
+                  {provider} <span className="n">{items.length}</span>
+                </span>
+              )}
               {items.map((m) => (
                 <button key={m.id} type="button" role="radio" aria-checked={pick === m.id} className={`mm-opt${pick === m.id ? " on" : ""}`} onClick={() => setPick(m.id === roleModel ? "" : m.id)}>
                   <span className="mm-radio" />
