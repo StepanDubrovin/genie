@@ -3,7 +3,7 @@
 // The page reads from the top down: what the project has, then what agents may do in each
 // repository; rare things (the folder, the rule as JSON, a probe push) wait under a disclosure or a menu.
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
   type CheckLine,
   type GitHostInfo,
@@ -23,6 +23,7 @@ import {
   useSyncRepo,
 } from "@/entities/repo";
 import { ConfirmDialog, Icon } from "@/shared/ui";
+import { Menu } from "./Menu.tsx";
 import { useAct } from "./ProjectPage.tsx";
 
 type Access = "read" | "write";
@@ -352,35 +353,6 @@ function Repo({ repo, admin }: { repo: ProjectRepo; admin: boolean }) {
         </ConfirmDialog>
       )}
     </li>
-  );
-}
-
-/** A "⋯" button with a small menu under it; closes on a click outside or Escape. */
-function Menu({ label, children }: { label: string; children: (close: () => void) => React.ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const away = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    document.addEventListener("mousedown", away);
-    document.addEventListener("keydown", esc);
-    return () => {
-      document.removeEventListener("mousedown", away);
-      document.removeEventListener("keydown", esc);
-    };
-  }, [open]);
-  return (
-    <div className="rp-menu-wrap" ref={ref}>
-      <button type="button" className={open ? "icon-btn on" : "icon-btn"} aria-label={label} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <Icon.dots size={14} />
-      </button>
-      {open && (
-        <div className="rp-menu" role="menu">
-          {children(() => setOpen(false))}
-        </div>
-      )}
-    </div>
   );
 }
 

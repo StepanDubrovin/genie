@@ -178,7 +178,7 @@ export const router = createBrowserRouter([
       { path: "notifications", element: <NotificationsPage /> },
       { path: "profile/:tab?", element: <ProfilePage /> },
       { path: "project/:tab?", element: <ProjectPage /> },
-      { path: "server", element: <ServerPage /> },
+      { path: "server/:tab?", element: <ServerPage /> },
       { path: ":view", element: <TasksRoute /> },
     ],
   },

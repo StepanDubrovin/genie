@@ -158,6 +158,48 @@ export interface ProjectStats {
   proposalsApproved: number;
   proposalsRejected: number;
   people: string[];
+  /** The period day by day (UTC dates, oldest first), for charts. */
+  daily: DayStats[];
+}
+
+/** One day of a project's period. */
+export interface DayStats {
+  day: string;
+  created: number;
+  done: number;
+  runs: number;
+  runsFailed: number;
+}
+
+/** The days of several projects added up, day by day. */
+export function sumDays(projects: Pick<ProjectStats, "daily">[]): DayStats[] {
+  const by = new Map<string, DayStats>();
+  for (const p of projects)
+    for (const d of p.daily ?? []) {
+      const t = by.get(d.day) ?? { day: d.day, created: 0, done: 0, runs: 0, runsFailed: 0 };
+      t.created += d.created;
+      t.done += d.done;
+      t.runs += d.runs;
+      t.runsFailed += d.runsFailed;
+      by.set(d.day, t);
+    }
+  return [...by.values()].sort((a, b) => a.day.localeCompare(b.day));
+}
+
+/** The counts of several projects added up (medians do not add up, so they are left out). */
+export function statsTotals(projects: ProjectStats[]) {
+  const sum = (f: (p: ProjectStats) => number) => projects.reduce((n, p) => n + f(p), 0);
+  return {
+    created: sum((p) => p.created),
+    createdByPeople: sum((p) => p.createdByPeople),
+    done: sum((p) => p.done),
+    open: sum((p) => p.open),
+    decisions: sum((p) => p.decisions),
+    returns: sum((p) => p.returns),
+    runs: sum((p) => p.runs),
+    runsFailed: sum((p) => p.runsFailed),
+    openProjects: projects.filter((p) => p.open > 0).length,
+  };
 }
 
 /** Hours in words: «40 мин», «5,5 ч», «3,2 дн». */
