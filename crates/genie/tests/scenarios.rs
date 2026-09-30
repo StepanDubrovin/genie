@@ -183,7 +183,12 @@ async fn done_task_updates_knowledge_changelog_and_tells_the_owners() {
             &Actor::new("anna", Role::Human),
             CreateInput { title: "Экспорт заказов".into(), status: Some(Status::Inbox), ..Default::default() },
         )?;
-        t.set_status(&Actor::new("anna", Role::Human), &task.id, Status::Done, StatusOptions { note: Some("accepted".into()), force: true })
+        t.set_status(
+            &Actor::new("anna", Role::Human),
+            &task.id,
+            Status::Done,
+            StatusOptions { note: Some("accepted".into()), force: true, ..Default::default() },
+        )
     })
     .unwrap();
     app.wake_engine.notify_one();

@@ -174,6 +174,14 @@ export const Icon = {
       <path d="M4.5 5.1v5.8M11.5 7.1c0 2.4-2 3.2-7 3.9" />
     </svg>
   ),
+  merge: ({ size, ...p }: IconProps) => (
+    <svg {...stroke(size, p)} strokeWidth={1.5}>
+      <circle cx="4" cy="3.5" r="1.8" />
+      <circle cx="4" cy="12.5" r="1.8" />
+      <circle cx="12" cy="8.5" r="1.8" />
+      <path d="M4 5.3v5.4M4 5.3c0 2.6 2.4 3.2 6.2 3.2" />
+    </svg>
+  ),
   external: ({ size, ...p }: IconProps) => (
     <svg {...stroke(size, p)}>
       <path d="M6 3H3v10h10v-3M9 3h4v4M13 3L7 9" />

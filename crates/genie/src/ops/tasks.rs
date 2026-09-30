@@ -304,7 +304,9 @@ impl Op for Update {
     }
 }
 
-/// Move a task to another status (default: your task). needs_owner takes the question as the note.
+/// Move a task to another status (default: your task). needs_owner takes the question as the note,
+/// and optionally an action that gives the owner buttons: ask-owner-question (with 2-6 options),
+/// ask-for-merge-pr (the task's request in a repository), ask-free-form (the default).
 #[derive(clap::Args, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
@@ -319,6 +321,16 @@ pub struct Status {
     #[arg(long)]
     #[serde(default)]
     pub force: bool,
+    /// needs_owner: ask-owner-question, ask-for-merge-pr or ask-free-form. The owner can always answer in words.
+    #[arg(long = "action")]
+    pub owner_action: Option<String>,
+    /// ask-owner-question: an option to pick; repeat for more (2-6).
+    #[arg(long = "option")]
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// ask-for-merge-pr: the repository whose request to merge (default: the task's only open request).
+    #[arg(long)]
+    pub repo: Option<String>,
 }
 
 impl Op for Status {
@@ -328,7 +340,8 @@ impl Op for Status {
     const NEED: Need = Need::Write;
     const CAPS: &'static [Capability] = STATUS_CAPS;
     fn arg_allowed(arg: &str, _can: &dyn Fn(Capability) -> bool) -> bool {
-        arg != "force"
+        // needs_owner and forcing are the orchestrator's.
+        !matches!(arg, "force" | "owner_action" | "options" | "repo")
     }
     fn prompt_note(kind: AgentKind, can: &dyn Fn(Capability) -> bool) -> Option<String> {
         if kind == AgentKind::Orchestrator {
@@ -340,13 +353,22 @@ impl Op for Status {
     }
     async fn run(self, cx: &Cx) -> Result<Out, String> {
         let note = cx.text(self.note, None)?;
-        let v = cx
-            .call(
-                "POST",
-                &format!("/tasks/{}/status", enc(&cx.task(self.task)?)),
-                Some(json!({ "status": self.status, "note": note, "force": self.force })),
-            )
-            .await?;
+        let mut body = json!({ "status": self.status, "note": note, "force": self.force });
+        match (self.owner_action, self.options.is_empty(), &self.repo) {
+            (Some(kind), _, _) => {
+                let mut action = json!({ "kind": kind });
+                if !self.options.is_empty() {
+                    action["options"] = json!(self.options);
+                }
+                if let Some(repo) = self.repo {
+                    action["repo"] = json!(repo);
+                }
+                body["action"] = action;
+            }
+            (None, false, _) | (None, _, Some(_)) => return Err("--option and --repo go with --action".into()),
+            (None, true, None) => {}
+        }
+        let v = cx.call("POST", &format!("/tasks/{}/status", enc(&cx.task(self.task)?)), Some(body)).await?;
         Ok(Out::new(render::summary(&v), v))
     }
 }

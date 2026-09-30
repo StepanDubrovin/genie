@@ -1684,7 +1684,7 @@ pub fn spawn_team(app: &App, slug: &str, req: SpawnRequest) -> AppResult<genie_c
                 &system,
                 &task.id,
                 Status::Refining,
-                StatusOptions { note: Some(format!("research team {team_id} started")), force: true },
+                StatusOptions { note: Some(format!("research team {team_id} started")), force: true, ..Default::default() },
             )?;
         }
         let epic = t.epic_context(&task.id)?.epic;

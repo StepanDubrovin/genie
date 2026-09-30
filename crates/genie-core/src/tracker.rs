@@ -81,6 +81,8 @@ pub struct ListFilter {
 pub struct StatusOptions {
     pub note: Option<String>,
     pub force: bool,
+    /// needs_owner only: what the owner can do besides answering in words.
+    pub action: Option<OwnerAction>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +166,17 @@ impl TaskRow {
             created: r.get("created")?,
             updated: r.get("updated")?,
         })
+    }
+}
+
+/// The action of a question for the owner, in words for the task's comments.
+fn action_line(a: Option<&OwnerAction>) -> String {
+    match a {
+        Some(OwnerAction::AskOwnerQuestion { options }) => format!(" (options: {})", options.join(" / ")),
+        Some(OwnerAction::AskForMergePr { repo, number, .. }) => {
+            format!(" (asks to merge {repo}{})", number.map(|n| format!(" #{n}")).unwrap_or_default())
+        }
+        Some(OwnerAction::AskFreeForm) | None => String::new(),
     }
 }
 
@@ -840,6 +853,13 @@ impl Tracker {
         if to == Status::NeedsOwner && note.is_none() {
             return Err(GenieError::invalid("needs_owner requires a note with the question for the owner"));
         }
+        let mut action = opts.action.clone();
+        if let Some(a) = action.as_mut() {
+            if to != Status::NeedsOwner {
+                return Err(GenieError::invalid("an action goes with needs_owner only"));
+            }
+            a.validate()?;
+        }
         if !opts.force {
             match to {
                 Status::Ready => {
@@ -887,6 +907,7 @@ impl Tracker {
                     by: actor.name.clone(),
                     at: at.clone(),
                     previous: from,
+                    action: action.clone(),
                 })?),
                 _ => None,
             };
@@ -909,14 +930,14 @@ impl Tracker {
             if let (Status::NeedsOwner, Some(q)) = (to, note) {
                 self.conn().execute(
                     "INSERT INTO comments(task, at, author, role, kind, text) VALUES (?1, ?2, ?3, ?4, 'question', ?5)",
-                    params![task.id, at, actor.name, actor.role, format!("Needs owner decision: {q}")],
+                    params![task.id, at, actor.name, actor.role, format!("Needs owner decision: {q}{}", action_line(action.as_ref()))],
                 )?;
             }
             self.event(
                 events::TASK_STATUS_CHANGED,
                 &task.id,
                 actor,
-                json!({ "from": from, "to": to, "note": opts.note, "force": opts.force }),
+                json!({ "from": from, "to": to, "note": opts.note, "force": opts.force, "action": action.as_ref().map(OwnerAction::kind) }),
             )?;
             let suffix = opts.note.as_deref().filter(|n| !n.is_empty()).map(|n| format!(": {n}")).unwrap_or_default();
             self.tell_orchestrator(actor, &task.id, &format!("The owner moved {} from {from} to {to}{suffix}", task.id))

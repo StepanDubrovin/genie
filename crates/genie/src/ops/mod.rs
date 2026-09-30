@@ -497,7 +497,10 @@ mod tests {
         use genie_core::Role;
         let orch = command_table(AgentKind::Orchestrator, &|_| true);
         assert!(orch.contains("| `genie_team` spawn | `genie team spawn <TASK> [--template …] [--member …]... [--note …]` |"), "{orch}");
-        assert!(orch.contains("`genie task status <STATUS> [--task …] [--note …] [--force]` (review and approved are the team's verdicts"));
+        assert!(
+            orch.contains("`genie task status <STATUS> [--task …] [--note …] [--force] [--action …] [--option …]... [--repo …]` (review and approved are the team's verdicts"),
+            "{orch}"
+        );
         assert!(
             orch.contains("--merge-strategy") && orch.contains("| `genie_task` split |") && orch.contains("| `genie_team` templates |")
         );

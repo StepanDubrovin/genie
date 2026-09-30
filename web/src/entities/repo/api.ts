@@ -46,4 +46,8 @@ export const useTaskRepos = (task: string) =>
 export const useSetTaskRepos = () =>
   useInvalidating(({ task, repos }: { task: string; repos: { name: string; access: "read" | "write" }[] }) => request("PUT", `/api/tasks/${enc(task)}/repos`, { repos }));
 
-export const useMergeRequest = () => useInvalidating(({ task, repo }: { task: string; repo: string }) => request("POST", `/api/tasks/${enc(task)}/repos/${enc(repo)}/cr/merge`, {}));
+/** Merge a task's request; `policy` holds the person to the repository's policy (the merge button of an agent's request). */
+export const useMergeRequest = () =>
+  useInvalidating(({ task, repo, policy }: { task: string; repo: string; policy?: boolean }) =>
+    request("POST", `/api/tasks/${enc(task)}/repos/${enc(repo)}/cr/merge`, { policy: !!policy }),
+  );

@@ -295,9 +295,10 @@ impl Effective {
     /// May an agent merge the task's request now (`approved`: the task passed review)?
     pub fn check_merge(&self, approved: bool) -> Result<(), String> {
         match self.policy.change_request.merge {
-            Merge::Human => {
-                Err(format!("{}: a person merges requests here; move the task to needs_owner and ask them to merge", self.repo))
-            }
+            Merge::Human => Err(format!(
+                "{0}: a person merges requests here; move the task to needs_owner with `--action ask-for-merge-pr --repo {0}`",
+                self.repo
+            )),
             Merge::Auto => {
                 Err(format!("{}: the server merges the request itself once the task is approved and the checks pass", self.repo))
             }

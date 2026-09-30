@@ -45,11 +45,11 @@ fn to(t: &Tracker, actor: &Actor, id: &str, status: Status) -> Result<Task> {
 }
 
 fn to_note(t: &Tracker, actor: &Actor, id: &str, status: Status, note: &str) -> Result<Task> {
-    t.set_status(actor, id, status, StatusOptions { note: Some(note.into()), force: false })
+    t.set_status(actor, id, status, StatusOptions { note: Some(note.into()), force: false, ..Default::default() })
 }
 
 fn forced(t: &Tracker, actor: &Actor, id: &str, status: Status) -> Result<Task> {
-    t.set_status(actor, id, status, StatusOptions { note: None, force: true })
+    t.set_status(actor, id, status, StatusOptions { note: None, force: true, ..Default::default() })
 }
 
 #[track_caller]
@@ -377,4 +377,28 @@ fn whoever_submitted_the_work_cannot_approve_it() {
     to(&t, &both, "G-1", Status::Review).unwrap();
     assert_err(to(&t, &both, "G-1", Status::Approved), "submitted this work for review themselves");
     to(&t, &reviewer(), "G-1", Status::Approved).unwrap();
+}
+
+#[test]
+fn a_question_for_the_owner_carries_an_action_with_checked_options() {
+    let (_d, t) = fresh();
+    let id = t.create(&orch(), task("Returns", "price of returns", &["agreed"])).unwrap().id;
+    let ask = |action: OwnerAction| {
+        t.set_status(&orch(), &id, Status::NeedsOwner, StatusOptions { note: Some("Цена?".into()), force: false, action: Some(action) })
+    };
+    assert_err(ask(OwnerAction::AskOwnerQuestion { options: vec!["Сохранять".into(), " Сохранять ".into()] }), "2 to 6");
+    assert_err(ask(OwnerAction::AskForMergePr { repo: " ".into(), number: None, url: None }), "repository");
+
+    let got =
+        ask(OwnerAction::AskOwnerQuestion { options: vec![" Сохранять".into(), "Пересчитывать".into(), "".into()] }).unwrap();
+    let owner = got.needs_owner.unwrap();
+    assert_eq!(owner.action, Some(OwnerAction::AskOwnerQuestion { options: vec!["Сохранять".into(), "Пересчитывать".into()] }));
+    assert!(got.comments.iter().any(|c| c.text.contains("options: Сохранять / Пересчитывать")), "{:?}", got.comments);
+
+    // An action goes with needs_owner only.
+    let back = t.set_status(&human(), &id, owner.previous, StatusOptions { action: Some(OwnerAction::AskFreeForm), ..Default::default() });
+    assert_err(back, "needs_owner only");
+    // What agents send: a kind the server knows, else the list of kinds.
+    assert_err(OwnerAction::parse(&serde_json::json!({ "kind": "ask-doc-change" })), "ask-owner-question, ask-for-merge-pr, ask-free-form");
+    assert_eq!(OwnerAction::parse(&serde_json::json!({ "kind": "ask-free-form" })).unwrap(), OwnerAction::AskFreeForm);
 }
