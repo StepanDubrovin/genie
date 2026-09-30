@@ -6,6 +6,7 @@ import { type Status, STATUS_NAME } from "../../../entities/task/model.ts";
 type Spec = { on?: Record<string, unknown>; steps?: Record<string, unknown>[] };
 
 const EVENT: Record<string, string> = {
+  "task.*": "любое событие задачи",
   "task.created": "задача создана",
   "task.updated": "задача изменена",
   "task.status_changed": "статус задачи изменился",
@@ -161,6 +162,8 @@ export function describeStep(
       return { kind, title: "Изменить задачу" };
     case "task.get":
       return { kind, title: "Прочитать задачу" };
+    case "task.ready":
+      return { kind, title: `Статус → ${status("ready")}, если задачу ничего не держит`, note: "нет блока, открытых зависимостей, вопросов без ответа и заданий; выполнен DoR" };
     case "wait":
       return { kind, title: `Пауза ${duration(body.for)}` };
     case "wake_orchestrator":

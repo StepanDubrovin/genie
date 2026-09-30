@@ -6,7 +6,7 @@ status: current
 tags: [платформа, автоматизации, триггеры, агенты, каналы]
 aliases: [automations, triggers, rules, playbooks, workflows]
 paths: [crates/genie-core/src/automation.rs, crates/genie/src/engine.rs, crates/genie/src/http/automations.rs]
-verified: 2026-09-29
+verified: 2026-09-30
 ---
 
 # Автоматизации genie
@@ -54,6 +54,7 @@ verified: 2026-09-29
 | `task.create` | `{title, description, acceptance, type, parent, labels, inbox}` | `{id}` |
 | `task.update` | `{description, plan, appendNotes, addAcceptance, labels, priority, task}` | `{task}` |
 | `task.get` | текущее состояние задачи | задача |
+| `task.ready` | `{task}` — задачу и те, что от неё зависят, из `draft`/`refining` в `ready`, если их ничего не держит: нет блока, зависимости закрыты, нет `needs_owner`, открытых вопросов, идущих заданий и работающей команды, выполнен DoR | `{moved: [id], held: [{task, holds}]}` |
 | `notify` | `{to, title, text, link, channels}` — веб-центр + Telegram или почта | `{recipients, queued}` |
 | `agent` | разовое агентное задание `{role, goal, inputs, output, workspace, model}`; ждёт результата `genie job output` | результат агента |
 | `team` | собрать команду `{template, note, members, waitFor: ["review", "done"]}` | `{team, status}` |
@@ -87,5 +88,6 @@ verified: 2026-09-29
 | Задача закрыта → знания, чейнджлог и уведомление | `task.status_changed` → `done` (без метки `no-docs`) | документатор (`read-only`) → `changelog.add` → `notify` автору и админам |
 | Новая задача от человека → аналитик → вопросы автору | `task.created` во входящих от человека | `task.status` → refining, аналитик, черновик критериев комментарием, `ask` автору (напоминание 24 ч, срок 72 ч → needs_owner), `wake_orchestrator` |
 | Решение не принято за сутки → напоминание | `task.status_changed` → `needs_owner` | `wait 24h`, `task.get`, `notify`, если решение всё ещё нужно |
+| Задачу ничего не держит → «Готово к работе» (`auto-ready`) | `task.*`, задача в `draft`, `refining` или `done` | `task.ready`: сама задача или, когда закрылась зависимость, задачи, которые её ждали |
 
 Оба сценария владельца проверяются сквозными тестами (`crates/genie/tests/scenarios.rs`): реальный HTTP, процессы агентов, движок и поддельный Telegram Bot API.

@@ -376,6 +376,31 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
             let t = app.with_tracker(project, |t| t.get(&task))?;
             Ok(Outcome::Done(serde_json::to_value(t).unwrap_or(Value::Null)))
         }
+        "task.ready" => {
+            // The task itself, and the tasks that wait for it: closing a dependency frees them.
+            let task = need_task()?;
+            let mut candidates = vec![task.clone()];
+            candidates.extend(app.with_tracker(project, |t| t.dependents(&task))?);
+            let (mut moved, mut held) = (Vec::new(), Vec::new());
+            for id in candidates {
+                let t = app.with_tracker(project, |t| t.get(&id))?;
+                if !READY_FROM.contains(&t.status) {
+                    continue;
+                }
+                let holds = holds(app, project, &t)?;
+                if !holds.is_empty() {
+                    held.push(json!({ "task": t.id, "holds": holds }));
+                    continue;
+                }
+                let note =
+                    "Nothing holds it: no block, dependencies done, no open questions or jobs; moved to ready automatically".to_string();
+                app.with_tracker(project, |tr| {
+                    tr.set_status(&actor, &t.id, Status::Ready, StatusOptions { note: Some(note), force: false })
+                })?;
+                moved.push(t.id);
+            }
+            Ok(Outcome::Done(json!({ "moved": moved, "held": held })))
+        }
         "notify" => {
             let ctx = &run.trigger["context"];
             let users = notify::resolve(app, project, &strings(&input["to"]), ctx)?;
@@ -549,6 +574,39 @@ fn execute(app: &App, run: &Run, step: &Value, kind: &str, input: &Value, state:
         }
         other => Err(invalid(format!("unknown step kind {other}"))),
     }
+}
+
+/// Statuses `task.ready` moves a task from: refinement that nothing else waits for.
+const READY_FROM: &[Status] = &[Status::Draft, Status::Refining];
+
+/// What keeps a task from being ready: a block, open dependencies, a decision or
+/// answers it waits for, work still going on it, the Definition of Ready.
+fn holds(app: &App, project: &str, task: &genie_core::Task) -> AppResult<Vec<String>> {
+    let mut out = Vec::new();
+    if let Some(b) = &task.blocked {
+        out.push(format!("blocked: {}", b.reason));
+    }
+    let open = app.with_tracker(project, |t| t.open_deps(&task.id))?;
+    if !open.is_empty() {
+        out.push(format!("waits for dependencies: {}", open.join(", ")));
+    }
+    if task.needs_owner.is_some() {
+        out.push("waits for the owner's decision".into());
+    }
+    if app.with_server(|db| db.open_questionnaires_for_task(project, &task.id))? > 0 {
+        out.push("waits for answers to questions".into());
+    }
+    if app.with_server(|db| db.open_jobs_for_task(project, &task.id))? > 0 {
+        out.push("an agent job on it is still going".into());
+    }
+    if let Some(team) = &task.team
+        && app.with_tracker(project, |t| t.bus().get(team)).is_ok_and(|t| t.state == "active")
+    {
+        out.push(format!("team {team} is working on it"));
+    }
+    let known = task.deps.iter().filter(|d| app.with_tracker(project, |t| t.exists(d)).unwrap_or(false)).cloned().collect();
+    out.extend(genie_core::readiness_problems(task, &known));
+    Ok(out)
 }
 
 fn past(ts: &Value) -> bool {
@@ -807,6 +865,18 @@ pub fn playbooks() -> Vec<(&'static str, &'static str, Value)> {
                         "onTimeout": "needs_owner"
                     } },
                     { "id": "continue", "wake_orchestrator": { "text": "Triage of {{ event.task.id }} is complete: the analysis artifact and draft criteria are on the task, the author's answers are in its comments. Finish refinement (description, acceptance criteria), then move it to ready if the Definition of Ready is met." } }
+                ]
+            }),
+        ),
+        (
+            "auto-ready",
+            "Задачу ничего не держит → «Готово к работе»",
+            json!({
+                "name": "Задачу ничего не держит — в «Готово к работе»",
+                "on": { "event": "task.*", "where": { "task.status": ["draft", "refining", "done"] } },
+                "limits": { "concurrency": 1, "maxRunsPerHour": 200 },
+                "steps": [
+                    { "id": "ready", "task.ready": {} }
                 ]
             }),
         ),

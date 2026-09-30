@@ -353,6 +353,15 @@ impl ServerDb {
         ids.into_iter().map(|id| self.questionnaire(id)).collect()
     }
 
+    /// Questionnaires about a task that still wait for answers.
+    pub fn open_questionnaires_for_task(&self, project: &str, task: &str) -> Result<i64> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM questionnaires WHERE project = ?1 AND task = ?2 AND status = 'open'",
+            params![project, task],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Record an answer. Returns the questionnaire and whether this answer completed it.
     pub fn answer_question(&self, id: i64, n: i64, answer: &str, via: &str) -> Result<(Questionnaire, bool)> {
         let answer = answer.trim();

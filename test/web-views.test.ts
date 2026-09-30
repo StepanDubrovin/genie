@@ -16,6 +16,10 @@ test("a rule's trigger reads as words, not as its JSON", () => {
   assert.equal(describeTrigger({ on: { schedule: "0 17 * * 5", tz: "Europe/Moscow" } }, false), "Расписание: по пятницам в 17:00, Europe/Moscow · выключено");
   assert.equal(describeTrigger({ on: { webhook: true } }, true, true), "Webhook: по вызову извне · пробный режим");
   assert.equal(describeTrigger({}), "Вручную");
+  assert.equal(
+    describeTrigger({ on: { event: "task.*", where: { "task.status": ["draft", "refining", "done"] } } }),
+    "Событие: любое событие задачи, в статусе «Черновик», «Уточнение» или «Готово»",
+  );
   assert.equal(condition("task.priority", { gt: 2 }), "task.priority > 2", "an unknown condition stays as written");
   assert.equal(condition("to", { not: ["done", "cancelled"] }), "статус → не «Готово» или «Отменено»");
 });
@@ -39,6 +43,7 @@ test("a rule's steps say who does what, placeholders say what they stand for", (
     note: "‹№ задачи› готова",
   });
   assert.equal(describeStep({ "task.status": { to: "refining" } }).title, "Статус → «Уточнение»");
+  assert.equal(describeStep({ "task.ready": {} }).title, "Статус → «Готово к работе», если задачу ничего не держит");
   assert.equal(describeStep({ ask: { to: ["event.actor"], from: "аналитика", remindAfter: "24h", timeout: "72h" } }).note, "от аналитика · напомнить через 24 ч · ждать 72 ч");
   assert.equal(describeStep({ team: { template: "full" } }, roles).title, "Команда «Полная»");
   assert.equal(describeStep({ http: { url: "https://hooks.example.com/x?y=1" } }).note, "hooks.example.com");

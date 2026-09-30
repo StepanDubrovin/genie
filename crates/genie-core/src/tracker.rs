@@ -296,6 +296,16 @@ impl Tracker {
         Ok(out)
     }
 
+    /// Dependencies of a task that are not done yet.
+    pub fn open_deps(&self, id: &str) -> Result<Vec<String>> {
+        self.strings("SELECT d.dep FROM deps d JOIN tasks x ON x.id = d.dep WHERE d.task = ?1 AND x.status != 'done' ORDER BY d.dep", id)
+    }
+
+    /// Tasks that depend on this one.
+    pub fn dependents(&self, id: &str) -> Result<Vec<String>> {
+        self.strings("SELECT task FROM deps WHERE dep = ?1 ORDER BY task", id)
+    }
+
     pub fn get(&self, id: &str) -> Result<Task> {
         let r = self.row(id)?;
         let conn = self.conn();
@@ -853,10 +863,7 @@ impl Tracker {
                     }
                 }
                 Status::InProgress => {
-                    let open = self.strings(
-                        "SELECT d.dep FROM deps d JOIN tasks x ON x.id = d.dep WHERE d.task = ?1 AND x.status != 'done' ORDER BY d.dep",
-                        &task.id,
-                    )?;
+                    let open = self.open_deps(&task.id)?;
                     if !open.is_empty() {
                         return Err(GenieError::invalid(format!("{} depends on unfinished tasks: {}", task.id, open.join(", "))));
                     }

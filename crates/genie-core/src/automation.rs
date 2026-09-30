@@ -33,6 +33,7 @@ pub const STEP_KINDS: &[&str] = &[
     "task.create",
     "task.update",
     "task.get",
+    "task.ready",
     "notify",
     "agent",
     "team",

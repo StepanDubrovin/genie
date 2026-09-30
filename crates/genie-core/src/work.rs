@@ -217,6 +217,15 @@ impl ServerDb {
         Ok(stmt.query_map(params![project, limit], Job::from_row)?.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Agent jobs about a task that are queued or running.
+    pub fn open_jobs_for_task(&self, project: &str, task: &str) -> Result<i64> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM agent_jobs WHERE project = ?1 AND task = ?2 AND status IN ('queued', 'running')",
+            params![project, task],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn start_job(&self, id: i64) -> Result<()> {
         self.conn().execute("UPDATE agent_jobs SET status = 'running', attempts = attempts + 1 WHERE id = ?1", [id])?;
         Ok(())
