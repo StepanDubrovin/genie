@@ -53,6 +53,10 @@ pub async fn host(app: &Arc<App>, id: &str) -> Vec<Line> {
         out.push(line("ok", "a plain git server: transport only (no pull/merge requests, no checks)"));
         return out;
     }
+    if h.token.is_none() {
+        out.push(line("warn", "no token on the host: each repository of a project brings its own (check the repository)"));
+        return out;
+    }
     match Api::new(h) {
         Err(e) => out.push(line("fail", e.to_string())),
         Ok(api) => match api.whoami().await {
@@ -94,6 +98,18 @@ pub async fn repo(app: &Arc<App>, project: &str, name: &str, probe: bool) -> Vec
     };
     for m in &host.missing {
         out.push(line("fail", format!("host {}: secret missing: {m}", host.id)));
+    }
+    let own = app.with_server(|db| db.repo_token_info(&record.project, &record.name)).ok().flatten();
+    match own {
+        Some(i) if i.unreadable => {
+            out.push(line("fail", "the repository's own token cannot be read (the server's key changed): enter it again"))
+        }
+        Some(i) => out.push(line(
+            "ok",
+            format!("works with the repository's own token{}", if i.hint.is_empty() { String::new() } else { format!(" ({})", i.hint) }),
+        )),
+        None if host.token.is_some() => out.push(line("ok", format!("works with the token of host {}", host.id))),
+        None => {}
     }
     // The server's own copy: can it be fetched from the host?
     let rec = record.clone();
@@ -159,7 +175,7 @@ pub async fn repo(app: &Arc<App>, project: &str, name: &str, probe: bool) -> Vec
             },
         }
     } else if host.kind != Kind::Plain {
-        out.push(line("fail", "no token for the host's API"));
+        out.push(line("fail", "no token for the host's API: set one on the repository (or `token` in git.json)"));
     }
     if probe {
         out.extend(probe_push(app, &record, &host).await);

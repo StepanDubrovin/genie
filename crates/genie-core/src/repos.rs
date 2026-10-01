@@ -105,6 +105,8 @@ pub struct NewRepo {
     pub default_branch: Option<String>,
     pub access: Option<String>,
     pub policy: Option<Value>,
+    /// The access token (PAT) on the host; kept sealed, see `secrets`.
+    pub token: Option<crate::secrets::Secret>,
 }
 
 /// Fields of a repository to change (`None` keeps a field).
@@ -114,6 +116,8 @@ pub struct RepoPatch {
     pub default_branch: Option<String>,
     pub access: Option<String>,
     pub policy: Option<Value>,
+    /// A new access token; blank removes the repository's own (the host's one applies).
+    pub token: Option<crate::secrets::Secret>,
 }
 
 /// Delivery fields to change (`None` keeps a field).
@@ -214,6 +218,12 @@ impl ServerDb {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![project, name, host, remote, mount, new.default_branch.unwrap_or_default().trim(), access, policy.to_string(), now()],
         )?;
+        if let Some(t) = new.token.as_ref().map(|t| t.0.as_str()).filter(|t| !t.trim().is_empty())
+            && let Err(e) = self.set_repo_token(project, &name, t)
+        {
+            self.conn().execute("DELETE FROM project_repos WHERE project = ?1 AND name = ?2", params![project, name])?;
+            return Err(e);
+        }
         self.repo(project, &name)
     }
 
@@ -262,6 +272,9 @@ impl ServerDb {
             self.conn()
                 .execute("UPDATE project_repos SET policy = ?1 WHERE project = ?2 AND name = ?3", params![p.to_string(), project, name])?;
         }
+        if let Some(t) = &patch.token {
+            self.set_repo_token(project, name, &t.0)?;
+        }
         let _ = current;
         self.repo(project, name)
     }
@@ -277,6 +290,7 @@ impl ServerDb {
             return Err(GenieError::invalid(format!("{name} has {open} unmerged deliveries; finish or abandon them first")));
         }
         self.conn().execute("DELETE FROM task_repos WHERE project = ?1 AND repo = ?2", params![project, name])?;
+        self.delete_repo_token(project, name)?;
         self.conn().execute("DELETE FROM project_repos WHERE project = ?1 AND name = ?2", params![project, name])?;
         Ok(())
     }

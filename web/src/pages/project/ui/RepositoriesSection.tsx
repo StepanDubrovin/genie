@@ -34,7 +34,7 @@ const READ_POLICY = PRESETS.find((p) => p.id === "read")!.policy;
 const DEFAULT_PRESET = "pr-human";
 
 const HOST_HINT =
-  "Агенты не ходят на хостинг сами: сервер скачивает код и публикует их изменения по правилу репозитория. Адреса и токены хостингов настраивает администратор сервера в git.json.";
+  "Агенты не ходят на хостинг сами: сервер скачивает код и публикует их изменения по правилу репозитория. Адреса хостингов настраивает администратор сервера в git.json; токен доступа можно задать у самого репозитория — сервер хранит его зашифрованным.";
 
 export function RepositoriesHead({ admin, onAdd }: { admin: boolean; onAdd?: () => void }) {
   return (
@@ -143,12 +143,18 @@ function Repo({ repo, admin }: { repo: ProjectRepo; admin: boolean }) {
   const [report, setReport] = useState<CheckLine[]>();
   const [json, setJson] = useState<string>();
   const [mount, setMount] = useState(repo.mount === "." ? "" : repo.mount);
+  const [token, setToken] = useState("");
   const preset = presetOf(repo.policy);
   const access: Access = repo.access === "read" || preset === "read" ? "read" : "write";
-  const save = (p: { access?: Access; policy?: RepoPolicy; mount?: string }, ok: string) => act(() => patch.mutateAsync({ name: repo.name, patch: p }), ok);
+  const save = (p: { access?: Access; policy?: RepoPolicy; mount?: string; token?: string }, ok: string) => act(() => patch.mutateAsync({ name: repo.name, patch: p }), ok);
   const runCheck = (probe: boolean) => void act(async () => setReport((await check.mutateAsync({ name: repo.name, probe })).lines));
 
-  const hostProblems = [...(repo.host.error ? [repo.host.error] : []), ...(repo.host.problems ?? [])];
+  const noToken = !!repo.host.kind && repo.host.kind !== "plain" && !repo.host.hasToken && !repo.token?.set;
+  const hostProblems = [
+    ...(repo.host.error ? [repo.host.error] : []),
+    ...(repo.host.problems ?? []),
+    ...(noToken ? ["у репозитория нет токена доступа — задайте его ниже"] : []),
+  ];
   const status: CheckLine["level"] | undefined = hostProblems.length || !repo.policyValid ? "fail" : report ? checkLevel(report) : undefined;
   const where = `${repo.host.id} ${repo.remote}`;
 
@@ -288,6 +294,55 @@ function Repo({ repo, admin }: { repo: ProjectRepo; admin: boolean }) {
       </div>
 
       {admin && (
+        <div className="rp-grid">
+          <label className="rp-lbl top" htmlFor={`rp-token-${repo.name}`}>
+            Токен доступа
+            <span>PAT на хостинге.</span>
+          </label>
+          <div className="rp-json">
+            <form
+              className="rp-inline"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!token.trim()) return;
+                void act(() => patch.mutateAsync({ name: repo.name, patch: { token: token.trim() } }), `${repo.name}: токен сохранён`).then((ok) => ok && setToken(""));
+              }}
+            >
+              <input
+                id={`rp-token-${repo.name}`}
+                className="st-input mono"
+                type="password"
+                autoComplete="new-password"
+                spellCheck={false}
+                placeholder={repo.token?.set ? "Новый токен" : "Вставьте токен"}
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+              />
+              {token.trim() && (
+                <button className="btn sm" disabled={patch.isPending}>
+                  {repo.token?.set ? "Заменить" : "Сохранить"}
+                </button>
+              )}
+              {repo.token?.set && !token && (
+                <button type="button" className="btn sm ghost" disabled={patch.isPending} onClick={() => void save({ token: "" }, `${repo.name}: токен удалён`)}>
+                  Удалить
+                </button>
+              )}
+            </form>
+            <span className={repo.token?.unreadable || noToken ? "rp-hint warn" : "rp-hint"}>
+              {repo.token?.set
+                ? repo.token.unreadable
+                  ? "Сохранённый токен не читается (сменился ключ сервера): введите его заново."
+                  : `Задан${repo.token.hint ? ` (${repo.token.hint})` : ""}. Хранится на сервере зашифрованным и нигде не показывается.`
+                : repo.host.hasToken
+                  ? "Своего токена нет: используется общий токен хостинга."
+                  : "Токена нет: без него сервер не сможет работать с этим репозиторием."}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {admin && (
         <details className="rp-more" onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && json === undefined && setJson(JSON.stringify(repo.policy, null, 2))}>
           <summary>Дополнительно: папка в рабочей копии, правило в JSON</summary>
           <div className="rp-grid">
@@ -365,12 +420,14 @@ function AddRepo({ hosts, problems, loaded, onClose }: { hosts: GitHostInfo[]; p
   const [access, setAccess] = useState<Access>("write");
   const [preset, setPreset] = useState(DEFAULT_PRESET);
   const [mount, setMount] = useState("");
+  const [token, setToken] = useState("");
   const parsed = parseRepoLink(link, hosts);
   // A bare `group/repo` needs a host only when the server has more than one.
   const host = parsed.kind === "ok" ? parsed.host : parsed.kind === "path" ? (hosts.length === 1 ? hosts[0].id : pickedHost) : "";
   const remote = parsed.kind === "ok" || parsed.kind === "path" ? parsed.remote : "";
   const finalName = (name ?? repoNameFrom(remote)).trim();
   const known = !!host && !!remote;
+  const hostInfo = hosts.find((h) => h.id === host);
   const ready = known && /^[a-z0-9][a-z0-9_-]*$/.test(finalName);
 
   if (loaded && hosts.length === 0) {
@@ -379,7 +436,7 @@ function AddRepo({ hosts, problems, loaded, onClose }: { hosts: GitHostInfo[]; p
         <AddHead onClose={onClose} />
         <div className="st-card-body">
           <p className="st-note">
-            Сервер пока не знает ни одного хостинга. Администратор сервера описывает его (адрес и токен) в <b>git.json</b>; пример — в docs/platform/git-repositories.md.
+            Сервер пока не знает ни одного хостинга. Администратор сервера описывает его (адрес) в <b>git.json</b>; токен можно задать у самого репозитория; пример — в docs/platform/git-repositories.md.
           </p>
           {problems.map((p) => (
             <p key={p} className="rp-hint warn">
@@ -400,7 +457,7 @@ function AddRepo({ hosts, problems, loaded, onClose }: { hosts: GitHostInfo[]; p
         const policy = access === "read" ? READ_POLICY : PRESETS.find((p) => p.id === preset)?.policy;
         void act(
           async () => {
-            const r = await add.mutateAsync({ name: finalName, host, remote, mount: mount.trim() || ".", access, policy });
+            const r = await add.mutateAsync({ name: finalName, host, remote, mount: mount.trim() || ".", access, policy, token: token.trim() || undefined });
             if (r.warning) throw new Error(`Добавлен, но хостинг не ответил: ${r.warning}`);
           },
           `${finalName} добавлен`,
@@ -467,6 +524,30 @@ function AddRepo({ hosts, problems, loaded, onClose }: { hosts: GitHostInfo[]; p
           <div className="ctl">
             <input id="rp-name" className="st-input mono rp-short" placeholder="api" value={name ?? repoNameFrom(remote)} onChange={(e) => setName(e.target.value)} pattern="[a-z0-9][a-z0-9_\-]*" required />
             {finalName && !/^[a-z0-9][a-z0-9_-]*$/.test(finalName) && <span className="rp-hint warn">Строчные латинские буквы, цифры, «-» и «_».</span>}
+          </div>
+        </div>
+
+        <div className="st-row">
+          <label className="lbl" htmlFor="rp-token-new">
+            <b>Токен доступа</b>
+            <span>PAT на хостинге, под которым сервер работает с этим репозиторием.</span>
+          </label>
+          <div className="ctl">
+            <input
+              id="rp-token-new"
+              className="st-input mono"
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              placeholder={hostInfo?.kind === "plain" ? "не нужен для простого git-сервера" : "glpat-… / github_pat_…"}
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+            <span className={hostInfo && !hostInfo.hasToken && hostInfo.kind !== "plain" && !token.trim() ? "rp-hint warn" : "rp-hint"}>
+              {hostInfo?.hasToken
+                ? "Необязательно: без него используется общий токен хостинга. Сервер хранит токен зашифрованным и нигде не показывает."
+                : "Сервер хранит токен зашифрованным и нигде не показывает. Права: чтение и запись веток, запросы на слияние."}
+            </span>
           </div>
         </div>
 

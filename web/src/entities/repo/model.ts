@@ -22,6 +22,18 @@ export interface RepoHost {
   webUrl?: string;
   problems?: string[];
   error?: string;
+  /** The host has a token of its own in `git.json` (the default for its repositories). */
+  hasToken?: boolean;
+}
+
+/** The repository's own access token as the server shows it: never the value. */
+export interface RepoToken {
+  set: boolean;
+  /** The last characters (`…a1b2`). */
+  hint?: string;
+  updated?: string;
+  /** The server cannot read it back (its key changed): enter it again. */
+  unreadable?: boolean;
 }
 
 export interface ProjectRepo {
@@ -34,6 +46,8 @@ export interface ProjectRepo {
   access: "read" | "write";
   policy: RepoPolicy;
   policyValid: boolean;
+  /** Absent for agents. */
+  token?: RepoToken;
   created: string;
 }
 

@@ -108,12 +108,12 @@ async fn gitlab_provider() {
 }
 
 #[tokio::test]
-async fn a_plain_host_has_no_request_api_and_a_host_without_token_says_so() {
+async fn a_plain_host_has_no_request_api_and_a_host_without_token_cannot_call_it() {
     let (_d, plain) = host("plain", "https://git.example", "");
     assert!(matches!(Api::new(&plain), Err(ApiError::Unsupported(_))));
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("git.json"), r#"{"hosts": {"h": {"kind": "gitlab", "url": "https://git.example"}}}"#).unwrap();
     let h = hosts::load(dir.path()).map["h"].clone();
-    assert!(!h.missing.is_empty(), "doctor reports the missing token");
+    assert!(h.missing.is_empty(), "a host may have no token: its repositories bring their own");
     assert!(matches!(Api::new(&h), Err(ApiError::Auth(_))));
 }

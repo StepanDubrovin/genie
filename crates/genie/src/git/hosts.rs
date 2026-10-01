@@ -12,6 +12,8 @@
 //! a restart. Secrets are `${ENV}` references or files — never stored in the
 //! database or shown by the API — and agents never receive them: their names go
 //! into [`secret_vars`], which the runtime removes from an agent's environment.
+//! The token of the host is the default: a repository of a project may have its own,
+//! kept sealed in the server database (`genie_core::secrets`), which wins over it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -229,9 +231,7 @@ fn build(id: &str, value: serde_json::Value, vars: &mut Vec<String>) -> Result<H
         },
         (None, None) => None,
     };
-    if raw.kind != Kind::Plain && token.is_none() && missing.is_empty() {
-        missing.push("no token: set `token` or `token_file`".into());
-    }
+    // A host without a token is fine: each repository of a project may bring its own (`ProjectRepo` token).
     Ok(Host {
         id: id.to_string(),
         kind: raw.kind,

@@ -10,6 +10,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use genie_core::Role;
 use genie_core::repos::{NewRepo, ProjectRepo, RepoPatch};
+use genie_core::secrets::Secret;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -154,7 +155,9 @@ pub fn agent_id(access: &Access) -> Option<AgentId> {
 fn repo_json(app: &App, hosts: &Hosts, repo: &ProjectRepo, agent: Option<&AgentId>) -> Value {
     let resolved = store::resolved(app, repo);
     let host = match hosts.map.get(&repo.host) {
-        Some(h) => json!({ "id": h.id, "kind": h.kind, "url": h.url, "webUrl": h.web_url(&repo.remote), "problems": h.missing }),
+        Some(h) => {
+            json!({ "id": h.id, "kind": h.kind, "url": h.url, "webUrl": h.web_url(&repo.remote), "problems": h.missing, "hasToken": h.token.is_some() })
+        }
         None => {
             let why = hosts.errors.iter().find(|e| e.starts_with(&format!("host {}:", repo.host))).cloned();
             json!({ "id": repo.host, "error": why.unwrap_or_else(|| "not configured in git.json".to_string()) })
@@ -164,6 +167,13 @@ fn repo_json(app: &App, hosts: &Hosts, repo: &ProjectRepo, agent: Option<&AgentI
     v["defaultBranch"] = json!(resolved.default_branch);
     v["host"] = host;
     v["policyValid"] = json!(Policy::parse(&repo.policy).is_ok());
+    // The repository's own access token: what can be shown (never the value). Agents do not see it at all.
+    if agent.is_none() {
+        v["token"] = match app.with_server(|db| db.repo_token_info(&repo.project, &repo.name)) {
+            Ok(Some(i)) => json!({ "set": true, "hint": i.hint, "updated": i.updated, "unreadable": i.unreadable }),
+            _ => json!({ "set": false }),
+        };
+    }
     if let Some(a) = agent {
         v["effective"] = match service::effective_for(app, &repo.project, repo, a) {
             Ok(e) => json!({
@@ -236,6 +246,8 @@ struct AddBody {
     default_branch: Option<String>,
     access: Option<String>,
     policy: Option<Value>,
+    /// The access token (PAT) on the host, kept sealed on the server; a repository's own wins over the host's.
+    token: Option<Secret>,
 }
 
 fn check_policy(policy: &Option<Value>) -> ApiResult<()> {
@@ -259,6 +271,7 @@ async fn add(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<AddBody>) -> A
                 default_branch: b.default_branch,
                 access: b.access,
                 policy: b.policy,
+                token: b.token,
             };
             let (repo, warning) = service::add_repo(app, &access.project, new)?;
             let mut v = repo_json(app, &hosts::load(&app.data), &repo, None);
@@ -276,6 +289,8 @@ struct PatchBody {
     default_branch: Option<String>,
     access: Option<String>,
     policy: Option<Value>,
+    /// A new access token; an empty one removes the repository's own (the host's applies again).
+    token: Option<Secret>,
 }
 
 async fn update(State(app): State<Arc<App>>, ctx: Ctx, Path(name): Path<String>, Json(b): Json<PatchBody>) -> ApiResult<Json<Value>> {
@@ -288,7 +303,7 @@ async fn update(State(app): State<Arc<App>>, ctx: Ctx, Path(name): Path<String>,
                 db.update_repo(
                     &access.project,
                     &name,
-                    RepoPatch { mount: b.mount, default_branch: b.default_branch, access: b.access, policy: b.policy },
+                    RepoPatch { mount: b.mount, default_branch: b.default_branch, access: b.access, policy: b.policy, token: b.token },
                 )
             })?;
             Ok(repo_json(app, &hosts::load(&app.data), &repo, None))

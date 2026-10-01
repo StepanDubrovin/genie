@@ -447,6 +447,18 @@ fn git_hosts(out: &mut Out, data: &Path) {
                 "PATCH /api/repos/<name> with a valid policy; until then agents get no access",
             );
         }
+        if let Some(host) = h.map.get(&r.host)
+            && host.kind != hosts::Kind::Plain
+            && host.token.is_none()
+            && host.missing.is_empty()
+            && db.repo_token_info(&r.project, &r.name).ok().flatten().is_none()
+        {
+            out.warn(
+                "git",
+                format!("{}: repository {} has no token: neither its own nor the host's", r.project, r.name),
+                "set it when attaching the repository (the project page, or `genie repos set --token-stdin`), or `token` in git.json",
+            );
+        }
     }
     if !repos.is_empty() {
         out.ok(
