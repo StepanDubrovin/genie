@@ -1918,6 +1918,20 @@ impl Kickoff<'_> {
                 e.id, e.title, e.id
             ));
         }
+        // The idea planner talks with the owner, not with a team or the orchestrator.
+        if self.spec.template.as_deref() == Some(crate::http::ideas::IDEA_TEMPLATE) {
+            out.push(format!(
+                "{} is an idea in the owner's own words. Start now: read it, look at what already exists, then ask the owner your first question in your reply. \
+                 The owner reads your replies in the agent chat and answers by mail; do not mail the orchestrator. \
+                 Keep your proposal in the `{}` artifact as your role describes: the owner applies it from the web.",
+                task.id,
+                crate::http::ideas::PLAN_ARTIFACT
+            ));
+            if let Some(d) = self.docs {
+                out.push(format!("\n{d}"));
+            }
+            return out.join("\n");
+        }
         if matches!(task.status, Status::Inbox | Status::Draft | Status::Refining) {
             out.push(format!(
                 "The task is not ready yet (status {}): this team clarifies it — scope, a precise description and verifiable acceptance criteria (`genie task update`), findings as an `analysis` artifact. Nobody implements.",

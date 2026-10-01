@@ -14,6 +14,7 @@ pub mod console;
 pub mod ctx;
 pub mod docs;
 pub mod git;
+pub mod ideas;
 pub mod images;
 pub mod live;
 pub mod mcp_gateway;
@@ -87,6 +88,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/health", get(|| async { Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })) }))
         .merge(account::routes())
         .merge(tasks::routes())
+        .merge(ideas::routes())
         .merge(teams::routes())
         .merge(agents::routes())
         .merge(docs::routes())

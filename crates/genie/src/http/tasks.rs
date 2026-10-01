@@ -221,6 +221,7 @@ async fn create(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<Value>) -> 
         merge_strategy: b["mergeStrategy"].as_str().map(str::to_string),
         // People submit to the inbox (the orchestrator takes it from there); agents create drafts.
         status: if access.is_human() && b["draft"] != json!(true) { Some(Status::Inbox) } else { None },
+        quiet: false,
     };
     let actor = access.actor.clone();
     let task = tracker(&app, &access, move |t| t.create(&actor, input)).await?;

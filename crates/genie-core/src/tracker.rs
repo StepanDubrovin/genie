@@ -39,6 +39,9 @@ pub struct CreateInput {
     pub merge_strategy: Option<String>,
     /// Initial status: `Inbox` for owner submissions, `Draft` otherwise.
     pub status: Option<Status>,
+    /// Do not tell the orchestrator: the owner is still shaping the task
+    /// (an idea with a planner), or tells it once for a whole batch.
+    pub quiet: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -672,7 +675,9 @@ impl Tracker {
                 actor,
                 json!({ "title": title, "type": task_type, "status": status, "parent": parent }),
             )?;
-            self.tell_orchestrator(actor, &tid, &format!("New task {tid} in the inbox from the owner: {title}"))?;
+            if !input.quiet {
+                self.tell_orchestrator(actor, &tid, &format!("New task {tid} in the inbox from the owner: {title}"))?;
+            }
             Ok(tid)
         })?;
         self.get(&id)
