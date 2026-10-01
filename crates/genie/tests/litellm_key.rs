@@ -171,3 +171,24 @@ async fn an_agent_whose_person_has_no_key_does_not_start_and_they_are_told() {
     let told = l.app.with_server(|db| db.notifications(bob.id, false, 10)).unwrap();
     assert!(told.iter().any(|n| n.kind == "litellm-key"), "{told:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_orchestrator_does_not_work_for_git_host_but_for_the_person_of_the_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::load(dir.path()).unwrap();
+    let app = App::open(dir.path(), cfg, PathBuf::from("/nonexistent")).unwrap();
+    app.create_project("shop", "Shop", None, None, None).unwrap();
+    app.with_server(|db| db.create_user("anna", "Anna", None, None, false).map(|_| ())).unwrap();
+    let task = app
+        .with_tracker("shop", |t| {
+            t.create(&Actor::new("anna", Role::Human), CreateInput { title: "CSV export".into(), ..Default::default() })
+        })
+        .unwrap();
+    // `git-host` reports a merge as a human, but has no account to hold a key.
+    let report =
+        genie_core::team::Mail { from: "git-host".into(), from_role: "human".into(), task: Some(task.id.clone()), ..Default::default() };
+    assert_eq!(genie::llm_key::mail_initiator(&app, "shop", std::slice::from_ref(&report)).as_deref(), Some("anna"));
+    // A person with an account who wrote still comes first.
+    let anna = genie_core::team::Mail { from: "anna".into(), from_role: "human".into(), ..Default::default() };
+    assert_eq!(genie::llm_key::mail_initiator(&app, "shop", &[report, anna]).as_deref(), Some("anna"));
+}
