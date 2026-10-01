@@ -87,12 +87,10 @@ pub fn validate(spec: &Value) -> Vec<String> {
         if !ids.insert(id.clone()) {
             p.push(format!("steps[{i}]: duplicate id {id}"));
         }
-        for key in ["timeout"] {
-            if let Some(d) = s[key].as_str()
-                && parse_duration(d).is_none()
-            {
-                p.push(format!("steps[{i}].{key}: invalid duration {d}"));
-            }
+        if let Some(d) = s["timeout"].as_str()
+            && parse_duration(d).is_none()
+        {
+            p.push(format!("steps[{i}].timeout: invalid duration {d}"));
         }
     }
     p
