@@ -568,7 +568,7 @@ async fn stats(State(app): State<Arc<App>>, ctx: Ctx, axum::extract::Query(q): a
     ctx.server_admin()?;
     let stats = app
         .blocking(move |app| {
-            crate::stats::collect(&app.data, q.days.unwrap_or(7), q.project.as_deref())
+            crate::stats::collect(&app.data, q.days.unwrap_or(7), q.project.as_deref(), &app.cfg.model_prices)
                 .map_err(|e| genie_core::GenieError::invalid(e).into())
         })
         .await?;

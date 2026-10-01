@@ -166,6 +166,20 @@ CREATE TABLE IF NOT EXISTS event_cursors (
   last_id INTEGER NOT NULL,
   updated TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS usage (
+  day TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  task TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0,
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, agent, task, model)
+);
+CREATE INDEX IF NOT EXISTS usage_task ON usage(task);
+CREATE INDEX IF NOT EXISTS usage_agent ON usage(agent);
 "#;
 
 /// Columns added after the first TypeScript release; applied to existing databases on open.
