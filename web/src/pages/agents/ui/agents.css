@@ -162,6 +162,29 @@ fieldset:disabled .ag-perm { cursor: default; }
 .ag-kickoff pre.view { margin: 0; padding: 12px 14px; border-top: 1px solid var(--line); white-space: pre-wrap; font: 12px/1.55 var(--mono); color: var(--text-2); max-height: 420px; overflow: auto; }
 .ag-charter { margin: 0; line-height: 1.6; color: var(--text-body); white-space: pre-wrap; }
 
+/* A role's settings: titled sections of label | control rows. */
+.modal:has(.ag-settings) { width: min(740px, 94vw); }
+.ag-settings { display: flex; flex-direction: column; margin: -6px 0; }
+.ag-settings section { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 12px 20px; align-items: start; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.ag-settings section:last-child { border-bottom: 0; }
+.ag-settings h4 { grid-column: 1 / -1; margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #6f737c; }
+.ag-settings label, .ag-settings .lbl { padding-top: 8px; display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--text-2); }
+.ag-settings .hint { font-size: 11.5px; line-height: 1.4; color: #6f737c; }
+.ag-settings .in { min-width: 0; height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--bg-panel); color: var(--text); font-size: 13px; outline: 0; }
+.ag-settings textarea.in { height: auto; padding: 8px 12px; }
+.ag-settings .in:focus { border-color: var(--accent); }
+.ag-seg button { height: 30px; }
+.ag-toggles { display: flex; flex-wrap: wrap; gap: 8px; }
+.ag-toggles button { height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 10px; border: 1px solid var(--line-strong); border-radius: 16px; background: none; color: var(--muted); font-size: 12.5px; }
+.ag-toggles button svg { visibility: hidden; }
+.ag-toggles button.on { border-color: #3a3f7a; background: #1b1d33; color: #c3c8fa; }
+.ag-toggles button.on svg { visibility: visible; color: var(--accent-text); }
+@media (max-width: 640px) {
+  .ag-settings section { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .ag-settings label, .ag-settings .lbl { padding-top: 6px; }
+  .ag-seg { flex-wrap: wrap; }
+}
+
 /* tables */
 .ag-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
 .ag-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }

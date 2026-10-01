@@ -23,7 +23,9 @@ import {
   useRole,
   useSaveConfig,
 } from "@/entities/agent-config";
-import { ConfirmDialog, Icon, Markdown, Modal, useToast } from "@/shared/ui";
+import { useMeta, useProjects } from "@/entities/project";
+import { ModelPicker } from "@/features/agent-model";
+import { ChipInput, ConfirmDialog, Icon, Markdown, Modal, useToast } from "@/shared/ui";
 import { Badge, FileEditor, History, Problems, Section, useAction } from "./common.tsx";
 
 export function RolesTab({ cfg, selected, onSelect }: { cfg: Catalogue; selected?: string; onSelect: (id: string) => void }) {
@@ -518,9 +520,9 @@ const list = (s: string) =>
     .filter(Boolean);
 
 /** A dialog that edits part of the role file. */
-function EditDialog({ title, note, busy, onClose, onSave, children }: { title: string; note?: string; busy?: boolean; onClose: () => void; onSave: () => void; children: ReactNode }) {
+function EditDialog({ title, note, busy, narrow, onClose, onSave, children }: { title: string; note?: string; busy?: boolean; narrow?: boolean; onClose: () => void; onSave: () => void; children: ReactNode }) {
   return (
-    <Modal label={title} onClose={onClose} wide>
+    <Modal label={title} onClose={onClose} wide={!narrow}>
       <div className="mh">
         {title}
         <span className="grow" />
@@ -561,20 +563,25 @@ function SettingsDialog({ detail, onClose }: { detail: RoleDetail; onClose: () =
     thinking: r.thinking ?? "",
     files: r.files as string,
     stages: r.stages as string[],
-    projects: (r.projects ?? []).join(", "),
-    denyCommands: r.denyCommands.join("\n"),
-    names: r.names.join(", "),
+    projects: r.projects ?? [],
+    denyCommands: r.denyCommands,
+    names: r.names,
     instructions: r.instructions ?? "",
   };
   const [f, setF] = useState(initial);
   const [busy, setBusy] = useState(false);
   const edit = useRoleEdit(detail);
   const act = useAction();
+  const meta = useMeta().data;
+  const projects = useProjects().data;
   const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF((x) => ({ ...x, [k]: v }));
   const save = async () => {
     const fields: [string, string | string[] | undefined][] = [];
     const text = (k: "title" | "description" | "model" | "thinking" | "instructions") => {
       if (f[k] !== initial[k]) fields.push([k, f[k].trim() ? f[k].trim() : undefined]);
+    };
+    const items = (k: "projects" | "denyCommands" | "names") => {
+      if (f[k].join("\n") !== initial[k].join("\n")) fields.push([k, f[k].length ? f[k] : undefined]);
     };
     text("title");
     text("description");
@@ -583,78 +590,98 @@ function SettingsDialog({ detail, onClose }: { detail: RoleDetail; onClose: () =
     text("instructions");
     if (f.files !== initial.files) fields.push(["files", f.files]);
     if (f.stages.join() !== initial.stages.join()) fields.push(["stages", f.stages]);
-    if (f.projects !== initial.projects) fields.push(["projects", list(f.projects).length ? list(f.projects) : undefined]);
-    if (f.denyCommands !== initial.denyCommands) fields.push(["denyCommands", list(f.denyCommands).length ? list(f.denyCommands) : undefined]);
-    if (f.names !== initial.names) fields.push(["names", list(f.names).length ? list(f.names) : undefined]);
+    items("projects");
+    items("denyCommands");
+    items("names");
     if (!fields.length) return onClose();
     setBusy(true);
     if (await act(() => edit(fields), "Настройки роли сохранены")) onClose();
     setBusy(false);
   };
+  const hint = (text: string) => <span className="hint">{text}</span>;
   return (
-    <EditDialog title={`Настройки роли ${r.id}`} note="Промпт, модель и навыки дойдут до агентов со следующего старта их сессии" busy={busy} onClose={onClose} onSave={() => void save()}>
-      <label className="field">
-        Название
-        <input value={f.title} onChange={(e) => set("title", e.target.value)} required />
-      </label>
-      <label className="field">
-        Описание — видят оркестратор и люди при выборе роли
-        <textarea rows={2} value={f.description} onChange={(e) => set("description", e.target.value)} />
-      </label>
-      <div className="ag-row">
-        <label className="field">
-          Модель — provider/id
-          <input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="по умолчанию" />
-        </label>
-        <label className="field">
-          Размышление
-          <select value={f.thinking} onChange={(e) => set("thinking", e.target.value)}>
-            {THINKING.map((t) => (
-              <option key={t} value={t}>
-                {t || "по умолчанию"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          Файлы
-          <select value={f.files} onChange={(e) => set("files", e.target.value)}>
-            {(["write", "read", "none"] as const).map((x) => (
-              <option key={x} value={x}>
-                {FILES_TITLE[x]}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <fieldset className="ag-inline">
-        <legend>Стадии задачи</legend>
-        {(["refinement", "delivery"] as const).map((s) => (
-          <label key={s}>
-            <input type="checkbox" checked={f.stages.includes(s)} onChange={(e) => set("stages", e.target.checked ? [...f.stages, s] : f.stages.filter((x) => x !== s))} />
-            {STAGE_TITLE[s]}
+    <EditDialog title={`Настройки роли ${r.id}`} note="Промпт, модель и навыки дойдут до агентов со следующего старта их сессии" busy={busy} onClose={onClose} onSave={() => void save()} narrow>
+      <div className="ag-settings">
+        <section>
+          <h4>О роли</h4>
+          <label htmlFor="rs-title">Название</label>
+          <input id="rs-title" className="in" value={f.title} onChange={(e) => set("title", e.target.value)} required />
+          <label htmlFor="rs-desc">
+            Описание
+            {hint("Видят оркестратор и люди при выборе роли")}
           </label>
-        ))}
-      </fieldset>
-      <label className="field">
-        Запрещённые команды shell — по одной в строке, * — любой текст
-        <textarea rows={3} className="mono" value={f.denyCommands} onChange={(e) => set("denyCommands", e.target.value)} placeholder="git push*" />
-      </label>
-      <div className="ag-row">
-        <label className="field">
-          Проекты — пусто: все
-          <input value={f.projects} onChange={(e) => set("projects", e.target.value)} placeholder="shop, erp" />
-        </label>
-        <label className="field">
-          Имена участников
-          <input value={f.names} onChange={(e) => set("names", e.target.value)} placeholder="по классу" />
-        </label>
+          <textarea id="rs-desc" className="in" rows={2} value={f.description} onChange={(e) => set("description", e.target.value)} />
+        </section>
+        <section>
+          <h4>Модель</h4>
+          <label htmlFor="rs-model">
+            Модель
+            {hint("Агенту её можно сменить в чате")}
+          </label>
+          <ModelPicker id="rs-model" value={f.model} onChange={(m) => set("model", m)} fallback={meta?.roleModels?.[r.id]?.model} />
+          <span className="lbl">Размышление</span>
+          <Segments label="Размышление" value={f.thinking} options={THINKING.map((t) => [t, t || "по умолчанию"])} onChange={(v) => set("thinking", v)} />
+        </section>
+        <section>
+          <h4>Доступ</h4>
+          <span className="lbl">Файлы проекта</span>
+          <Segments label="Файлы проекта" value={f.files} options={(["write", "read", "none"] as const).map((x) => [x, FILES_TITLE[x]])} onChange={(v) => set("files", v)} />
+          <span className="lbl">
+            Стадии задачи
+            {hint("Когда роль можно звать в команду")}
+          </span>
+          <div className="ag-toggles">
+            {(["refinement", "delivery"] as const).map((s) => {
+              const on = f.stages.includes(s);
+              return (
+                <button key={s} type="button" aria-pressed={on} className={on ? "on" : ""} onClick={() => set("stages", on ? f.stages.filter((x) => x !== s) : [...f.stages, s])}>
+                  <Icon.check />
+                  {STAGE_TITLE[s]}
+                </button>
+              );
+            })}
+          </div>
+          <label htmlFor="rs-deny">
+            Запрещённые команды
+            {hint("Shell; * — любой текст")}
+          </label>
+          <ChipInput id="rs-deny" values={f.denyCommands} onChange={(v) => set("denyCommands", v)} placeholder="git push*" mono />
+        </section>
+        <section>
+          <h4>Команда</h4>
+          <label htmlFor="rs-projects">
+            Проекты
+            {hint("Пусто — роль видна во всех")}
+          </label>
+          <ChipInput id="rs-projects" values={f.projects} onChange={(v) => set("projects", v)} placeholder="Добавить проект" suggestions={projects?.map((p) => p.slug)} />
+          <label htmlFor="rs-names">
+            Имена участников
+            {hint("Пусто — имена по классу")}
+          </label>
+          <ChipInput id="rs-names" values={f.names} onChange={(v) => set("names", v)} placeholder="Новое имя" />
+        </section>
+        <section>
+          <label htmlFor="rs-extra">
+            Особенности роли
+            {hint("Дописываются к промпту")}
+          </label>
+          <textarea id="rs-extra" className="in" rows={3} value={f.instructions} onChange={(e) => set("instructions", e.target.value)} />
+        </section>
       </div>
-      <label className="field">
-        Особенности роли — дописываются к промпту
-        <textarea rows={4} value={f.instructions} onChange={(e) => set("instructions", e.target.value)} />
-      </label>
     </EditDialog>
+  );
+}
+
+/** One choice of a few, as a segmented control. */
+function Segments({ label, value, options, onChange }: { label: string; value: string; options: [string, string][]; onChange: (v: string) => void }) {
+  return (
+    <div role="radiogroup" aria-label={label} className="mm-seg ag-seg">
+      {options.map(([v, title]) => (
+        <button key={v || "default"} type="button" role="radio" aria-checked={value === v} className={value === v ? "on" : ""} onClick={() => onChange(v)}>
+          {title}
+        </button>
+      ))}
+    </div>
   );
 }
 
