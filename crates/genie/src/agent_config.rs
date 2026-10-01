@@ -39,6 +39,7 @@ const BUILTIN_ROLES: &[(&str, &str)] = &[
     ("tester", include_str!("../../../agents/tester.md")),
     ("documenter", include_str!("../../../agents/documenter.md")),
     ("researcher", include_str!("../../../agents/researcher.md")),
+    ("planner", include_str!("../../../agents/planner.md")),
 ];
 
 const BUILTIN_TEAMS: &[(&str, &str)] = &[
@@ -48,6 +49,7 @@ const BUILTIN_TEAMS: &[(&str, &str)] = &[
     ("abap", include_str!("../../../config/teams/abap.json")),
     ("spike", include_str!("../../../config/teams/spike.json")),
     ("research", include_str!("../../../config/teams/research.json")),
+    ("idea", include_str!("../../../config/teams/idea.json")),
 ];
 
 /// Who the reserved relation endpoint is.
@@ -1320,7 +1322,10 @@ fn check_team(raw: &RawTeam, roles: &BTreeMap<String, RoleDef>, max_members: usi
             errors.push(format!("`{}` waits for a handoff that never comes (the handoffs form a cycle)", m.key));
         }
     }
-    if !raw.members.is_empty() && !relations.iter().any(|r| r.kind == RelKind::Reports) {
+    // A refinement team with an explicit empty list talks with a person, not the
+    // orchestrator (the idea planner): its result is the tracker's, nobody reports.
+    let solo = raw.stage == Stage::Refinement && raw.relations.as_ref().is_some_and(|r| r.is_empty());
+    if !raw.members.is_empty() && !solo && !relations.iter().any(|r| r.kind == RelKind::Reports) {
         warnings.push("nobody reports to the orchestrator: add a `reports` relation".into());
     }
     let has = |cap: Capability| raw.members.iter().filter_map(|m| roles.get(&m.role)).any(|r| r.can(cap));
@@ -1968,6 +1973,8 @@ mod tests {
             assert!(!a.teams[id].relations_derived, "{id} has explicit relations");
         }
         assert_eq!(a.teams["research"].stage, Stage::Refinement);
+        assert_eq!(a.teams["idea"].members.len(), 1);
+        assert_eq!(a.roles["planner"].class, Role::Analyst);
         assert_eq!(a.teams["abap"].workspace, Workspace::Repo);
         assert!(a.teams["abap"].members[1].instructions.as_deref().unwrap().contains("read-only"));
     }

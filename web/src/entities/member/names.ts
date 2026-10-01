@@ -16,6 +16,7 @@ export const ROLE_TITLE_RU: Record<string, string> = {
   tester: "тестировщик",
   documenter: "документатор",
   researcher: "исследователь",
+  planner: "планировщик",
   orchestrator: "оркестратор",
   human: "владелец",
 };

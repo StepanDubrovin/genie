@@ -52,6 +52,7 @@ function Shell() {
   const actions: PaletteActions = useMemo(
     () => ({
       newTask: () => newTask(),
+      newIdea: () => newTask({ idea: true }),
       go: (v: ViewId) => navigate({ pathname: `/${v}`, search: sp.get("layout") ? `?layout=${sp.get("layout")}` : "" }),
       layout: (l) => navigate({ pathname: ownPage ? "/active" : location.pathname, search: `?layout=${l}` }),
       openTask: (id) => navigate({ pathname: ownPage ? "/active" : location.pathname, search: `?${new URLSearchParams({ ...(sp.get("layout") ? { layout: sp.get("layout")! } : {}), task: id })}` }),
@@ -117,6 +118,10 @@ function Shell() {
         <NewTaskDialog
           preset={preset}
           onClose={() => setDialog(undefined)}
+          onIdea={(team, member) => {
+            setDialog(undefined);
+            navigate(`/team/${encodeURIComponent(team)}/${encodeURIComponent(member)}`);
+          }}
           onCreated={(id, type) => {
             setDialog(undefined);
             if (type === "epic") navigate(`/epic/${encodeURIComponent(id)}`);

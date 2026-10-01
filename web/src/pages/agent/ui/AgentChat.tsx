@@ -2,7 +2,9 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import { Link, useParams } from "react-router";
 import { Avatar, displayName, ROLE_TITLE_RU } from "@/entities/member";
 import { type LiveSession, type Mail, type MailLevel, MessageText, type PeekMessage, type TeamDetail, usePeek, useRestartMember, useSendMail, useSetPaused, useTeam } from "@/entities/team";
+import { useTask } from "@/entities/task";
 import { ModelMenu } from "@/features/agent-model";
+import { IDEA_TEMPLATE, IdeaPlan } from "@/features/shape-idea";
 import { clock, plural, timeAgo, useTick } from "@/shared/lib";
 import { Icon, Markdown, useToast } from "@/shared/ui";
 import "./agent.css";
@@ -141,7 +143,13 @@ export function AgentChat() {
   if (fresh?.length) seen.current.set(agentKey, fresh);
   const conversation = fresh?.length ? fresh : (seen.current.get(agentKey) ?? []);
   const live = peek.data?.session ?? session;
-  const rows = useMemo(() => (team && name ? toRows(conversation, team, name, live ?? undefined) : []), [conversation, team, name, live]);
+  // The idea planner: its kickoff is for the agent, the person sees their own idea instead.
+  const isIdea = team?.template === IDEA_TEMPLATE;
+  const ideaTask = useTask(isIdea ? team?.task : undefined).data;
+  const rows = useMemo(() => {
+    const all = team && name ? toRows(conversation, team, name, live ?? undefined) : [];
+    return isIdea ? all.filter((r) => !(r.kind === "mail" && r.mail.length > 0 && r.mail.every((m) => m.kind === "kickoff"))) : all;
+  }, [conversation, team, name, live, isIdea]);
   const toggle = (key: string) => setOpen((s) => new Set(s.has(key) ? [...s].filter((k) => k !== key) : [...s, key]));
 
   useEffect(() => {
@@ -164,6 +172,8 @@ export function AgentChat() {
   const queued = team.mail.filter((m) => m.to === name && !m.deliveredAt);
   const pausedAt = [...team.log].reverse().find((e) => e.event === "member_paused" && e.member === name)?.at;
   const who = displayName(name);
+  // The idea planner: the plan it keeps sits next to the chat instead of the agent's details.
+  const idea = isIdea;
   // Interrupting a paused agent makes no sense: its mail waits anyway.
   const lvl: MailLevel = paused ? "high" : level;
 
@@ -258,6 +268,22 @@ export function AgentChat() {
         <div className={`ac-feed${paused ? " dim" : ""}`} ref={feedRef} role="log" aria-label={`Разговор ${who}`} onScroll={(e) => (stick.current = e.currentTarget.scrollHeight - e.currentTarget.scrollTop - e.currentTarget.clientHeight < 60)}>
           <div className="inner">
             {paused && conversation.length > 0 && <div className="ac-caption">Разговор остановлен паузой{pausedAt ? ` в ${clock(pausedAt)}` : ""}</div>}
+            {idea && ideaTask && (
+              <article className="mail ac-mail mine">
+                <span className="slot">
+                  <Avatar role="human" name="Вы" size="md" />
+                </span>
+                <div className="body">
+                  <div className="meta">
+                    <b>Ваша идея</b>
+                  </div>
+                  <div className="text">
+                    <Markdown text={ideaTask.description} />
+                  </div>
+                </div>
+                <span className="t">{clock(ideaTask.created)}</span>
+              </article>
+            )}
             {rows.map((r) => (
               <Fragment key={r.key}>
                 {r.kind === "mail" && <MailRow row={r} team={team} paused={paused} />}
@@ -288,7 +314,7 @@ export function AgentChat() {
                 )}
               </Fragment>
             ))}
-            {!rows.length && (
+            {!rows.length && !idea && (
               <div className="empty">
                 {peek.isPending ? "Загрузка разговора…" : live ? "Разговор пока пуст" : "Сессия агента не запущена: разговор появится, когда он получит письмо"}
               </div>
@@ -316,8 +342,8 @@ export function AgentChat() {
                   <button type="button" className="chip" onClick={() => pause(true)}>
                     Пауза
                   </button>
-                  <button type="button" className="chip" onClick={() => setInfo(!info)} aria-expanded={info}>
-                    Что он делает?
+                  <button type="button" className={`chip${idea ? " primary" : ""}`} onClick={() => setInfo(!info)} aria-expanded={info}>
+                    {idea ? "План" : "Что он делает?"}
                   </button>
                 </>
               )}
@@ -343,12 +369,12 @@ export function AgentChat() {
                 aria-label="Текст поправки"
                 rows={2}
                 value={draft}
-                placeholder={paused ? `Добавить к почте, которую ${who} получит при продолжении` : `Что поправить в работе ${who}?`}
+                placeholder={paused ? `Добавить к почте, которую ${who} получит при продолжении` : idea ? `Ответить ${who} или попросить поправить план` : `Что поправить в работе ${who}?`}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && (e.metaKey || e.ctrlKey) && (e.preventDefault(), submit())}
               />
               <div className="ac-row">
-                {!paused && (
+                {!paused && !idea && (
                   <div role="radiogroup" aria-label="Когда доставить" className="ac-levels">
                     {LEVELS.map((l) => (
                       <button key={l.level} type="button" role="radio" aria-checked={level === l.level} className={level === l.level ? `on ${l.level}` : ""} onClick={() => setLevel(l.level)}>
@@ -357,7 +383,7 @@ export function AgentChat() {
                     ))}
                   </div>
                 )}
-                <span className="hint">{paused ? "придёт при продолжении" : LEVELS.find((l) => l.level === level)?.hint}</span>
+                <span className="hint">{paused ? "придёт при продолжении" : idea ? `${who} ответит здесь, план обновится справа` : LEVELS.find((l) => l.level === level)?.hint}</span>
                 <span className="grow" />
                 <button type="submit" className={`btn sm ${lvl === "interrupt" ? "amber" : "primary"}`} disabled={!draft.trim() || send.isPending} title="Отправить (⌘↵)">
                   {lvl === "interrupt" ? "Прервать и отправить" : "Отправить"}
@@ -368,9 +394,11 @@ export function AgentChat() {
         )}
       </main>
 
-      <aside className={`team-aside ac-aside${info ? " open" : ""}`} aria-label={paused ? "Пауза" : "Об агенте"}>
+      <aside className={`team-aside ac-aside${info ? " open" : ""}`} aria-label={paused ? "Пауза" : idea ? "План" : "Об агенте"}>
         {paused ? (
           <PausedPanel who={who} since={pausedAt} queued={queued} busy={setPaused.isPending || restart.isPending} onResume={() => pause(false)} onRestart={doRestart} />
+        ) : idea ? (
+          <IdeaPlan taskId={team.task} planner={who} onClose={() => setInfo(false)} />
         ) : (
           <AgentInfo member={member} team={team} live={live ?? undefined} st={st} queued={queued} />
         )}

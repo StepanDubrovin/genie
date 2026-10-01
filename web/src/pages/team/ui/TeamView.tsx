@@ -31,6 +31,7 @@ const STOPPED: Record<string, string> = {
   owner: "остановлена владельцем",
   orchestrator: "остановлена оркестратором",
   task_closed: "остановлена: задача закрыта",
+  planned: "план идеи заведён",
   launch_failed: "не запустилась",
   all_lost: "остановлена: связь потеряна",
 };

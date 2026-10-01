@@ -7,6 +7,8 @@ import { Icon, Modal } from "@/shared/ui";
 
 export interface PaletteActions {
   newTask: () => void;
+  /** «Новая задача» in the «Обсудить с агентом» mode. */
+  newIdea: () => void;
   go: (view: ViewId) => void;
   layout: (l: "list" | "board") => void;
   openTask: (id: string) => void;
@@ -47,6 +49,7 @@ export function CommandPalette({ onClose, actions }: { onClose: () => void; acti
   const items = useMemo<Item[]>(() => {
     const base: Item[] = [
       { key: "new", icon: <Icon.plus />, label: "Новая задача", hint: "C", group: "ДЕЙСТВИЯ", run: actions.newTask },
+      { key: "idea", icon: <Icon.plus />, label: "Обсудить идею с агентом", group: "ДЕЙСТВИЯ", run: actions.newIdea },
       { key: "list", icon: <Icon.list />, label: "Показать списком", group: "ДЕЙСТВИЯ", run: () => actions.layout("list") },
       { key: "board", icon: <Icon.board />, label: "Показать доской", hint: "B", group: "ДЕЙСТВИЯ", run: () => actions.layout("board") },
       ...(Object.keys(VIEWS) as ViewId[])
