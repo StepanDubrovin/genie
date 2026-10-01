@@ -890,6 +890,18 @@ pub fn playbooks() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            "ready-start",
+            "«Готово к работе» → оркестратор запускает работу",
+            json!({
+                "name": "«Готово к работе» — оркестратор запускает работу",
+                "on": { "event": "task.status_changed", "where": { "to": "ready", "task.type": { "not": "epic" } } },
+                "limits": { "concurrency": 3, "maxRunsPerHour": 60 },
+                "steps": [
+                    { "id": "start", "wake_orchestrator": { "text": "Task {{ event.task.id }} ({{ event.task.title }}) is now ready: start work on it. If a team already works on it, do nothing. Check the Definition of Ready first: if something only the owner can settle is missing (the integration, the repositories), ask the owner instead of dispatching. Otherwise compose its team and spawn it now." } }
+                ]
+            }),
+        ),
+        (
             "needs-owner-escalation",
             "Решение не принято за сутки → напоминание",
             json!({

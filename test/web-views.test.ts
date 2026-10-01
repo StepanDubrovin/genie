@@ -20,6 +20,10 @@ test("a rule's trigger reads as words, not as its JSON", () => {
     describeTrigger({ on: { event: "task.*", where: { "task.status": ["draft", "refining", "done"] } } }),
     "Событие: любое событие задачи, в статусе «Черновик», «Уточнение» или «Готово»",
   );
+  assert.equal(
+    describeTrigger({ on: { event: "task.status_changed", where: { to: "ready", "task.type": { not: "epic" } } } }),
+    "Событие: статус → «Готово к работе», кроме эпиков",
+  );
   assert.equal(condition("task.priority", { gt: 2 }), "task.priority > 2", "an unknown condition stays as written");
   assert.equal(condition("to", { not: ["done", "cancelled"] }), "статус → не «Готово» или «Отменено»");
 });
