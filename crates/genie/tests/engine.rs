@@ -83,3 +83,40 @@ fn the_auto_ready_playbook_moves_a_task_once_nothing_holds_it() {
     assert_eq!(status(&blocked), Status::Ready, "unblocked, nothing else holds it");
     assert_eq!(status(&waiting), Status::Ready, "its dependency is done");
 }
+
+#[test]
+fn the_ready_start_playbook_wakes_the_orchestrator_to_start_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = App::open(dir.path(), Config::load(dir.path()).unwrap(), PathBuf::from("/nonexistent")).unwrap();
+    app.create_project("shop", "Shop", None, None, None).unwrap();
+    for name in ["auto-ready", "ready-start"] {
+        let (_, _, spec) = genie::engine::playbooks().into_iter().find(|(id, ..)| *id == name).unwrap();
+        assert!(genie_core::automation::validate(&spec).is_empty(), "{name}");
+        app.with_server(|db| db.create_automation("shop", &spec, "anna")).unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let anna = Actor::new("anna", Role::Human);
+    let input = |title: &str, kind: genie_core::TaskType| CreateInput {
+        title: title.into(),
+        task_type: Some(kind),
+        description: Some("Export the orders".into()),
+        acceptance: vec!["A CSV file downloads".into()],
+        ..Default::default()
+    };
+    let epic = app.with_tracker("shop", |t| t.create(&anna, input("Reports", genie_core::TaskType::Epic))).unwrap().id;
+    let task = app.with_tracker("shop", |t| t.create(&anna, input("Export orders", genie_core::TaskType::Task))).unwrap().id;
+    app.with_tracker("shop", |t| {
+        t.set_status(&anna, &epic, Status::Ready, StatusOptions { note: None, force: true, ..Default::default() })
+    })
+    .unwrap();
+    // auto-ready moves the task to ready; that (not the epic going to ready) wakes the orchestrator.
+    genie::engine::tick(&app).unwrap();
+    genie::engine::tick(&app).unwrap();
+    assert_eq!(app.with_tracker("shop", |t| t.get(&task)).unwrap().status, Status::Ready);
+    let mail = app.with_tracker("shop", |t| t.bus().pending(None, "orchestrator")).unwrap();
+    let starts: Vec<_> = mail.iter().filter(|m| m.text.contains("start work")).collect();
+    assert_eq!(starts.len(), 1, "{mail:?}");
+    assert_eq!(starts[0].task.as_deref(), Some(task.as_str()));
+    assert!(starts[0].text.contains(&task) && !starts[0].text.contains(&epic), "{}", starts[0].text);
+}

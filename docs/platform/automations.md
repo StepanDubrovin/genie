@@ -6,7 +6,7 @@ status: current
 tags: [платформа, автоматизации, триггеры, агенты, каналы]
 aliases: [automations, triggers, rules, playbooks, workflows]
 paths: [crates/genie-core/src/automation.rs, crates/genie/src/engine.rs, crates/genie/src/http/automations.rs]
-verified: 2026-09-30
+verified: 2026-10-01
 ---
 
 # Автоматизации genie
@@ -89,5 +89,6 @@ verified: 2026-09-30
 | Новая задача от человека → аналитик → вопросы автору | `task.created` во входящих от человека | `task.status` → refining, аналитик, черновик критериев комментарием, `ask` автору (напоминание 24 ч, срок 72 ч → needs_owner), `wake_orchestrator` |
 | Решение не принято за сутки → напоминание | `task.status_changed` → `needs_owner` | `wait 24h`, `task.get`, `notify`, если решение всё ещё нужно |
 | Задачу ничего не держит → «Готово к работе» (`auto-ready`) | `task.*`, задача в `draft`, `refining` или `done` | `task.ready`: сама задача или, когда закрылась зависимость, задачи, которые её ждали |
+| «Готово к работе» → оркестратор запускает работу (`ready-start`) | `task.status_changed` → `ready`, кроме эпиков | `wake_orchestrator`: собрать команду и запустить работу; если работа уже идёт — ничего, если не хватает решения владельца (интеграция, репозитории) — спросить его |
 
 Оба сценария владельца проверяются сквозными тестами (`crates/genie/tests/scenarios.rs`): реальный HTTP, процессы агентов, движок и поддельный Telegram Bot API.
