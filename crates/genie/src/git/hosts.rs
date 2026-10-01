@@ -2,16 +2,16 @@
 //!
 //! ```json
 //! { "hosts": {
-//!     "gitlab": { "kind": "gitlab", "url": "https://git.company.local",
-//!                 "token": "${GITLAB_TOKEN}", "ca_cert": "/etc/ssl/company-ca.pem" },
-//!     "github": { "kind": "github", "url": "https://github.com", "token_file": "/run/secrets/github_token" }
+//!     "gitlab": { "kind": "gitlab", "url": "https://git.company.local", "ca_cert": "/etc/ssl/company-ca.pem" },
+//!     "github": { "kind": "github", "url": "https://github.com" }
 //! } }
 //! ```
 //!
-//! The file is read at each use, so a rotated token or a new host applies without
-//! a restart. Secrets are `${ENV}` references or files — never stored in the
-//! database or shown by the API — and agents never receive them: their names go
-//! into [`secret_vars`], which the runtime removes from an agent's environment.
+//! The file is read at each use, so a new host applies without a restart. It describes
+//! where a host is and how to reach it — it holds no secrets: the access token (PAT) belongs
+//! to a repository of a project and is kept sealed in the server database
+//! (`genie_core::secrets`); [`crate::git::store::host_of`] puts it on the host a repository
+//! is reached through. Agents never receive tokens.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -63,10 +63,11 @@ struct Raw {
     url: String,
     #[serde(default)]
     api_url: Option<String>,
+    /// Not read any more: kept only to say so (the token is set on the repository).
     #[serde(default)]
-    token: Option<String>,
+    token: Option<serde_json::Value>,
     #[serde(default)]
-    token_file: Option<String>,
+    token_file: Option<serde_json::Value>,
     /// `https` (default) or `ssh`: how the server reaches the repositories. The API always uses the token.
     #[serde(default)]
     transport: Option<String>,
@@ -98,7 +99,8 @@ struct File {
     hosts: BTreeMap<String, serde_json::Value>,
 }
 
-/// A host with its secrets resolved.
+/// A host. `token` is empty as loaded: it is the access token of the repository the host is
+/// reached for, filled in by [`crate::git::store::host_of`].
 #[derive(Debug, Clone)]
 pub struct Host {
     pub id: String,
@@ -117,8 +119,6 @@ pub struct Host {
     ssh_template: Option<String>,
     pub identity: Identity,
     pub poll_secs: u64,
-    /// Environment variables the token was read from and found empty or missing.
-    pub missing: Vec<String>,
 }
 
 /// The hosts of the file and what is wrong with the entries that were left out.
@@ -126,8 +126,6 @@ pub struct Host {
 pub struct Hosts {
     pub map: BTreeMap<String, Host>,
     pub errors: Vec<String>,
-    /// Environment variables the file refers to (agents never get them).
-    pub vars: Vec<String>,
 }
 
 /// Names agents never see, whatever `git.json` says: the tokens the usual tools read.
@@ -136,36 +134,6 @@ pub const WELL_KNOWN_SECRET_VARS: &[&str] =
 
 fn valid_host_id(id: &str) -> bool {
     genie_core::server_db::valid_slug(id)
-}
-
-/// `${NAME}` references in `text` replaced with the environment; the names, and those unset.
-fn expand(text: &str, vars: &mut Vec<String>, missing: &mut Vec<String>) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(i) = rest.find("${") {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 2..];
-        let Some(j) = after.find('}') else {
-            out.push_str(&rest[i..]);
-            rest = "";
-            break;
-        };
-        let name = &after[..j];
-        if !vars.iter().any(|v| v == name) {
-            vars.push(name.to_string());
-        }
-        match std::env::var(name) {
-            Ok(v) if !v.is_empty() => out.push_str(&v),
-            _ => {
-                if !missing.iter().any(|v| v == name) {
-                    missing.push(name.to_string());
-                }
-            }
-        }
-        rest = &after[j + 1..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Read `<data>/git.json`. A missing file means no hosts; a broken entry is left out and reported.
@@ -188,7 +156,7 @@ pub fn load(data: &Path) -> Hosts {
         }
     };
     for (id, value) in file.hosts {
-        match build(&id, value, &mut out.vars) {
+        match build(&id, value) {
             Ok(h) => {
                 out.map.insert(id, h);
             }
@@ -198,11 +166,16 @@ pub fn load(data: &Path) -> Hosts {
     out
 }
 
-fn build(id: &str, value: serde_json::Value, vars: &mut Vec<String>) -> Result<Host, String> {
+fn build(id: &str, value: serde_json::Value) -> Result<Host, String> {
     if !valid_host_id(id) {
         return Err("the id must be lowercase letters, digits and dashes".into());
     }
     let raw: Raw = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    if raw.token.is_some() || raw.token_file.is_some() {
+        return Err("`token` and `token_file` are no longer read from git.json: set the access token on the repository \
+            (the web: project, repositories, «Токен доступа»; the command line: `genie repos set <name> --token-stdin`)"
+            .into());
+    }
     let url = raw.url.trim().trim_end_matches('/').to_string();
     if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("file://") || url.starts_with('/'))
     {
@@ -216,28 +189,12 @@ fn build(id: &str, value: serde_json::Value, vars: &mut Vec<String>) -> Result<H
     if ssh && raw.ssh_key.is_none() {
         return Err("`transport: ssh` needs `ssh_key` (a private key file)".into());
     }
-    let mut missing = Vec::new();
-    let token = match (&raw.token, &raw.token_file) {
-        (Some(_), Some(_)) => return Err("`token` and `token_file` are alternatives".into()),
-        (Some(t), None) => Some(expand(t, vars, &mut missing)).filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string()),
-        (None, Some(f)) => match std::fs::read_to_string(f) {
-            Ok(t) => Some(t.trim().to_string()).filter(|t| !t.is_empty()),
-            Err(e) => {
-                missing.push(format!("{f}: {e}"));
-                None
-            }
-        },
-        (None, None) => None,
-    };
-    if raw.kind != Kind::Plain && token.is_none() && missing.is_empty() {
-        missing.push("no token: set `token` or `token_file`".into());
-    }
     Ok(Host {
         id: id.to_string(),
         kind: raw.kind,
         url,
         api_url: raw.api_url.map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty()),
-        token,
+        token: None,
         ssh,
         ssh_key: raw.ssh_key,
         ssh_command: raw.ssh_command,
@@ -249,22 +206,15 @@ fn build(id: &str, value: serde_json::Value, vars: &mut Vec<String>) -> Result<H
         ssh_template: raw.clone_urls.ssh,
         identity: raw.identity,
         poll_secs: raw.poll_secs.unwrap_or(60).clamp(10, 3600),
-        missing,
     })
 }
 
-/// Environment variables an agent must not get: the secrets `git.json` refers to and, when
-/// its project has repositories on hosts (`through_proxy`), the tokens the usual tools read
-/// (`GITHUB_TOKEN`…), which would let it reach the host around the proxy. A project with only
-/// a local repository (`genie project add --repo`) keeps its agents' environment as it was.
-pub fn secret_vars(data: &Path, through_proxy: bool) -> Vec<String> {
-    let mut vars = load(data).vars;
-    if through_proxy {
-        vars.extend(WELL_KNOWN_SECRET_VARS.iter().map(|s| s.to_string()));
-    }
-    vars.sort();
-    vars.dedup();
-    vars
+/// Environment variables an agent must not get: when its project has repositories on hosts
+/// (`through_proxy`), the tokens the usual tools read (`GITHUB_TOKEN`…), which would let it
+/// reach the host around the proxy. A project with only a local repository
+/// (`genie project add --repo`) keeps its agents' environment as it was.
+pub fn secret_vars(through_proxy: bool) -> Vec<String> {
+    if through_proxy { WELL_KNOWN_SECRET_VARS.iter().map(|s| s.to_string()).collect() } else { Vec::new() }
 }
 
 impl Host {
@@ -356,11 +306,9 @@ impl Host {
             "url": self.url,
             "apiUrl": self.api_base(),
             "transport": if self.ssh { "ssh" } else { "https" },
-            "hasToken": self.token.is_some(),
             "caCert": self.ca_cert.is_some(),
             "insecureSkipVerify": self.insecure_skip_verify,
             "identity": self.identity,
-            "problems": self.missing,
         })
     }
 }
@@ -385,33 +333,24 @@ mod tests {
     }
 
     #[test]
-    fn hosts_read_secrets_from_the_environment_and_files() {
+    fn a_host_holds_no_secret_and_the_old_token_fields_are_refused_with_a_hint() {
         let d = tempfile::tempdir().unwrap();
-        let tok = d.path().join("tok");
-        std::fs::write(&tok, "file-token\n").unwrap();
-        unsafe { std::env::set_var("GENIE_TEST_GL_TOKEN", "env-token") };
         write(
             d.path(),
-            &format!(
-                r#"{{"hosts": {{
-                "gl": {{"kind": "gitlab", "url": "https://git.acme.io/", "token": "${{GENIE_TEST_GL_TOKEN}}"}},
-                "gh": {{"kind": "github", "url": "https://github.com", "token_file": "{}"}},
-                "lost": {{"kind": "gitlab", "url": "https://x.io", "token": "${{GENIE_TEST_UNSET_TOKEN}}"}}
-            }}}}"#,
-                tok.display()
-            ),
+            r#"{"hosts": {
+                "gl": {"kind": "gitlab", "url": "https://git.acme.io/"},
+                "old": {"kind": "gitlab", "url": "https://x.io", "token": "${GITLAB_TOKEN}"},
+                "older": {"kind": "github", "url": "https://github.com", "token_file": "/run/secrets/gh"}
+            }}"#,
         );
         let h = load(d.path());
-        assert_eq!(h.map["gl"].token.as_deref(), Some("env-token"));
+        assert_eq!(h.map.keys().collect::<Vec<_>>(), ["gl"]);
         assert_eq!(h.map["gl"].url, "https://git.acme.io");
-        assert_eq!(h.map["gh"].token.as_deref(), Some("file-token"));
-        assert_eq!(h.map["lost"].missing, ["GENIE_TEST_UNSET_TOKEN"]);
-        assert!(h.vars.contains(&"GENIE_TEST_GL_TOKEN".to_string()));
-        assert!(secret_vars(d.path(), true).contains(&"GITHUB_TOKEN".to_string()));
-        let referenced = secret_vars(d.path(), false);
-        assert!(referenced.contains(&"GENIE_TEST_GL_TOKEN".to_string()) && !referenced.contains(&"GITHUB_TOKEN".to_string()));
-        let s = h.map["gl"].summary().to_string();
-        assert!(!s.contains("env-token"), "the summary never shows a secret");
+        assert_eq!(h.map["gl"].token, None);
+        assert_eq!(h.errors.len(), 2, "{:?}", h.errors);
+        assert!(h.errors.iter().all(|e| e.contains("no longer read") && e.contains("--token-stdin")), "{:?}", h.errors);
+        assert!(secret_vars(true).contains(&"GITHUB_TOKEN".to_string()));
+        assert!(secret_vars(false).is_empty());
     }
 
     #[test]
@@ -420,8 +359,8 @@ mod tests {
         write(
             d.path(),
             r#"{"hosts": {
-              "a": {"kind": "gitlab", "url": "https://a.io", "token": "x", "tokn": "typo"},
-              "b": {"kind": "gitlab", "url": "https://b.io", "token": "x", "transport": "ssh"},
+              "a": {"kind": "gitlab", "url": "https://a.io", "tokn": "typo"},
+              "b": {"kind": "gitlab", "url": "https://b.io", "transport": "ssh"},
               "C!": {"kind": "plain", "url": "https://c.io"},
               "ok": {"kind": "plain", "url": "https://ok.io"}
             }}"#,
@@ -437,14 +376,15 @@ mod tests {
         write(
             d.path(),
             r#"{"hosts": {
-              "gh": {"kind": "github", "url": "https://github.com", "token": "t"},
-              "ghe": {"kind": "github", "url": "https://ghe.acme.io", "token": "t"},
-              "gl": {"kind": "gitlab", "url": "https://git.acme.io:8443/gitlab", "token": "t"},
-              "ssh": {"kind": "gitlab", "url": "https://git.acme.io", "token": "t", "transport": "ssh", "ssh_key": "/k/id",
+              "gh": {"kind": "github", "url": "https://github.com"},
+              "ghe": {"kind": "github", "url": "https://ghe.acme.io"},
+              "gl": {"kind": "gitlab", "url": "https://git.acme.io:8443/gitlab"},
+              "ssh": {"kind": "gitlab", "url": "https://git.acme.io", "transport": "ssh", "ssh_key": "/k/id",
                       "clone_urls": {"ssh": "ssh://git@{host}:2222/{remote}.git"}}
             }}"#,
         );
-        let h = load(d.path()).map;
+        let mut h = load(d.path()).map;
+        h.get_mut("gl").unwrap().token = Some("t".into());
         assert_eq!(h["gh"].api_base().unwrap(), "https://api.github.com");
         assert_eq!(h["ghe"].api_base().unwrap(), "https://ghe.acme.io/api/v3");
         assert_eq!(h["gl"].api_base().unwrap(), "https://git.acme.io:8443/gitlab/api/v4");

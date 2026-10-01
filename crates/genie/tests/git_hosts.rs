@@ -4,6 +4,7 @@
 
 mod common;
 
+use axum::http::StatusCode;
 use common::fakehost;
 use common::githost::{sh, try_sh, upstream};
 use common::*;
@@ -22,7 +23,7 @@ async fn with_repo(kind: &'static str) -> (Harness, fakehost::FakeHost, std::pat
     let up = upstream(&hosts, "acme/api", &[("README.md", "api\n")]);
     let fake = fakehost::spawn(kind, "secret").await;
     let cfg = json!({ "hosts": { "h": {
-        "kind": kind, "url": fake.url, "token": "secret",
+        "kind": kind, "url": fake.url,
         "clone_urls": { "https": format!("file://{}/{{remote}}.git", hosts.display()) }
     } } });
     std::fs::write(h.dir.path().join("git.json"), cfg.to_string()).unwrap();
@@ -32,7 +33,14 @@ async fn with_repo(kind: &'static str) -> (Harness, fakehost::FakeHost, std::pat
         genie::git::service::add_repo(
             &app,
             "shop",
-            NewRepo { name: "api".into(), host: "h".into(), remote: "acme/api".into(), mount: Some(".".into()), ..Default::default() },
+            NewRepo {
+                name: "api".into(),
+                host: "h".into(),
+                remote: "acme/api".into(),
+                mount: Some(".".into()),
+                token: Some(genie_core::secrets::Secret("secret".into())),
+                ..Default::default()
+            },
         )
         .unwrap()
     })
@@ -47,7 +55,6 @@ async fn the_check_says_what_the_token_can_do_and_what_is_left_unprotected() {
         let (h, fake, up) = with_repo(kind).await;
         let lines = check::host(&h.app, "h").await;
         assert!(!check::failed(&lines), "{kind}: {}", joined(&lines));
-        assert!(joined(&lines).contains("genie-bot"), "{}", joined(&lines));
 
         let lines = check::repo(&h.app, "shop", "api", false).await;
         let text = joined(&lines);
@@ -66,13 +73,11 @@ async fn the_check_says_what_the_token_can_do_and_what_is_left_unprotected() {
         let (_, branches) = try_sh(&up, &[], &["for-each-ref", "--format=%(refname)", "refs/heads"]);
         assert_eq!(branches.trim(), "refs/heads/main", "the probe branch is gone");
 
-        // A wrong token and a repository the host does not know.
-        let cfg = std::fs::read_to_string(h.dir.path().join("git.json")).unwrap().replace("\"secret\"", "\"wrong\"");
-        std::fs::write(h.dir.path().join("git.json"), cfg).unwrap();
-        let lines = check::host(&h.app, "h").await;
-        assert!(check::failed(&lines) && joined(&lines).contains("refused the token"), "{}", joined(&lines));
+        // A wrong token is refused by the host.
+        let (h2, wrong) = (h.app.clone(), "wrong".to_string());
+        tokio::task::spawn_blocking(move || h2.with_server(|db| db.set_repo_token("shop", "api", &wrong))).await.unwrap().unwrap();
         let lines = check::repo(&h.app, "shop", "api", false).await;
-        assert!(check::failed(&lines), "{}", joined(&lines));
+        assert!(check::failed(&lines) && joined(&lines).contains("refused the token"), "{}", joined(&lines));
     }
     let h = Harness::new();
     assert!(check::failed(&check::host(&h.app, "nope").await));
@@ -145,7 +150,7 @@ async fn doctor_reports_hosts_and_repositories_that_cannot_work() {
         h.dir.path().join("git.json"),
         r#"{"hosts": {
             "good": {"kind": "plain", "url": "https://git.example.test"},
-            "nosecret": {"kind": "gitlab", "url": "https://git.example.test", "token": "${GENIE_TEST_DOCTOR_UNSET}"},
+            "oldstyle": {"kind": "gitlab", "url": "https://git.example.test", "token": "${GITLAB_TOKEN}"},
             "typo": {"kind": "gitlab", "url": "https://x.io", "tokn": "x"}
         }}"#,
     )
@@ -182,8 +187,68 @@ async fn doctor_reports_hosts_and_repositories_that_cannot_work() {
     let git: Vec<String> = checks.iter().filter(|c| c.area == "git").map(|c| format!("{:?} {}", c.level, c.text)).collect();
     let all = git.join("\n");
     assert!(all.contains("Fail git.json: host typo"), "{all}");
-    assert!(all.contains("Fail host nosecret: secret missing: GENIE_TEST_DOCTOR_UNSET"), "{all}");
+    assert!(all.contains("Fail git.json: host oldstyle:") && all.contains("no longer read"), "{all}");
     assert!(all.contains("Fail shop: repository lost lives on host gone"), "{all}");
     assert!(all.contains("Fail shop: repository bad: repository bad") || all.contains("Fail shop: repository bad:"), "{all}");
     assert!(all.contains("Ok host good (plain)"), "{all}");
+}
+
+/// The token of a repository lives sealed on the server, wins over the host's, and is never shown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repository_brings_its_own_token_which_is_sealed_and_never_shown() {
+    let h = Harness::new();
+    let hosts = h.dir.path().join("hosts");
+    std::fs::create_dir_all(&hosts).unwrap();
+    upstream(&hosts, "acme/api", &[("README.md", "api\n")]);
+    let fake = fakehost::spawn("gitlab", "pat-0123456789abcdef").await;
+    let cfg = json!({ "hosts": { "h": {
+        "kind": "gitlab", "url": fake.url,
+        "clone_urls": { "https": format!("file://{}/{{remote}}.git", hosts.display()) }
+    } } });
+    std::fs::write(h.dir.path().join("git.json"), cfg.to_string()).unwrap();
+    h.project("shop");
+
+    let add = |token: Option<&str>| {
+        let mut body = json!({ "name": "api", "host": "h", "remote": "acme/api" });
+        if let Some(t) = token {
+            body["token"] = json!(t);
+        }
+        body
+    };
+    // Without any token the check says so (and the doctor warns).
+    let (s, b, _) = call(&h.router, "POST", "/api/repos").json(add(None)).header("x-genie-project", "shop").send().await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    assert_eq!(b["token"], json!({ "set": false }));
+    let text = joined(&check::repo(&h.app, "shop", "api", false).await);
+    assert!(text.contains("fail the repository has no token"), "{text}");
+    let cfg = genie::config::Config::load(h.dir.path()).unwrap();
+    let agents = genie::agent_config::AgentConfig::load(h.dir.path(), &cfg, None);
+    let doctor: Vec<String> = genie::doctor::run(h.dir.path(), &cfg, &agents, None).iter().map(|c| c.text.clone()).collect();
+    assert!(doctor.iter().any(|t| t.contains("repository api has no access token")), "{doctor:?}");
+
+    // A wrong token is refused by the host; the right one makes the repository work.
+    let patch = |token: &str| json!({ "token": token });
+    let (s, b, _) =
+        call(&h.router, "PATCH", "/api/repos/api").json(patch("pat-wrong-wrong-wrong")).header("x-genie-project", "shop").send().await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert!(joined(&check::repo(&h.app, "shop", "api", false).await).contains("fail"), "a wrong token fails");
+    let (s, b, _) =
+        call(&h.router, "PATCH", "/api/repos/api").json(patch("  pat-0123456789abcdef\n")).header("x-genie-project", "shop").send().await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["token"]["set"], json!(true));
+    assert_eq!(b["token"]["hint"], json!("…cdef"));
+    assert!(!b.to_string().contains("pat-0123456789abcdef"), "the API never returns the token: {b}");
+    let text = joined(&check::repo(&h.app, "shop", "api", false).await);
+    assert!(!text.contains("fail") && text.contains("the token can push"), "{text}");
+
+    // Listed and stored without the value.
+    let (_, list, _) = call(&h.router, "GET", "/api/repos").header("x-genie-project", "shop").send().await;
+    assert!(!list.to_string().contains("pat-0123456789abcdef"), "{list}");
+    let db = std::fs::read(h.dir.path().join("server.db")).unwrap();
+    assert!(!db.windows(20).any(|w| w == b"pat-0123456789abcdef"), "sealed in the database file");
+
+    // An empty token removes it again.
+    let (s, b, _) = call(&h.router, "PATCH", "/api/repos/api").json(patch("")).header("x-genie-project", "shop").send().await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["token"], json!({ "set": false }));
 }

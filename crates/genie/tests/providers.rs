@@ -11,11 +11,14 @@ use genie::git::provider::{Api, ApiError, Ci, CrState, OpenRequest};
 
 fn host(kind: &str, url: &str, token: &str) -> (tempfile::TempDir, hosts::Host) {
     let dir = tempfile::tempdir().unwrap();
-    let cfg = serde_json::json!({ "hosts": { "h": { "kind": kind, "url": url, "token": token } } });
+    let cfg = serde_json::json!({ "hosts": { "h": { "kind": kind, "url": url } } });
     std::fs::write(dir.path().join("git.json"), cfg.to_string()).unwrap();
     let h = hosts::load(dir.path());
     assert!(h.errors.is_empty(), "{:?}", h.errors);
-    (dir, h.map["h"].clone())
+    // The token is the repository's: what `store::host_of` puts on the host.
+    let mut host = h.map["h"].clone();
+    host.token = Some(token).filter(|t| !t.is_empty()).map(str::to_string);
+    (dir, host)
 }
 
 fn req(head: &str, draft: bool) -> OpenRequest {
@@ -108,12 +111,12 @@ async fn gitlab_provider() {
 }
 
 #[tokio::test]
-async fn a_plain_host_has_no_request_api_and_a_host_without_token_says_so() {
+async fn a_plain_host_has_no_request_api_and_a_host_without_token_cannot_call_it() {
     let (_d, plain) = host("plain", "https://git.example", "");
     assert!(matches!(Api::new(&plain), Err(ApiError::Unsupported(_))));
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("git.json"), r#"{"hosts": {"h": {"kind": "gitlab", "url": "https://git.example"}}}"#).unwrap();
     let h = hosts::load(dir.path()).map["h"].clone();
-    assert!(!h.missing.is_empty(), "doctor reports the missing token");
+    assert!(h.token.is_none(), "a host holds no token: its repositories bring their own");
     assert!(matches!(Api::new(&h), Err(ApiError::Auth(_))));
 }
