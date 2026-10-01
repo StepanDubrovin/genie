@@ -1,49 +1,72 @@
-# genie
+<p align="center">
+  <img src="docs/assets/hero.svg" alt="genie: tasks, knowledge and teams of AI agents on one self-hosted server" width="100%">
+</p>
 
-**Командный сервис задач, знаний и команд ИИ-агентов.** Люди ставят задачи в веб, Telegram или почту; оркестратор уточняет их и собирает под каждую фокус-команду агентов (аналитик, исполнитель, ревьюер, тестировщик, документатор — у каждого своя модель); команда работает в своём git worktree или, для проектов без кода, в своём каталоге, а когда нужно решение человека — спрашивает ответственного. Знания — Obsidian-совместимое хранилище в git, которое правят и люди, и агенты.
+**genie** is a self-hosted server for tasks, knowledge and teams of AI agents. People file tasks from the web UI, Telegram or email. An orchestrator clarifies each task and assembles a focused team for it: analyst, executor, reviewer, tester, documenter, each on its own model. The team works in its own git worktree (or a plain directory for projects without code) and asks the responsible person when a decision needs a human.
 
-- **Сервер** `genie serve` (Rust): веб-интерфейс в духе Linear, API, живые сессии агентов на [pi](https://pi.dev) в песочнице bubblewrap, роли и шаблоны команд, шлюз MCP, автоматизации, уведомления в веб, Telegram и почту, база знаний с синхронизацией в git.
-- **Люди и проекты**: несколько проектов, роли в проекте, ответственные за задачи, упоминания `@login`, приглашения ссылкой; автономность оркестратора на проект (`autonomous`, `assisted`, `manual`).
-- **Надёжность**: перезапуск ничего не теряет, резервная копия на ходу, `genie doctor` перед запуском, юниты systemd.
-- **Эпики**: большую работу оркестратор оформляет эпиком — цель, критерии успеха, дорожная карта и общие артефакты (требования, глоссарий, решения) живут в эпике; его задачи видят цель и артефакты, эпик сам считает прогресс.
-- **Картинки**: артефакт-картинка (PNG, JPEG, GIF, WebP) получает миниатюру и лайтбокс с зумом; в чате команды — `!image[artifact:G-7/3]` или `!image[docs/shot.png]` (файл рабочей копии команды), внешние URL не поддерживаются.
+## Features
 
-## Быстрый старт
+- **Web UI and API.** A Linear-style board for tasks, epics, teams, docs and automations, plus a CLI (`genie <object> <action>`) that covers everything the UI does.
+- **Agent teams.** Live agent sessions on [pi](https://pi.dev) in a bubblewrap sandbox, configurable roles and team templates, an MCP gateway so other agents (Claude Code, Codex) can use genie's tools.
+- **Projects and people.** Multiple projects, per-project roles, task owners, `@login` mentions, invite links. Orchestrator autonomy per project: `autonomous`, `assisted` or `manual`.
+- **Epics.** Large work becomes an epic with a goal, success criteria, a roadmap and shared artifacts (requirements, glossary, decisions). Its tasks see all of it, and the epic tracks its own progress.
+- **Knowledge base.** An Obsidian-compatible vault in git, edited by people and agents alike.
+- **Notifications and automations.** Web, Telegram and email delivery, with an automation engine on top.
+- **Reliability.** Restarts lose nothing, hot backups, `genie doctor` preflight checks, systemd units.
+
+## Quick start
+
+### Docker
+
+One image with genie, the web UI, pi and git:
 
 ```bash
-npm install && npm run build:web && cargo build --release -p genie   # веб встраивается в бинарь
-npm install -g @earendil-works/pi-coding-agent && pi          # pi и /login у провайдеров моделей
-./target/release/genie serve                                    # http://127.0.0.1:7420
+cp .env.example .env
+docker compose up -d --build
+echo 'your-password' | docker compose exec -T genie genie user add admin --admin --password-stdin
 ```
 
-Откройте веб на этой же машине: сервер без проектов предложит создать первый, на странице «Проект и люди» — учётную запись администратора и ссылки-приглашения для коллег. `./target/release/genie doctor` скажет, чего ещё не хватает (модели ролей, песочница, каналы, сеть).
+Open http://127.0.0.1:7420. Volumes, repositories, model keys, git access, proxies, the prebuilt GHCR image and backups are covered in [docs/platform/docker.md](docs/platform/docker.md).
 
-**В Docker** (сервер одним образом: genie + веб + pi + git):
+### From source
+
+Requires Rust (stable), Node 23.6+ and git.
 
 ```bash
-cp .env.example .env && docker compose up -d --build
-echo 'пароль' | docker compose exec -T genie genie user add admin --admin --password-stdin
+npm install && npm run build:web && cargo build --release -p genie   # the web UI is embedded into the binary
+npm install -g @earendil-works/pi-coding-agent && pi                 # install pi, then /login to your model providers
+./target/release/genie serve                                         # http://127.0.0.1:7420
 ```
 
-Тома, репозитории, ключи моделей, git-доступ, прокси, готовый образ из GHCR и бэкапы — [docs/platform/docker.md](docs/platform/docker.md).
+On first launch the server offers to create a project, and the "Project & people" page sets up the admin account and invite links. Run `./target/release/genie doctor` to see what is still missing: role models, sandbox, channels, network.
 
-## Документация
+## Documentation
 
-- [Запуск и эксплуатация](docs/platform/getting-started.md) — люди, агенты, песочница, роли и шаблоны, Telegram и почта, знания и Obsidian, резервные копии, systemd, `genie doctor`.
-- [Пилот](docs/platform/pilot.md) — подготовка, репетиция, первый день, что измерять.
-- [Видение](docs/platform/vision.md), [бэкенд](docs/platform/backend.md), [роли и команды](docs/platform/agent-roles-and-teams.md), [шина агентов](docs/platform/agent-bus.md), [база знаний](docs/platform/knowledge-vault.md), [автоматизации](docs/platform/automations.md), [решения](docs/platform/decisions.md).
-- [CHANGELOG](CHANGELOG.md).
+The docs are in Russian.
 
-## Разработка
+| Topic | Link |
+|---|---|
+| Running and operating the server | [getting-started.md](docs/platform/getting-started.md) |
+| Docker deployment | [docker.md](docs/platform/docker.md) |
+| Running a pilot with a team | [pilot.md](docs/platform/pilot.md) |
+| Vision and architecture | [vision.md](docs/platform/vision.md), [backend.md](docs/platform/backend.md) |
+| Roles and teams | [agent-roles-and-teams.md](docs/platform/agent-roles-and-teams.md), [agent-bus.md](docs/platform/agent-bus.md) |
+| Knowledge vault | [knowledge-vault.md](docs/platform/knowledge-vault.md) |
+| Automations | [automations.md](docs/platform/automations.md) |
+| Decisions | [decisions.md](docs/platform/decisions.md) |
+| Changes | [CHANGELOG.md](CHANGELOG.md) |
+
+## Development
 
 ```bash
-cargo test                   # ядро, API, рантайм агентов (в том числе живые сессии pi и песочница), сценарии владельца
+cargo test                                                   # core, API, agent runtime, sandbox, owner scenarios
 cargo clippy --all-targets -- -D warnings && cargo fmt --all --check
 npm test && npm run typecheck && npm run build:web
-npm run dev:web              # Vite с проксированием /api на сервер (порт 7420)
-# Типы API для веба генерируются из Rust-структур: после их изменения — cargo test и коммит web/src/shared/api/generated.
+npm run dev:web                                              # Vite dev server, proxies /api to port 7420
 ```
 
-## Переход с расширения pi
+Web API types are generated from the Rust structs. After changing them, run `cargo test` and commit `web/src/shared/api/generated`.
 
-Первая версия genie — расширение pi с локальным трекером (`pi install …/genie`, `/genie` в pi, `genie web`) — удалена: genie теперь сервер. Задачи репозитория переезжают на месте: `genie project add shop --repo ~/projects/my-repo` подключает его `.genie/` со всеми задачами и номерами. Ваша сессия pi становится оркестратором проекта командой `genie orchestrate`, другие агенты (Claude Code, Codex…) получают инструменты genie через MCP-сервер. По шагам — [docs/platform/getting-started.md](docs/platform/getting-started.md#переход-с-расширения-pi).
+## Migrating from the pi extension
+
+The first version of genie, a pi extension with a local tracker, has been removed. Existing repositories move over in place: `genie project add shop --repo ~/projects/my-repo` picks up their `.genie/` with all tasks and numbers. `genie orchestrate` turns your pi session into the project orchestrator. Step by step: [getting-started.md](docs/platform/getting-started.md#переход-с-расширения-pi).
