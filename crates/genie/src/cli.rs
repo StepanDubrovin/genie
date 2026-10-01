@@ -224,7 +224,8 @@ pub async fn run() -> Result<(), String> {
             }
         }
         Command::Stats { days } => {
-            let stats = crate::stats::collect(&data, days, project.as_deref())?;
+            let cfg = Config::load(&data)?;
+            let stats = crate::stats::collect(&data, days, project.as_deref(), &cfg.model_prices)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&stats).map_err(|e| e.to_string())?);
             } else {

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import { Link, useParams } from "react-router";
 import { Avatar, displayName, ROLE_TITLE_RU } from "@/entities/member";
 import { type LiveSession, type Mail, type MailLevel, MessageText, type PeekMessage, type TeamDetail, usePeek, useRestartMember, useSendMail, useSetPaused, useTeam } from "@/entities/team";
+import { SpendText, useChatUsage } from "@/entities/usage";
 import { useTask } from "@/entities/task";
 import { ModelMenu } from "@/features/agent-model";
 import { IDEA_TEMPLATE, IdeaPlan } from "@/features/shape-idea";
@@ -584,6 +585,7 @@ function AgentInfo({ member, team, live, st, queued }: { member: Member; team: T
             <dd>{live.contextTokens >= 1000 ? `${Math.round(live.contextTokens / 1000)} тыс. токенов` : `${live.contextTokens} токенов`}</dd>
           </>
         )}
+        <ChatSpend team={team.id} member={member.name} />
         {live && (
           <>
             <dt>Прогонов</dt>
@@ -611,6 +613,20 @@ function AgentInfo({ member, team, live, st, queued }: { member: Member; team: T
       </section>
       <p className="ac-help">Поправка приходит агенту письмом в его разговор. «Прервать шаг» останавливает текущую команду; «на следующем шаге» ждёт, пока он закончит.</p>
     </div>
+  );
+}
+
+/** What the agent's whole chat spent; nothing until it spends. */
+function ChatSpend({ team, member }: { team: string; member: string }) {
+  const spend = useChatUsage(team, member).data?.spend;
+  if (!spend?.calls) return null;
+  return (
+    <>
+      <dt>Потрачено</dt>
+      <dd>
+        <SpendText spend={spend} />
+      </dd>
+    </>
   );
 }
 

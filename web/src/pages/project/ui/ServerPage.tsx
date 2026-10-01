@@ -7,7 +7,6 @@ import { useState } from "react";
 import { Link, NavLink, useParams } from "react-router";
 import {
   AUTONOMY,
-  type DayStats,
   DOCTOR_AREA,
   type DoctorCheck,
   doctorSummary,
@@ -30,7 +29,9 @@ import {
 import { useSession } from "@/entities/session";
 import { request } from "@/shared/api";
 import { Icon } from "@/shared/ui";
+import { BarChart } from "./BarChart.tsx";
 import { Menu } from "./Menu.tsx";
+import { Costs } from "./ServerCosts.tsx";
 import { useAct } from "./ProjectPage.tsx";
 import "@/shared/ui/settings.css";
 import "./project.css";
@@ -193,23 +194,11 @@ function Tile({ label, value, sub, bad }: { label: string; value: number | strin
   );
 }
 
-const DAYS_SHORT = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-
-/** A column's caption: the weekday over a week, every fifth date over a month. */
-function dayLabel(day: string, i: number, count: number): string {
-  const d = new Date(`${day}T00:00:00Z`);
-  if (count <= 10) return DAYS_SHORT[d.getUTCDay()];
-  return i % 5 === 0 || i === count - 1 ? String(d.getUTCDate()) : "";
-}
-
-function dayTitle(day: string): string {
-  return new Date(`${day}T00:00:00Z`).toLocaleDateString("ru-RU", { day: "numeric", month: "long", weekday: "short", timeZone: "UTC" });
-}
-
 /** How the work went over a week or a month (`genie stats`): numbers, two charts by day, then per project. */
 function Statistics() {
   const [days, setDays] = useState(7);
   const [only, setOnly] = useState("");
+  const [view, setView] = useState<"work" | "cost">("work");
   const stats = useStats(days);
   const all = stats.data?.projects ?? [];
   const list = only ? all.filter((p) => p.project === only) : all;
@@ -220,7 +209,14 @@ function Statistics() {
       <div className="sv-top">
         <div className="st-head">
           <h2>Статистика</h2>
-          <p>Как шла работа: задачи, вопросы агентов людям, запуски агентов.</p>
+          <p>{view === "work" ? "Как шла работа: задачи, вопросы агентов людям, запуски агентов." : "Сколько стоила работа агентов: по моделям, проектам, эпикам, задачам и чатам."}</p>
+        </div>
+        <div className="seg" role="group" aria-label="Что показать">
+          {(["work", "cost"] as const).map((v) => (
+            <button key={v} type="button" className={v === view ? "on" : ""} aria-pressed={v === view} onClick={() => setView(v)}>
+              {v === "work" ? "Работа" : "Расходы"}
+            </button>
+          ))}
         </div>
         <label className="sr-only" htmlFor="sv-project">
           Проект
@@ -245,6 +241,8 @@ function Statistics() {
         <p className="muted">Загрузка…</p>
       ) : stats.isError ? (
         <p className="muted">{stats.error.message}</p>
+      ) : view === "cost" ? (
+        <Costs list={list} days={days} />
       ) : (
         <>
           <div className="sv-tiles">
@@ -279,73 +277,6 @@ function Statistics() {
         </>
       )}
     </div>
-  );
-}
-
-type Series = { key: string; label: string; color: string; value?: (d: DayStats) => number };
-
-/**
- * Bars by day: side by side, or stacked (bottom to top in the order given). Hovering a day
- * shows its numbers; the legend names every series, so color never carries meaning alone.
- */
-function BarChart({ title, days, series, stacked }: { title: string; days: DayStats[]; series: Series[]; stacked?: boolean }) {
-  const [hover, setHover] = useState<number>();
-  const val = (s: Series, d: DayStats) => (s.value ? s.value(d) : (d[s.key as keyof DayStats] as number));
-  const top = Math.max(1, ...days.map((d) => (stacked ? series.reduce((n, s) => n + val(s, d), 0) : Math.max(...series.map((s) => val(s, d))))));
-  const totals = series.map((s) => days.reduce((n, d) => n + val(s, d), 0));
-  const h = hover === undefined ? undefined : days[hover];
-  return (
-    <figure className="st-card sv-chart">
-      <figcaption>
-        <b>{title}</b>
-        <span className="sv-legend">
-          {series.map((s, i) => (
-            <span key={s.key}>
-              <i style={{ background: s.color }} />
-              {s.label} <em>{totals[i]}</em>
-            </span>
-          ))}
-        </span>
-      </figcaption>
-      <div className="sv-plot-wrap">
-        <span className="sv-max" aria-hidden="true">
-          {top}
-        </span>
-        <div
-          className={`sv-plot${stacked ? " stacked" : ""}${days.length > 10 ? " dense" : ""}`}
-          role="img"
-          aria-label={`${title}: ${series.map((s, i) => `${s.label} ${totals[i]}`).join(", ")}`}
-          onMouseLeave={() => setHover(undefined)}
-        >
-          {days.map((d, i) => (
-            <div key={d.day} className={`sv-col${hover === i ? " on" : ""}`} onMouseEnter={() => setHover(i)}>
-              <div className="sv-bars">
-                {(stacked ? [...series].reverse() : series).map((s) => {
-                  const v = val(s, d);
-                  return <span key={s.key} style={{ height: `${(v / top) * 100}%`, background: s.color, minHeight: v ? 2 : 0 }} />;
-                })}
-              </div>
-            </div>
-          ))}
-          {h && (
-            <div className="sv-tip" style={{ left: `${((hover! + 0.5) / days.length) * 100}%` }}>
-              <b>{dayTitle(h.day)}</b>
-              {series.map((s) => (
-                <span key={s.key}>
-                  <i style={{ background: s.color }} />
-                  {s.label}: {val(s, h)}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-      <div className="sv-axis" aria-hidden="true">
-        {days.map((d, i) => (
-          <span key={d.day}>{dayLabel(d.day, i, days.length)}</span>
-        ))}
-      </div>
-    </figure>
   );
 }
 

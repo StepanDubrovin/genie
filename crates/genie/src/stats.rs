@@ -1,17 +1,20 @@
 //! What happened on the server over a period, for reviewing a pilot: the tasks
 //! people brought and closed and how long they took, how often agents needed a
 //! person's decision and how fast people answered, how often work came back from
-//! review, how the agents' runs went. Read from the projects' journals and the
+//! review, how the agents' runs went, and what the agents' models cost (by
+//! model, epic, task and chat, with `modelPrices`). Read from the projects' journals and the
 //! server database; `genie stats` prints it, `GET /api/stats` gives it to the
 //! server's admins.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use genie_core::server_db::ServerDb;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
+
+use crate::spend::{self, Item, Prices, Spend, TaskIndex};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,7 +55,26 @@ pub struct ProjectStats {
     /// The same period day by day (UTC dates, oldest first, every day present), for charts.
     #[serde(default)]
     pub daily: Vec<DayStats>,
+    /// What the agents' models cost in the period.
+    #[serde(default)]
+    pub usage: Usage,
 }
+
+/// What the agents' models spent in a project over the period.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    pub spend: Spend,
+    /// Every epic, then `""` (tasks outside epics) and `"-"` (work on no task), most expensive first.
+    pub epics: Vec<Item>,
+    /// The most expensive tasks.
+    pub tasks: Vec<Item>,
+    /// The most expensive chats.
+    pub chats: Vec<Item>,
+}
+
+/// Tasks and chats listed in the statistics, at most.
+const TOP: usize = 20;
 
 /// One day of a project's period.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -64,6 +86,14 @@ pub struct DayStats {
     pub done: usize,
     pub runs: usize,
     pub runs_failed: usize,
+    /// Dollars spent (models with a price) and tokens (all models).
+    #[serde(default)]
+    pub cost: f64,
+    #[serde(default)]
+    pub tokens: u64,
+    /// Dollars by model (`provider/model`), models with a price only.
+    #[serde(default)]
+    pub cost_by_model: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +223,34 @@ fn server_stats(p: &mut ProjectStats, conn: &Connection, since: &str) -> rusqlit
     Ok(())
 }
 
+fn usage_stats(p: &mut ProjectStats, db: &Path, since: &str, prices: &Prices) -> rusqlite::Result<()> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    let rows = genie_core::usage::usage_since(&conn, &since[..10])?;
+    let tasks = TaskIndex::load(&conn)?;
+    for r in &rows {
+        if let Some(d) = p.daily.iter_mut().find(|d| d.day == r.day) {
+            d.tokens += r.tokens.total();
+            if let Some(price) = crate::config::price_of(prices, &r.model) {
+                let c = price.cost(&r.tokens);
+                d.cost += c;
+                *d.cost_by_model.entry(r.model.clone()).or_default() += c;
+            }
+        }
+    }
+    for d in &mut p.daily {
+        d.cost = (d.cost * 10_000.0).round() / 10_000.0;
+        d.cost_by_model.values_mut().for_each(|c| *c = (*c * 10_000.0).round() / 10_000.0);
+    }
+    p.usage = Usage {
+        spend: Spend::of(prices, &rows),
+        epics: spend::by_epic(prices, &rows, &tasks),
+        tasks: spend::by_task(prices, &rows, &tasks, TOP),
+        chats: spend::by_chat(prices, &rows, &tasks, TOP),
+    };
+    Ok(())
+}
+
 /// Every day from `since` to `now`, both included, with nothing counted yet.
 fn empty_days(since: DateTime<Utc>, now: DateTime<Utc>) -> Vec<DayStats> {
     let mut out = Vec::new();
@@ -207,8 +265,9 @@ fn empty_days(since: DateTime<Utc>, now: DateTime<Utc>) -> Vec<DayStats> {
     out
 }
 
-/// The statistics of every project (or one) over the last `days` days.
-pub fn collect(data: &Path, days: i64, only: Option<&str>) -> Result<Stats, String> {
+/// The statistics of every project (or one) over the last `days` days, the
+/// models' tokens priced with `prices`.
+pub fn collect(data: &Path, days: i64, only: Option<&str>, prices: &Prices) -> Result<Stats, String> {
     let now = Utc::now();
     let since_at = now - chrono::Duration::days(days.max(1));
     let since = since_at.to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -223,6 +282,7 @@ pub fn collect(data: &Path, days: i64, only: Option<&str>) -> Result<Stats, Stri
             ProjectStats { project: pr.slug.clone(), name: pr.name.clone(), daily: empty_days(since_at, now), ..Default::default() };
         tracker_stats(&mut p, &Path::new(&pr.tracker_dir).join("genie.db"), &since).map_err(|e| format!("{}: {e}", pr.slug))?;
         server_stats(&mut p, &raw, &since).map_err(|e| format!("{}: {e}", pr.slug))?;
+        usage_stats(&mut p, &Path::new(&pr.tracker_dir).join("genie.db"), &since, prices).map_err(|e| format!("{}: {e}", pr.slug))?;
         projects.push(p);
     }
     if let Some(o) = only
@@ -239,6 +299,19 @@ fn h(v: Option<f64>) -> String {
         Some(x) if x < 48.0 => format!("{x:.1} h"),
         Some(x) => format!("{:.1} d", x / 24.0),
     }
+}
+
+fn tokens(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1e6),
+        n if n >= 1_000 => format!("{:.0}k", n as f64 / 1e3),
+        n => n.to_string(),
+    }
+}
+
+fn spent(s: &Spend) -> String {
+    let unpriced = if s.unpriced_tokens > 0 { format!(" ({} of them without a price)", tokens(s.unpriced_tokens)) } else { String::new() };
+    format!("${:.2}, {} tokens{unpriced}", s.cost, tokens(s.tokens.total()))
 }
 
 /// The statistics as text for the terminal.
@@ -266,9 +339,24 @@ pub fn render(s: &Stats) -> String {
             p.proposals, p.proposals_approved, p.proposals_rejected
         ));
         out.push(format!("  people       {}", if p.people.is_empty() { "—".to_string() } else { p.people.join(", ") }));
+        out.push(format!("  spent        {}", spent(&p.usage.spend)));
+        for m in &p.usage.spend.models {
+            let cost = m.cost.map_or("no price".to_string(), |c| format!("${c:.2}"));
+            out.push(format!("    {:<30} {cost}, {} tokens", m.model, tokens(m.tokens.total())));
+        }
+        for e in p.usage.epics.iter().filter(|e| !e.id.is_empty() && e.id != "-").take(5) {
+            out.push(format!("    epic {} {}: {}", e.id, e.title, spent(&e.spend)));
+        }
+    }
+    let mut all = Spend::default();
+    for p in &s.projects {
+        all.calls += p.usage.spend.calls;
+        all.tokens.add(&p.usage.spend.tokens);
+        all.cost += p.usage.spend.cost;
+        all.unpriced_tokens += p.usage.spend.unpriced_tokens;
     }
     out.push(String::new());
-    out.push(format!("{} active people across {} project(s)", everyone.len(), s.projects.len()));
+    out.push(format!("{} active people across {} project(s); spent {}", everyone.len(), s.projects.len(), spent(&all)));
     out.join("\n")
 }
 

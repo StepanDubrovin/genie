@@ -161,6 +161,7 @@ async fn live(pi: PathBuf, tweak: impl FnOnce(&mut Config)) -> Live {
         g(&["--append-system-prompt", "{promptFile}"]),
         g(&["--exclude-tools", "{readonlyTools}"]),
         g(&["-e", "{extension}"]),
+        g(&["-e", "{guard}"]),
         g(&["--no-skills"]),
     ];
     let genie_dir = PathBuf::from(env!("CARGO_BIN_EXE_genie")).parent().unwrap().to_string_lossy().into_owned();
@@ -411,6 +412,19 @@ async fn mail_reaches_live_agents_between_steps_and_on_interrupt() {
     assert!(request_with(log, "executor", "PING-paused").is_none());
     assert!(post("/agents/SHOP-1/bender/resume").await.unwrap().status().is_success());
     until("mail after resuming", 30, || request_with(log, "executor", "PING-paused")).await;
+
+    // The guard reported every model response: the chat's tokens, on its task.
+    let rows = until("usage reported", 10, || {
+        let rows = app.with_tracker("shop", |t| t.usage_of_agent("SHOP-1/bender")).unwrap();
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+    assert!(rows.iter().all(|r| r.task.as_deref() == Some("SHOP-1") && r.model.ends_with("executor")), "{rows:?}");
+    let calls: u64 = rows.iter().map(|r| r.calls).sum();
+    assert_eq!(rows.iter().map(|r| r.tokens.input).sum::<u64>(), 10 * calls, "10 prompt tokens a response: {rows:?}");
+    let v: Value = http.get(format!("{base}/agents/SHOP-1/bender/usage")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["spend"]["tokens"]["output"].as_u64(), v["spend"]["calls"].as_u64().map(|n| 5 * n), "{v}");
+    assert_eq!(v["spend"]["unpricedTokens"].as_u64(), v["spend"]["calls"].as_u64().map(|n| 15 * n), "no price set: {v}");
 }
 
 fn orchestrator_mail(app: &App, needle: &str) -> Option<()> {

@@ -27,10 +27,12 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/agent/mail/{id}", get(mail))
         .route("/agent/ask", post(ask))
         .route("/agent/reply", post(reply))
+        .route("/agent/usage", post(usage))
         .route("/agents", get(board))
         .route("/agents/{team}/{member}/peek", get(peek))
         .route("/agents/{team}/{member}/pause", post(pause))
         .route("/agents/{team}/{member}/resume", post(resume))
+        .route("/agents/{team}/{member}/usage", get(chat_usage))
 }
 
 /// The mailbox of the calling agent: `(team, recipient)`.
@@ -295,6 +297,61 @@ fn key_of(project: &str, team: &str, member: &str) -> AgentKey {
     } else {
         AgentKey::Member { project: project.to_string(), team: team.to_string(), member: member.to_string() }
     }
+}
+
+#[derive(Deserialize)]
+struct UsageBody {
+    reports: Vec<UsageReport>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageReport {
+    model: String,
+    #[serde(flatten)]
+    tokens: genie_core::usage::Tokens,
+}
+
+/// The calling agent's model responses (reported by the genie guard extension):
+/// added to its chat and the task it works on.
+async fn usage(State(app): State<Arc<App>>, ctx: Ctx, Json(b): Json<UsageBody>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    if !access.agent {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "only agents report their usage"));
+    }
+    let n = b.reports.len();
+    app.blocking(move |app| {
+        let slug = &access.project;
+        let (agent, task) = if access.actor.role == Role::Orchestrator {
+            (ORCHESTRATOR.to_string(), None)
+        } else if let Some(team) = &access.agent_team {
+            let task = app.with_tracker(slug, |t| t.bus().get(team)).ok().map(|t| t.task);
+            (format!("{team}/{}", access.actor.name), task)
+        } else if let Some(job) = access.agent_job {
+            (format!("job/{job}"), app.with_server(|db| db.job(job)).ok().and_then(|j| j.task))
+        } else {
+            (access.actor.name.clone(), None)
+        };
+        app.with_tracker(slug, |t| {
+            for r in b.reports.iter().filter(|r| r.tokens.total() > 0) {
+                let model = r.model.trim();
+                let model = if model.is_empty() { "unknown" } else { model };
+                t.record_usage(&agent, task.as_deref(), &model.chars().take(200).collect::<String>(), &r.tokens)?;
+            }
+            Ok(())
+        })
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "recorded": n })))
+}
+
+/// What one chat (an agent's whole conversation) spent, by model.
+async fn chat_usage(State(app): State<Arc<App>>, ctx: Ctx, Path((team, member)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let label = key_of(&access.project, &team, &member).label();
+    let slug = access.project.clone();
+    let rows = app.blocking(move |app| app.with_tracker(&slug, |t| t.usage_of_agent(&label))).await?;
+    Ok(Json(json!({ "spend": crate::spend::Spend::of(&app.cfg.model_prices, &rows) })))
 }
 
 /// What an agent is doing now; `deep` adds the latest messages of its conversation

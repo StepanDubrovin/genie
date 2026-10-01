@@ -529,6 +529,8 @@ a.epic-chip:hover { border-color: var(--violet); color: var(--text); }
 .etask .tt .w { color: var(--muted); margin-left: 8px; font-size: 12px; }
 .etask .st { font-size: 12px; color: var(--muted); text-align: right; }
 .etask .st.amber { color: var(--amber); }
+.etask.with-cost { grid-template-columns: 16px 48px minmax(0, 1fr) 64px 64px 124px; }
+.etask .cost { font-size: 12px; color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; }
 .etask.closed { color: var(--muted); }
 .etask.closed .tt { text-decoration: line-through; }
 .etask-add { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 8px; background: var(--bg-group); }
@@ -562,6 +564,7 @@ a.epic-chip:hover { border-color: var(--violet); color: var(--text); }
   .epic-main { padding: 16px; overflow: visible; }
   .epic-aside { border-left: 0; border-top: 1px solid var(--line); padding: 16px; overflow: visible; }
   .etask { grid-template-columns: 16px minmax(0, 1fr) auto; padding: 8px 14px; }
+  .etask.with-cost { grid-template-columns: 16px minmax(0, 1fr) auto auto; }
   .etask .id, .etask .tm { display: none; }
   .etask .tt { white-space: normal; }
   .epic-box .mini { display: none; }

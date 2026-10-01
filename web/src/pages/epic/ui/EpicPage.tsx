@@ -24,6 +24,7 @@ import {
   useTasks,
 } from "@/entities/task";
 import { type Team, useTeamMap } from "@/entities/team";
+import { moneyText, SpendText, type SpendItem, spendTitle, useTaskUsage } from "@/entities/usage";
 import { AddArtifactDialog } from "@/features/add-artifact";
 import type { NewTaskPreset } from "@/features/create-task";
 import { timeAgo, useTick } from "@/shared/lib";
@@ -35,6 +36,7 @@ export function EpicPage({ onNew }: { onNew: (preset?: NewTaskPreset) => void })
   const q = useTask(id);
   const all = useTasks().data ?? [];
   const teams = useTeamMap();
+  const usage = useTaskUsage(id || undefined).data;
   const toast = useToast();
   const fail = (e: Error) => toast(`Не удалось: ${e.message}`, "error");
   const viewer = useArtifactViewer(fail);
@@ -98,12 +100,12 @@ export function EpicPage({ onNew }: { onNew: (preset?: NewTaskPreset) => void })
           )}
           <EditableText epic={epic} field="description" title="Цель" empty="Цель ещё не записана" />
           <Criteria epic={epic} />
-          <EpicTasks epic={epic} tasks={tasks} all={all} teams={teams} onNew={() => onNew({ epic: epic.id })} />
+          <EpicTasks epic={epic} tasks={tasks} all={all} teams={teams} costs={usage?.tasks} onNew={() => onNew({ epic: epic.id })} />
           <EditableText epic={epic} field="plan" title="Дорожная карта" empty="Оркестратор распишет шаги к цели эпика" />
         </div>
 
         <aside className="epic-aside" aria-label="Свойства эпика">
-          <EpicProps epic={epic} tasks={tasks} teams={teams} />
+          <EpicProps epic={epic} tasks={tasks} teams={teams} spend={usage?.spend} />
           <section className="sec">
             <h3>Прогресс</h3>
             {tasks.length ? <EpicProgress tasks={tasks} big legend="list" /> : <span className="muted">Задач пока нет</span>}
@@ -247,7 +249,24 @@ function Criteria({ epic }: { epic: Task }) {
   );
 }
 
-function EpicTasks({ epic, tasks, all, teams, onNew }: { epic: Task; tasks: TaskSummary[]; all: TaskSummary[]; teams: Map<string, Team>; onNew: () => void }) {
+function EpicTasks({
+  epic,
+  tasks,
+  all,
+  teams,
+  costs,
+  onNew,
+}: {
+  epic: Task;
+  tasks: TaskSummary[];
+  all: TaskSummary[];
+  teams: Map<string, Team>;
+  /** What each task cost, when its agents spent anything. */
+  costs?: SpendItem[];
+  onNew: () => void;
+}) {
+  const priced = costs?.some((c) => c.spend.models.some((m) => m.cost !== null));
+  const costOf = (id: string) => costs?.find((c) => c.id === id)?.spend;
   const navigate = useNavigate();
   const patch = usePatchTask();
   const toast = useToast();
@@ -270,7 +289,7 @@ function EpicTasks({ epic, tasks, all, teams, onNew }: { epic: Task; tasks: Task
           const team = t.team ? teams.get(t.team) : undefined;
           const isClosed = progressOf(t.status) === "closed";
           return (
-            <button type="button" key={t.id} className={`etask${isClosed ? " closed" : ""}`} onClick={() => open(t.id)}>
+            <button type="button" key={t.id} className={`etask${isClosed ? " closed" : ""}${priced ? " with-cost" : ""}`} onClick={() => open(t.id)}>
               <StatusIcon status={t.status} />
               <span className="id">{t.id}</span>
               <span className="tt">
@@ -279,6 +298,7 @@ function EpicTasks({ epic, tasks, all, teams, onNew }: { epic: Task; tasks: Task
                 {!isClosed && t.openDeps.length > 0 && <span className="w">ждёт {t.openDeps.join(", ")}</span>}
               </span>
               <span className="tm">{team ? <Avatars members={team.members} max={4} /> : null}</span>
+              {priced && <TaskCost spend={costOf(t.id)} />}
               <span className={`st${t.status === "needs_owner" ? " amber" : ""}`}>{STATUS_NAME[t.status]}</span>
             </button>
           );
@@ -314,7 +334,15 @@ function EpicTasks({ epic, tasks, all, teams, onNew }: { epic: Task; tasks: Task
   );
 }
 
-function EpicProps({ epic, tasks, teams }: { epic: Task; tasks: TaskSummary[]; teams: Map<string, Team> }) {
+function TaskCost({ spend }: { spend?: SpendItem["spend"] }) {
+  return (
+    <span className="cost" title={spend ? spendTitle(spend) : undefined}>
+      {spend && spend.models.some((m) => m.cost !== null) ? moneyText(spend.cost) : ""}
+    </span>
+  );
+}
+
+function EpicProps({ epic, tasks, teams, spend }: { epic: Task; tasks: TaskSummary[]; teams: Map<string, Team>; spend?: SpendItem["spend"] }) {
   const move = useMoveTask();
   const patch = usePatchTask();
   const toast = useToast();
@@ -366,6 +394,12 @@ function EpicProps({ epic, tasks, teams }: { epic: Task; tasks: TaskSummary[]; t
           <span className="muted">сейчас не работают</span>
         )}
       </span>
+      {!!spend?.calls && (
+        <>
+          <span className="k">Расходы</span>
+          <SpendText spend={spend} />
+        </>
+      )}
     </div>
   );
 }

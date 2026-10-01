@@ -1,9 +1,9 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { displayName, ROLE_TITLE_RU } from "@/entities/member";
 import { useMeta } from "@/entities/project";
-import { type ModelOption, useModels, useSetMemberModel } from "@/entities/team";
-import { plural } from "@/shared/lib";
+import { useSetMemberModel } from "@/entities/team";
 import { useToast } from "@/shared/ui";
+import { ModelList } from "./ModelList.tsx";
 import "./model-menu.css";
 
 const short = (id: string) => id.replace(/^[^/]+\//, "");
@@ -89,12 +89,10 @@ function Popover({
   pos: Pos;
   onClose: () => void;
 }) {
-  const models = useModels();
   const save = useSetMemberModel();
   const toast = useToast();
   const [pick, setPick] = useState(member.model ?? "");
   const [think, setThink] = useState(member.thinking ?? "");
-  const [query, setQuery] = useState("");
   const who = displayName(member.name);
 
   useEffect(() => {
@@ -102,20 +100,6 @@ function Popover({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-
-  // Models by provider; the one the agent has now stays listed even if pi does not know it.
-  const groups = useMemo(() => {
-    const all = [...(models.data?.models ?? [])];
-    if (member.model && !all.some((m) => m.id === member.model)) {
-      const [provider, name] = member.model.includes("/") ? member.model.split(/\/(.*)/s) : ["", member.model];
-      all.push({ id: member.model, provider, name, listed: false });
-    }
-    const q = query.trim().toLowerCase();
-    const by = new Map<string, ModelOption[]>();
-    for (const m of all.filter((m) => !q || m.id.toLowerCase().includes(q))) by.set(m.provider, [...(by.get(m.provider) ?? []), m]);
-    return [...by.entries()];
-  }, [models.data, member.model, query]);
-  const total = models.data?.models.length ?? 0;
 
   const changed = pick !== (member.model ?? "") || think !== (member.thinking ?? "");
   const apply = () =>
@@ -139,38 +123,24 @@ function Popover({
           <b>Модель {who}</b>
           <span>Только для этого агента. Роль и остальная команда не меняются.</span>
         </div>
-        <input className="mm-search" type="search" placeholder={total ? `Найти среди ${total} ${plural(total, "модели", "моделей", "моделей")}` : "Найти модель"} aria-label="Найти модель" value={query} onChange={(e) => setQuery(e.target.value)} />
-        <div className="mm-list" role="radiogroup" aria-label="Модель">
-          <button type="button" role="radio" aria-checked={!pick} className={`mm-opt role${!pick ? " on" : ""}`} onClick={() => setPick("")}>
-            <span className="mm-radio" />
-            <span className="mm-role">
-              <span>Как у роли «{capitalized(ROLE_TITLE_RU[member.role] ?? member.role)}»</span>
-              <span className="mono muted">
-                {roleModel ? short(roleModel) : "модель pi по умолчанию"}
-                {roleThinking ? ` · ${roleThinking}` : ""}
-              </span>
-            </span>
-          </button>
-          {groups.map(([provider, items]) => (
-            <div key={provider} className="mm-group">
-              {provider && (
-                <span className="mm-provider">
-                  {provider} <span className="n">{items.length}</span>
+        <ModelList
+          current={member.model}
+          pick={pick}
+          onPick={(id) => setPick(id === roleModel ? "" : id)}
+          note={(m) => (m.id === roleModel ? "у роли" : "")}
+          first={
+            <button type="button" role="radio" aria-checked={!pick} className={`mm-opt role${!pick ? " on" : ""}`} onClick={() => setPick("")}>
+              <span className="mm-radio" />
+              <span className="mm-role">
+                <span>Как у роли «{capitalized(ROLE_TITLE_RU[member.role] ?? member.role)}»</span>
+                <span className="mono muted">
+                  {roleModel ? short(roleModel) : "модель pi по умолчанию"}
+                  {roleThinking ? ` · ${roleThinking}` : ""}
                 </span>
-              )}
-              {items.map((m) => (
-                <button key={m.id} type="button" role="radio" aria-checked={pick === m.id} className={`mm-opt${pick === m.id ? " on" : ""}`} onClick={() => setPick(m.id === roleModel ? "" : m.id)}>
-                  <span className="mm-radio" />
-                  <span className="mono">{m.name}</span>
-                  <span className="mm-note">{m.id === roleModel ? "у роли" : !m.listed && models.data?.catalogue ? "нет у pi" : ""}</span>
-                </button>
-              ))}
-            </div>
-          ))}
-          {models.isPending && <p className="mm-empty">Загрузка моделей…</p>}
-          {models.data && !groups.length && <p className="mm-empty">{query ? "Ничего не найдено" : "pi не назвал ни одной модели"}</p>}
-          {models.data && !models.data.catalogue && <p className="mm-empty">Список pi недоступен: показаны модели из настроек агентов.</p>}
-        </div>
+              </span>
+            </button>
+          }
+        />
         <div className="mm-think">
           <span>Размышление</span>
           <div role="radiogroup" aria-label="Размышление" className="mm-seg">

@@ -20,6 +20,7 @@ const EVENT: Record<string, string> = {
   "mcp.called": "вызов MCP",
 };
 const TYPE: Record<string, string> = { task: "задача", bug: "баг", spike: "исследование", epic: "эпик" };
+const TYPES: Record<string, string> = { task: "задач", bug: "багов", spike: "исследований", epic: "эпиков" };
 const ACTOR: Record<string, string> = { human: "человек", agent: "агент", orchestrator: "оркестратор" };
 const CREATED_BY: Record<string, string> = { human: "человеком", agent: "агентом", orchestrator: "оркестратором" };
 const TO: Record<string, string> = {
@@ -47,6 +48,7 @@ export function condition(key: string, v: unknown): string {
   if (key === "from" && is) return `из ${or(many(arg, status))}`;
   if ((key === "status" || key === "task.status") && is) return `в статусе ${or(many(arg, status))}`;
   if (key === "task.type" && is) return `тип: ${or(many(arg, (x) => TYPE[x] ?? x))}`;
+  if (key === "task.type" && op === "not") return `кроме ${or(many(arg, (x) => TYPES[x] ?? x))}`;
   if (key === "task.labels" && op === "contains") return `с меткой ${or(many(arg))}`;
   if (key === "task.labels" && op === "not_contains") return `без метки ${or(many(arg))}`;
   if (key === "actor.role" && is) return `автор — ${or(many(arg, (x) => ACTOR[x] ?? x))}`;

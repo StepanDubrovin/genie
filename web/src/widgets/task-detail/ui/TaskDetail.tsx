@@ -31,6 +31,7 @@ import { useAgentConfig } from "@/entities/agent-config";
 import { PersonAvatar, responsibleChoices, useMembers } from "@/entities/project";
 import { useSession } from "@/entities/session";
 import type { Team } from "@/entities/team";
+import { SpendText, useTaskUsage } from "@/entities/usage";
 import { IDEA_TEMPLATE } from "@/features/shape-idea";
 import { OwnerDecision } from "@/features/owner-decision";
 import { SpawnTeamDialog } from "@/features/spawn-team";
@@ -214,6 +215,7 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
               </button>
             )}
           </span>
+          <TaskSpend id={t.id} epic={isEpic} />
           {!isEpic && (
             <>
               <span className="k">Эпик</span>
@@ -585,4 +587,19 @@ function EpicBox({ id, onArtifact }: { id: string; onArtifact: (task: string, n:
 /** How many members of a running team work right now, in words. */
 function workingText(n: number): string {
   return n ? `${n} ${plural(n, "работает", "работают", "работают")}` : "сейчас никто не работает";
+}
+
+/** What the agents spent on the task (with its subtasks; an epic, with its tasks); nothing until they spend. */
+function TaskSpend({ id, epic }: { id: string; epic: boolean }) {
+  const usage = useTaskUsage(id).data;
+  if (!usage?.spend.calls) return null;
+  const tasks = usage.tasks.length;
+  return (
+    <>
+      <span className="k">Расходы</span>
+      <span className="wide">
+        <SpendText spend={usage.spend} extra={tasks > 1 ? (epic ? `${tasks} ${plural(tasks, "задача", "задачи", "задач")}` : "вместе с подзадачами") : undefined} />
+      </span>
+    </>
+  );
 }
