@@ -47,7 +47,7 @@ echo 'пароль-не-короче-8' | docker compose exec -T genie genie use
 
 ## Готовый образ из GitHub Container Registry
 
-Workflow `.github/workflows/docker.yml` собирает образ, прогоняет `docker/smoke-test.sh` (старт, здоровье, веб, пользователь, права, остановка по SIGINT) и публикует его как `ghcr.io/<владелец>/<репозиторий>`: при пуше в `main` — теги `latest`, `main`, `sha-…`, при теге `vX.Y.Z` — `X.Y.Z` и `X.Y`. На pull request образ только собирается и проверяется. Собирается `linux/amd64`.
+Workflow `.github/workflows/docker.yml` собирает образ, прогоняет `docker/smoke-test.sh` (старт, здоровье, веб, пользователь, права, остановка по SIGINT) и публикует его как `ghcr.io/<владелец>/<репозиторий>`: при пуше в `main` — теги `latest`, `main`, `sha-…`, при теге `vX.Y.Z` — `X.Y.Z` и `X.Y`. Pull request-ы идут в ветку `rc` и образ не собирают: там только быстрые проверки `ci.yml`. Образ собирается, когда `rc` вливают в `main`. Собирается `linux/amd64`.
 
 Пакет, опубликованный из приватного репозитория, приватный: скачать его без токена нельзя. На сервере:
 
