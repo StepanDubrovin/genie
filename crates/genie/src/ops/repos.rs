@@ -52,7 +52,7 @@ fn token_from_stdin(cx: &Cx, stdin: bool) -> Result<Option<String>, String> {
 #[derive(clap::Args, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Hosts {
-    /// Also ask each host: is the token good, which version.
+    /// Also check each host's configuration (tokens belong to repositories: `genie repos check <name>`).
     #[arg(long)]
     #[serde(default)]
     pub check: bool,
@@ -93,14 +93,14 @@ impl Op for Hosts {
     }
 }
 
-/// ` · token …a1b2` for a repository with its own token, nothing for one that uses the host's.
+/// ` · token …a1b2` for a repository that has a token, nothing for one that has none.
 fn token_note(v: &Value) -> String {
     if v["token"]["set"] != json!(true) {
         return String::new();
     }
     let hint = s(&v["token"], "hint");
     let unreadable = if v["token"]["unreadable"] == json!(true) { " (cannot be read: enter it again)" } else { "" };
-    format!(" · own token{}{unreadable}", if hint.is_empty() { String::new() } else { format!(" {hint}") })
+    format!(" · token{}{unreadable}", if hint.is_empty() { String::new() } else { format!(" {hint}") })
 }
 
 /// The project's repositories: where each is in the working directory and what you may do in it.
@@ -201,7 +201,7 @@ pub struct Add {
     #[arg(long)]
     #[serde(default, deserialize_with = "opt_json_text")]
     pub policy: Option<String>,
-    /// Read the repository's access token (PAT) from stdin; the server keeps it sealed. Without it the host's token applies.
+    /// Read the repository's access token (PAT) from stdin; the server keeps it sealed.
     #[arg(long)]
     #[serde(skip)]
     #[schemars(skip)]
@@ -249,7 +249,7 @@ pub struct Set {
     #[serde(skip)]
     #[schemars(skip)]
     pub token_stdin: bool,
-    /// Remove the repository's own token: the host's applies again.
+    /// Remove the repository's token.
     #[arg(long, conflicts_with = "token_stdin")]
     #[serde(default)]
     pub clear_token: bool,

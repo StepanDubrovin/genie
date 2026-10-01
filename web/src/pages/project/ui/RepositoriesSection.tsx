@@ -149,7 +149,7 @@ function Repo({ repo, admin }: { repo: ProjectRepo; admin: boolean }) {
   const save = (p: { access?: Access; policy?: RepoPolicy; mount?: string; token?: string }, ok: string) => act(() => patch.mutateAsync({ name: repo.name, patch: p }), ok);
   const runCheck = (probe: boolean) => void act(async () => setReport((await check.mutateAsync({ name: repo.name, probe })).lines));
 
-  const noToken = !!repo.host.kind && repo.host.kind !== "plain" && !repo.host.hasToken && !repo.token?.set;
+  const noToken = !!repo.host.kind && repo.host.kind !== "plain" && !repo.token?.set;
   const hostProblems = [
     ...(repo.host.error ? [repo.host.error] : []),
     ...(repo.host.problems ?? []),
@@ -334,9 +334,7 @@ function Repo({ repo, admin }: { repo: ProjectRepo; admin: boolean }) {
                 ? repo.token.unreadable
                   ? "Сохранённый токен не читается (сменился ключ сервера): введите его заново."
                   : `Задан${repo.token.hint ? ` (${repo.token.hint})` : ""}. Хранится на сервере зашифрованным и нигде не показывается.`
-                : repo.host.hasToken
-                  ? "Своего токена нет: используется общий токен хостинга."
-                  : "Токена нет: без него сервер не сможет работать с этим репозиторием."}
+                : "Токена нет: без него сервер не сможет работать с этим репозиторием."}
             </span>
           </div>
         </div>
@@ -543,10 +541,8 @@ function AddRepo({ hosts, problems, loaded, onClose }: { hosts: GitHostInfo[]; p
               value={token}
               onChange={(e) => setToken(e.target.value)}
             />
-            <span className={hostInfo && !hostInfo.hasToken && hostInfo.kind !== "plain" && !token.trim() ? "rp-hint warn" : "rp-hint"}>
-              {hostInfo?.hasToken
-                ? "Необязательно: без него используется общий токен хостинга. Сервер хранит токен зашифрованным и нигде не показывает."
-                : "Сервер хранит токен зашифрованным и нигде не показывает. Права: чтение и запись веток, запросы на слияние."}
+            <span className={hostInfo && hostInfo.kind !== "plain" && !token.trim() ? "rp-hint warn" : "rp-hint"}>
+              Сервер хранит токен зашифрованным и нигде не показывает. Права: чтение и запись веток, запросы на слияние.
             </span>
           </div>
         </div>

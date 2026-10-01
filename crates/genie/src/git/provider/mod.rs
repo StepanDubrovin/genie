@@ -164,7 +164,7 @@ impl Api {
             return Err(ApiError::Unsupported(format!("host {} is a plain git server: it has no pull/merge request API", host.id)));
         };
         if host.token.is_none() {
-            return Err(ApiError::Auth(format!("host {} has no token (set one on the repository, or `token` in git.json)", host.id)));
+            return Err(ApiError::Auth(format!("host {} has no token (set one on the repository)", host.id)));
         }
         let mut b =
             reqwest::Client::builder().timeout(Duration::from_secs(30)).connect_timeout(Duration::from_secs(10)).user_agent("genie");

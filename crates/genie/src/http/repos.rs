@@ -156,7 +156,7 @@ fn repo_json(app: &App, hosts: &Hosts, repo: &ProjectRepo, agent: Option<&AgentI
     let resolved = store::resolved(app, repo);
     let host = match hosts.map.get(&repo.host) {
         Some(h) => {
-            json!({ "id": h.id, "kind": h.kind, "url": h.url, "webUrl": h.web_url(&repo.remote), "problems": h.missing, "hasToken": h.token.is_some() })
+            json!({ "id": h.id, "kind": h.kind, "url": h.url, "webUrl": h.web_url(&repo.remote) })
         }
         None => {
             let why = hosts.errors.iter().find(|e| e.starts_with(&format!("host {}:", repo.host))).cloned();

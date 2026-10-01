@@ -36,7 +36,7 @@ async fn rig(kind: &'static str, policy: Value) -> Rig {
     upstream(&hosts, "acme/api", &[("README.md", "api\n")]);
     let fake = fakehost::spawn(kind, "secret").await;
     let cfg = json!({ "hosts": { "h": {
-        "kind": kind, "url": fake.url, "token": "secret",
+        "kind": kind, "url": fake.url,
         "clone_urls": { "https": format!("file://{}/{{remote}}.git", hosts.display()) }
     } } });
     std::fs::write(h.dir.path().join("git.json"), cfg.to_string()).unwrap();
@@ -51,7 +51,7 @@ async fn rig(kind: &'static str, policy: Value) -> Rig {
         .unwrap();
     let r = Rig { h, fake, port, orchestrator };
     let (s, b, _) = call(&r.h.router, "POST", "/api/repos")
-        .json(json!({ "name": "api", "host": "h", "remote": "acme/api", "mount": ".", "policy": policy }))
+        .json(json!({ "name": "api", "host": "h", "remote": "acme/api", "mount": ".", "policy": policy, "token": "secret" }))
         .header("x-genie-project", "shop")
         .header("host", &format!("127.0.0.1:{port}"))
         .send()

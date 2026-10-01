@@ -407,13 +407,6 @@ fn git_hosts(out: &mut Out, data: &Path) {
         out.fail("git", format!("git.json: {e}"), "fix the entry in <data>/git.json; the host is ignored until then");
     }
     for host in h.map.values() {
-        for m in &host.missing {
-            out.fail(
-                "git",
-                format!("host {}: secret missing: {m}", host.id),
-                "set the environment variable of the server, or point token_file at a readable file",
-            );
-        }
         for (what, path) in [("ssh_key", &host.ssh_key), ("ca_cert", &host.ca_cert), ("known_hosts", &host.known_hosts)] {
             if let Some(p) = path
                 && !Path::new(p).is_file()
@@ -424,12 +417,7 @@ fn git_hosts(out: &mut Out, data: &Path) {
         if host.insecure_skip_verify {
             out.warn("git", format!("host {}: certificates are not verified (insecure_skip_verify)", host.id), "give ca_cert instead");
         }
-        if host.missing.is_empty() {
-            out.ok(
-                "git",
-                format!("host {} ({}): {} over {}", host.id, host.kind.as_str(), host.url, if host.ssh { "ssh" } else { "https" }),
-            );
-        }
+        out.ok("git", format!("host {} ({}): {} over {}", host.id, host.kind.as_str(), host.url, if host.ssh { "ssh" } else { "https" }));
     }
     let Ok(db) = ServerDb::open(&data.join("server.db")) else { return };
     let repos = db.all_repos().unwrap_or_default();
@@ -449,14 +437,12 @@ fn git_hosts(out: &mut Out, data: &Path) {
         }
         if let Some(host) = h.map.get(&r.host)
             && host.kind != hosts::Kind::Plain
-            && host.token.is_none()
-            && host.missing.is_empty()
             && db.repo_token_info(&r.project, &r.name).ok().flatten().is_none()
         {
             out.warn(
                 "git",
-                format!("{}: repository {} has no token: neither its own nor the host's", r.project, r.name),
-                "set it when attaching the repository (the project page, or `genie repos set --token-stdin`), or `token` in git.json",
+                format!("{}: repository {} has no access token", r.project, r.name),
+                "set it on the repository: the project page, or `genie repos set --token-stdin`",
             );
         }
     }

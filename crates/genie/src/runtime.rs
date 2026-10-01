@@ -706,7 +706,7 @@ pub(crate) fn agent_command(
         .env_remove("GENIE_DIR");
     // Agents hold no credentials for git hosts: their clones talk to the server's proxy.
     let through_proxy = app.with_server(|db| db.repos(project)).is_ok_and(|r| !r.is_empty());
-    for var in crate::git::hosts::secret_vars(&app.data, through_proxy) {
+    for var in crate::git::hosts::secret_vars(through_proxy) {
         cmd.env_remove(var);
     }
     // The secrets of connections behind the gateway stay with the server.

@@ -29,7 +29,7 @@ pub fn failed(lines: &[Line]) -> bool {
     lines.iter().any(|l| l.level == "fail")
 }
 
-/// A host: its configuration, the token, the API's version.
+/// A host: its configuration (the tokens are the repositories', see [`repo`]).
 pub async fn host(app: &Arc<App>, id: &str) -> Vec<Line> {
     let all = match app.blocking(|app| Ok(hosts::load(&app.data))).await {
         Ok(h) => h,
@@ -45,28 +45,12 @@ pub async fn host(app: &Arc<App>, id: &str) -> Vec<Line> {
         }
         return out;
     };
-    for m in &h.missing {
-        out.push(line("fail", format!("secret missing: {m}")));
-    }
     out.push(line("ok", format!("{} at {} over {}", h.kind.as_str(), h.url, if h.ssh { "ssh" } else { "https" })));
     if h.kind == Kind::Plain {
         out.push(line("ok", "a plain git server: transport only (no pull/merge requests, no checks)"));
         return out;
     }
-    if h.token.is_none() {
-        out.push(line("warn", "no token on the host: each repository of a project brings its own (check the repository)"));
-        return out;
-    }
-    match Api::new(h) {
-        Err(e) => out.push(line("fail", e.to_string())),
-        Ok(api) => match api.whoami().await {
-            Ok(w) => out.push(line(
-                "ok",
-                format!("the token belongs to {}{}", w.login, w.version.map(|v| format!(" (host version {v})")).unwrap_or_default()),
-            )),
-            Err(e) => out.push(line("fail", e.to_string())),
-        },
-    }
+    out.push(line("ok", "a host holds no token: each repository of a project has its own (check the repository)"));
     out
 }
 
@@ -96,9 +80,6 @@ pub async fn repo(app: &Arc<App>, project: &str, name: &str, probe: bool) -> Vec
             return out;
         }
     };
-    for m in &host.missing {
-        out.push(line("fail", format!("host {}: secret missing: {m}", host.id)));
-    }
     let own = app.with_server(|db| db.repo_token_info(&record.project, &record.name)).ok().flatten();
     match own {
         Some(i) if i.unreadable => {
@@ -108,7 +89,9 @@ pub async fn repo(app: &Arc<App>, project: &str, name: &str, probe: bool) -> Vec
             "ok",
             format!("works with the repository's own token{}", if i.hint.is_empty() { String::new() } else { format!(" ({})", i.hint) }),
         )),
-        None if host.token.is_some() => out.push(line("ok", format!("works with the token of host {}", host.id))),
+        None if host.kind != Kind::Plain => {
+            out.push(line("fail", "the repository has no token: set one (the web, or `genie repos set --token-stdin`)"))
+        }
         None => {}
     }
     // The server's own copy: can it be fetched from the host?
@@ -174,8 +157,6 @@ pub async fn repo(app: &Arc<App>, project: &str, name: &str, probe: bool) -> Vec
                 Err(e) => out.push(line("fail", e.to_string())),
             },
         }
-    } else if host.kind != Kind::Plain {
-        out.push(line("fail", "no token for the host's API: set one on the repository (or `token` in git.json)"));
     }
     if probe {
         out.extend(probe_push(app, &record, &host).await);

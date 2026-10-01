@@ -37,7 +37,6 @@ async fn wait_for(app: &App, what: &str, timeout: Duration, mut done: impl FnMut
 async fn agents_deliver_through_the_proxy_and_a_person_merges() {
     // Secrets the server has and agents must not: the host's token and the tools' usual ones.
     unsafe {
-        std::env::set_var("GENIE_TEST_HOST_TOKEN", "secret");
         std::env::set_var("GITHUB_TOKEN", "ghp_should_not_leak");
     }
     let dir = tempfile::tempdir().unwrap();
@@ -57,7 +56,7 @@ async fn agents_deliver_through_the_proxy_and_a_person_merges() {
     let up = upstream(&hosts, "acme/api", &[("README.md", "api\n")]);
     let fake = fakehost::spawn("gitlab", "secret").await;
     let git_json = json!({ "hosts": { "h": {
-        "kind": "gitlab", "url": fake.url, "token": "${GENIE_TEST_HOST_TOKEN}",
+        "kind": "gitlab", "url": fake.url,
         "clone_urls": { "https": format!("file://{}/{{remote}}.git", hosts.display()) }
     } } });
     std::fs::write(dir.path().join("git.json"), git_json.to_string()).unwrap();
@@ -84,6 +83,7 @@ async fn agents_deliver_through_the_proxy_and_a_person_merges() {
                 host: "h".into(),
                 remote: "acme/api".into(),
                 mount: Some(".".into()),
+                token: Some(genie_core::secrets::Secret("secret".into())),
                 ..Default::default()
             },
         )
