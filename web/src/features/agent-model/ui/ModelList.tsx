@@ -8,7 +8,7 @@ import { plural } from "@/shared/lib";
  * model); `current`, the model in use now, stays listed even if pi does not
  * know it.
  */
-export function ModelList({ current, pick, onPick, first, note }: { current?: string; pick: string; onPick: (id: string) => void; first: ReactNode; note: (m: ModelOption) => string }) {
+export function ModelList({ current, pick, onPick, first, note, autoFocus }: { autoFocus?: boolean; current?: string; pick: string; onPick: (id: string) => void; first: ReactNode; note: (m: ModelOption) => string }) {
   const models = useModels();
   const [query, setQuery] = useState("");
   const groups = useMemo(() => {
@@ -25,7 +25,7 @@ export function ModelList({ current, pick, onPick, first, note }: { current?: st
   const total = models.data?.models.length ?? 0;
   return (
     <>
-      <input className="mm-search" type="search" placeholder={total ? `Найти среди ${total} ${plural(total, "модели", "моделей", "моделей")}` : "Найти модель"} aria-label="Найти модель" value={query} onChange={(e) => setQuery(e.target.value)} />
+      <input className="mm-search" type="search" autoFocus={autoFocus} placeholder={total ? `Найти среди ${total} ${plural(total, "модели", "моделей", "моделей")}` : "Найти модель"} aria-label="Найти модель" value={query} onChange={(e) => setQuery(e.target.value)} />
       <div className="mm-list" role="radiogroup" aria-label="Модель">
         {first}
         {groups.map(([provider, items]) => (

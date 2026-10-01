@@ -73,6 +73,7 @@ export function ModelPicker({ id, value, onChange, fallback }: { id?: string; va
               pick={value}
               onPick={pick}
               note={() => ""}
+              autoFocus
               first={
                 <button type="button" role="radio" aria-checked={!value} className={`mm-opt role${!value ? " on" : ""}`} onClick={() => pick("")}>
                   <span className="mm-radio" />
