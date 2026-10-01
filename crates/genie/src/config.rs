@@ -20,6 +20,35 @@ pub struct RoleModel {
     pub thinking: Option<String>,
 }
 
+/// `modelPrices`: what a model costs, in dollars per million tokens. Cache prices
+/// default to the input price.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelPrice {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+}
+
+impl ModelPrice {
+    /// What `t` cost, in dollars.
+    pub fn cost(&self, t: &genie_core::usage::Tokens) -> f64 {
+        (t.input as f64 * self.input
+            + t.output as f64 * self.output
+            + t.cache_read as f64 * self.cache_read.unwrap_or(self.input)
+            + t.cache_write as f64 * self.cache_write.unwrap_or(self.input))
+            / 1_000_000.0
+    }
+}
+
+/// The price of `model` (`provider/model`): its own entry, else an entry naming
+/// the model without the provider, or the same model through another provider.
+pub fn price_of<'a>(prices: &'a BTreeMap<String, ModelPrice>, model: &str) -> Option<&'a ModelPrice> {
+    let tail = |m: &str| m.rsplit_once('/').map_or(m.to_string(), |(_, t)| t.to_string());
+    prices.get(model).or_else(|| prices.get(&tail(model))).or_else(|| prices.iter().find(|(k, _)| tail(k) == tail(model)).map(|(_, p)| p))
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MemberSpec {
@@ -317,6 +346,8 @@ pub struct Config {
     pub public_url: Option<String>,
     pub allow_hosts: Vec<String>,
     pub role_models: BTreeMap<String, RoleModel>,
+    /// Prices of models (`provider/model` or the model alone), for what agents' work cost.
+    pub model_prices: BTreeMap<String, ModelPrice>,
     pub limits: Limits,
     pub worktrees: Worktrees,
     pub language: Language,
@@ -335,6 +366,7 @@ impl Default for Config {
             public_url: None,
             allow_hosts: Vec::new(),
             role_models: BTreeMap::new(),
+            model_prices: BTreeMap::new(),
             limits: Limits::default(),
             worktrees: Worktrees::default(),
             language: Language::default(),

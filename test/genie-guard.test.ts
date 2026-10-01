@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deniedBy, mcpDenial, type Policy, simpleCommands } from "../crates/genie/pi/genie-guard.ts";
+import { deniedBy, mcpDenial, type Policy, simpleCommands, usageOf } from "../crates/genie/pi/genie-guard.ts";
 
 test("a shell line is split into simple commands without assignments and wrappers", () => {
   assert.deepEqual(simpleCommands("cd app && FOO=1 git push origin main; ls | wc -l"), ["cd app", "git push origin main", "ls", "wc -l"]);
@@ -53,4 +53,18 @@ test("MCP calls reach only granted connections and tools", () => {
   assert.equal(mcpDenial(policy, "bash", { command: "ls" }), undefined);
   // A role without connections.
   assert.match(mcpDenial({ ...policy, mcp: {} }, "mcp", { tool: "github_get_issue" }) ?? "", /may use MCP connections: none/);
+});
+
+test("a model response is reported with its provider and tokens", () => {
+  const usage = { input: 1200, output: 80, cacheRead: 30000, cacheWrite: 0, totalTokens: 31280, cost: { total: 0 } };
+  assert.deepEqual(usageOf({ role: "assistant", provider: "litellm", model: "claude-opus-5-5", usage }), {
+    model: "litellm/claude-opus-5-5",
+    input: 1200,
+    output: 80,
+    cacheRead: 30000,
+    cacheWrite: 0,
+  });
+  assert.equal(usageOf({ role: "assistant", provider: "litellm", model: "litellm/x", usage })?.model, "litellm/x");
+  assert.equal(usageOf({ role: "user", usage }), undefined);
+  assert.equal(usageOf({ role: "assistant", model: "m", usage: { input: 0, output: 0 } }), undefined, "a failed request spent nothing");
 });

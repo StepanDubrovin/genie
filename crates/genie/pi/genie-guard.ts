@@ -13,6 +13,10 @@
 //   `mcp__<server>` wrappers) to connections and tools the role was not
 //   granted, and installing MCP servers.
 //
+// It also reports the tokens of every model response to the server
+// (`POST /api/agent/usage`), so genie can count what each chat, task, epic and
+// project cost; a report that fails is retried with the next one.
+//
 // These are soft limits: an agent with a shell can work around them. The MCP
 // config genie passes to pi-mcp-adapter (`--mcp-config`) already holds only the
 // role's connections; the guard also covers an adapter started without it. The
@@ -31,6 +35,8 @@ export interface Policy {
 }
 
 const POLICY = process.env.GENIE_POLICY ?? "";
+const BASE = (process.env.GENIE_URL ?? "").replace(/\/+$/, "");
+const TOKEN = process.env.GENIE_TOKEN ?? "";
 /** Commands that run another command, with their options that take a value (and leading operands). */
 const WRAPPERS: Record<string, { valued: string[]; operands?: number }> = {
   sudo: { valued: ["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"] },
@@ -136,7 +142,65 @@ export function mcpDenial(p: Policy, tool: string, input: Record<string, unknown
   return `genie: the role ${p.role} may use only these tools of ${s}: ${patterns.join(", ")}`;
 }
 
+/** Tokens of one model response, as `POST /api/agent/usage` takes them. */
+export interface UsageReport {
+  model: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.round(v) : 0);
+
+/** The usage of an assistant message (pi's `AssistantMessage`), or nothing when it spent no tokens. */
+export function usageOf(message: any): UsageReport | undefined {
+  if (message?.role !== "assistant" || !message.usage) return undefined;
+  const u = message.usage;
+  const r = { input: count(u.input), output: count(u.output), cacheRead: count(u.cacheRead), cacheWrite: count(u.cacheWrite) };
+  if (!r.input && !r.output && !r.cacheRead && !r.cacheWrite) return undefined;
+  const model = String(message.model ?? "").trim();
+  const provider = String(message.provider ?? "").trim();
+  return { model: provider && model && !model.startsWith(`${provider}/`) ? `${provider}/${model}` : model || provider || "unknown", ...r };
+}
+
+function reportUsage(pi: any): void {
+  if (!BASE || !TOKEN) return;
+  let pending: UsageReport[] = [];
+  let sending: Promise<void> = Promise.resolve();
+  async function send(): Promise<void> {
+    if (!pending.length) return;
+    const batch = pending;
+    pending = [];
+    try {
+      const res = await fetch(`${BASE}/api/agent/usage`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ reports: batch }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.status >= 500) throw new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      // Kept for the next response; a long outage keeps only the latest reports.
+      pending = [...batch, ...pending].slice(-500);
+      console.error(`[genie-guard] usage: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  /** One report at a time, in order; the agent does not wait for it. */
+  const flush = () => (sending = sending.then(send));
+  pi.on("message_end", (event: any) => {
+    const r = usageOf(event?.message);
+    if (!r) return;
+    pending.push(r);
+    void flush();
+  });
+  // A one-shot turn exits right after its answer: send what is left first.
+  pi.on("agent_end", () => flush());
+  pi.on("session_shutdown", () => flush());
+}
+
 export default function genieGuard(pi: any) {
+  reportUsage(pi);
   if (!POLICY) return;
 
   let policy: Policy | undefined;

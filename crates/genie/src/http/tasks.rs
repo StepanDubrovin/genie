@@ -32,6 +32,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/tasks/{id}/split", post(split))
         .route("/tasks/{id}/block", post(block).delete(unblock))
         .route("/tasks/{id}/docs-impact", get(docs_impact))
+        .route("/tasks/{id}/usage", get(usage))
         .route("/journal", get(journal))
 }
 
@@ -645,4 +646,20 @@ async fn docs_impact(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<Strin
     let access = ctx.access(&app, None).await?;
     let project = access.project.clone();
     Ok(Json(json!(app.blocking(move |app| crate::knowledge::docs_impact(app, &project, &id)).await?)))
+}
+
+/// What the agents spent on a task and the tasks under it (an epic's tasks,
+/// subtasks): in all, by model, and by task.
+async fn usage(State(app): State<Arc<App>>, ctx: Ctx, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let access = ctx.access(&app, None).await?;
+    let (rows, tasks) = tracker(&app, &access, move |t| {
+        t.get(&id)?;
+        Ok((t.usage_of_task(&id)?, crate::spend::TaskIndex::load(t.conn())?))
+    })
+    .await?;
+    let prices = &app.cfg.model_prices;
+    Ok(Json(json!({
+        "spend": crate::spend::Spend::of(prices, &rows),
+        "tasks": crate::spend::by_task(prices, &rows, &tasks, usize::MAX),
+    })))
 }

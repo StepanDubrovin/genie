@@ -106,7 +106,7 @@ async fn stats_count_tasks_decisions_and_answers() {
     assert_eq!(s, StatusCode::OK, "{e}");
     call(r, "POST", "/api/tasks/G-3/status").json(json!({ "status": "cancelled" })).send().await;
 
-    let stats = genie::stats::collect(&h.app.data, 7, None).unwrap();
+    let stats = genie::stats::collect(&h.app.data, 7, None, &h.app.cfg.model_prices).unwrap();
     let p = &stats.projects[0];
     assert_eq!((p.created, p.created_by_people, p.done, p.cancelled, p.open), (3, 3, 1, 1, 1), "{p:?}");
     assert_eq!(p.decisions, 1);
@@ -120,5 +120,5 @@ async fn stats_count_tasks_decisions_and_answers() {
     let (s, j, _) = call(r, "GET", "/api/stats?days=30").send().await;
     assert_eq!(s, StatusCode::OK, "{j}");
     assert_eq!(j["projects"][0]["decisions"], 1);
-    assert!(genie::stats::collect(&h.app.data, 7, Some("nope")).is_err());
+    assert!(genie::stats::collect(&h.app.data, 7, Some("nope"), &Default::default()).is_err());
 }

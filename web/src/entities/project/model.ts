@@ -1,4 +1,5 @@
 import type { Status } from "../../shared/api/types.ts";
+import type { Spend, SpendItem } from "../usage/model.ts";
 
 export interface Meta {
   prefix: string;
@@ -160,6 +161,19 @@ export interface ProjectStats {
   people: string[];
   /** The period day by day (UTC dates, oldest first), for charts. */
   daily: DayStats[];
+  /** What the agents' models cost in the period (an older server sends none). */
+  usage?: ProjectUsage;
+}
+
+/** What the agents' models spent in a project over the period. */
+export interface ProjectUsage {
+  spend: Spend;
+  /** Every epic, then `""` (tasks outside epics) and `"-"` (work on no task). */
+  epics: SpendItem[];
+  /** The most expensive tasks. */
+  tasks: SpendItem[];
+  /** The most expensive chats. */
+  chats: SpendItem[];
 }
 
 /** One day of a project's period. */
@@ -169,6 +183,33 @@ export interface DayStats {
   done: number;
   runs: number;
   runsFailed: number;
+  /** Dollars (models with a price) and tokens (all models). */
+  cost?: number;
+  tokens?: number;
+  /** Dollars by model, models with a price only. */
+  costByModel?: Record<string, number>;
+}
+
+/** One day's cost of several projects, by model. */
+export interface CostDay {
+  day: string;
+  cost: number;
+  tokens: number;
+  byModel: Record<string, number>;
+}
+
+/** The cost of several projects added up, day by day, oldest first. */
+export function costDays(projects: Pick<ProjectStats, "daily">[]): CostDay[] {
+  const by = new Map<string, CostDay>();
+  for (const p of projects)
+    for (const d of p.daily ?? []) {
+      const t = by.get(d.day) ?? { day: d.day, cost: 0, tokens: 0, byModel: {} };
+      t.cost += d.cost ?? 0;
+      t.tokens += d.tokens ?? 0;
+      for (const [m, c] of Object.entries(d.costByModel ?? {})) t.byModel[m] = (t.byModel[m] ?? 0) + c;
+      by.set(d.day, t);
+    }
+  return [...by.values()].sort((a, b) => a.day.localeCompare(b.day));
 }
 
 /** The days of several projects added up, day by day. */
