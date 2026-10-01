@@ -10,6 +10,8 @@
 - **Agent teams.** Live agent sessions on [pi](https://pi.dev) in a bubblewrap sandbox, configurable roles and team templates, an MCP gateway so other agents (Claude Code, Codex) can use genie's tools.
 - **Projects and people.** Multiple projects, per-project roles, task owners, `@login` mentions, invite links. Orchestrator autonomy per project: `autonomous`, `assisted` or `manual`.
 - **Epics.** Large work becomes an epic with a goal, success criteria, a roadmap and shared artifacts (requirements, glossary, decisions). Its tasks see all of it, and the epic tracks its own progress.
+- **Idea shaping.** Not sure how many tasks an idea will turn into? Describe it as it is and talk it over with a planner agent in chat. It proposes a task, or an epic with tasks and criteria, and you create the plan with one button.
+- **Images.** An image artifact (PNG, JPEG, GIF, WebP) gets a thumbnail and a zoomable lightbox. In a team chat, use `!image[artifact:G-7/3]` or `!image[docs/shot.png]` (a file from the team's working copy). External URLs are not supported.
 - **Knowledge base.** An Obsidian-compatible vault in git, edited by people and agents alike.
 - **Notifications and automations.** Web, Telegram and email delivery, with an automation engine on top.
 - **Reliability.** Restarts lose nothing, hot backups, `genie doctor` preflight checks, systemd units.

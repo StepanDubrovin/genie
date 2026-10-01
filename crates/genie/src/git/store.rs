@@ -43,13 +43,18 @@ fn plain(dir: &Path, args: &[&str]) -> Result<String, String> {
     run(Some(dir), &[], args)
 }
 
-/// The host a repository lives on, from the current `git.json`.
+/// The host a repository lives on, from the current `git.json`, with the repository's own
+/// token when it has one (else the host's).
 pub fn host_of(app: &App, repo: &ProjectRepo) -> Result<Host, String> {
     let all = hosts::load(&app.data);
-    all.map.get(&repo.host).cloned().ok_or_else(|| {
+    let mut host = all.map.get(&repo.host).cloned().ok_or_else(|| {
         let why = all.errors.iter().find(|e| e.starts_with(&format!("host {}:", repo.host))).cloned();
         why.unwrap_or_else(|| format!("host {} is not configured in git.json (repository {})", repo.host, repo.name))
-    })
+    })?;
+    if let Some(token) = app.with_server(|db| db.repo_token(&repo.project, &repo.name)).map_err(|e| e.to_string())? {
+        host.token = Some(token);
+    }
+    Ok(host)
 }
 
 pub fn mirror_path(app: &App, host: &Host, remote: &str) -> PathBuf {

@@ -706,7 +706,7 @@ pub(crate) fn agent_command(
         .env_remove("GENIE_DIR");
     // Agents hold no credentials for git hosts: their clones talk to the server's proxy.
     let through_proxy = app.with_server(|db| db.repos(project)).is_ok_and(|r| !r.is_empty());
-    for var in crate::git::hosts::secret_vars(&app.data, through_proxy) {
+    for var in crate::git::hosts::secret_vars(through_proxy) {
         cmd.env_remove(var);
     }
     // The secrets of connections behind the gateway stay with the server.
@@ -1917,6 +1917,20 @@ impl Kickoff<'_> {
                 "This task is part of epic {} — {}. Read its goal and shared artifacts (`genie task show {}`) before you start, and attach material useful for the whole epic to the epic itself.",
                 e.id, e.title, e.id
             ));
+        }
+        // The idea planner talks with the owner, not with a team or the orchestrator.
+        if self.spec.template.as_deref() == Some(crate::http::ideas::IDEA_TEMPLATE) {
+            out.push(format!(
+                "{} is an idea in the owner's own words. Start now: read it, look at what already exists, then ask the owner your first question in your reply. \
+                 The owner reads your replies in the agent chat and answers by mail; do not mail the orchestrator. \
+                 Keep your proposal in the `{}` artifact as your role describes: the owner applies it from the web.",
+                task.id,
+                crate::http::ideas::PLAN_ARTIFACT
+            ));
+            if let Some(d) = self.docs {
+                out.push(format!("\n{d}"));
+            }
+            return out.join("\n");
         }
         if matches!(task.status, Status::Inbox | Status::Draft | Status::Refining) {
             out.push(format!(

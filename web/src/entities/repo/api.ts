@@ -22,12 +22,14 @@ export interface NewRepoInput {
   mount?: string;
   access?: "read" | "write";
   policy?: RepoPolicy;
+  /** The access token (PAT) on the host; the server keeps it sealed. */
+  token?: string;
 }
 
 export const useAddRepo = () => useInvalidating((r: NewRepoInput) => request<ProjectRepo & { warning?: string | null }>("POST", "/api/repos", r));
 
 export const usePatchRepo = () =>
-  useInvalidating(({ name, patch }: { name: string; patch: { mount?: string; defaultBranch?: string; access?: "read" | "write"; policy?: RepoPolicy } }) =>
+  useInvalidating(({ name, patch }: { name: string; patch: { mount?: string; defaultBranch?: string; access?: "read" | "write"; policy?: RepoPolicy; token?: string } }) =>
     request<ProjectRepo>("PATCH", `/api/repos/${enc(name)}`, patch),
   );
 

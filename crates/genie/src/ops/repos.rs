@@ -33,11 +33,26 @@ fn policy(text: Option<String>) -> Result<Option<Value>, String> {
     text.map(|t| serde_json::from_str::<Value>(&t).map_err(|e| format!("the policy must be JSON: {e}"))).transpose()
 }
 
+/// The access token (PAT) from stdin on the command line, never as an argument (it would sit in the
+/// shell history and the process list) and never over MCP (it would pass through a model).
+fn token_from_stdin(cx: &Cx, stdin: bool) -> Result<Option<String>, String> {
+    if !stdin {
+        return Ok(None);
+    }
+    if !cx.local {
+        return Err("the token is read from stdin on the command line only".into());
+    }
+    let mut t = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut t).map_err(|e| e.to_string())?;
+    let t = t.trim().to_string();
+    if t.is_empty() { Err("stdin held no token".into()) } else { Ok(Some(t)) }
+}
+
 /// The hosts of `git.json` and what is wrong with them.
 #[derive(clap::Args, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Hosts {
-    /// Also ask each host: is the token good, which version.
+    /// Also check each host's configuration (tokens belong to repositories: `genie repos check <name>`).
     #[arg(long)]
     #[serde(default)]
     pub check: bool,
@@ -78,6 +93,16 @@ impl Op for Hosts {
     }
 }
 
+/// ` · token …a1b2` for a repository that has a token, nothing for one that has none.
+fn token_note(v: &Value) -> String {
+    if v["token"]["set"] != json!(true) {
+        return String::new();
+    }
+    let hint = s(&v["token"], "hint");
+    let unreadable = if v["token"]["unreadable"] == json!(true) { " (cannot be read: enter it again)" } else { "" };
+    format!(" · token{}{unreadable}", if hint.is_empty() { String::new() } else { format!(" {hint}") })
+}
+
 /// The project's repositories: where each is in the working directory and what you may do in it.
 #[derive(clap::Args, Deserialize, JsonSchema)]
 pub struct List {}
@@ -98,13 +123,14 @@ impl Op for List {
                 // An agent: its own rules, in words.
                 Some(rules) => rules.to_string(),
                 None => format!(
-                    "{:<10} {:<18} {}:{} · {} · push {}",
+                    "{:<10} {:<18} {}:{} · {} · push {}{}",
                     s(r, "name"),
                     s(r, "mount"),
                     r["host"]["id"].as_str().unwrap_or_default(),
                     s(r, "remote"),
                     s(r, "access"),
-                    r["policy"]["push"].as_str().unwrap_or("pr_only")
+                    r["policy"]["push"].as_str().unwrap_or("pr_only"),
+                    token_note(r)
                 ),
             })
             .collect::<Vec<_>>()
@@ -175,6 +201,11 @@ pub struct Add {
     #[arg(long)]
     #[serde(default, deserialize_with = "opt_json_text")]
     pub policy: Option<String>,
+    /// Read the repository's access token (PAT) from stdin; the server keeps it sealed.
+    #[arg(long)]
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub token_stdin: bool,
 }
 
 impl Op for Add {
@@ -182,7 +213,8 @@ impl Op for Add {
     const NAME: &'static str = "add";
     const NEED: Need = Need::Admin;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
-        let body = json!({ "name": self.name, "host": self.host, "remote": self.remote, "mount": self.mount, "access": self.access, "policy": policy(self.policy)? });
+        let token = token_from_stdin(cx, self.token_stdin)?;
+        let body = json!({ "name": self.name, "host": self.host, "remote": self.remote, "mount": self.mount, "access": self.access, "policy": policy(self.policy)?, "token": token });
         let v = cx.call("POST", "/repos", Some(body)).await?;
         let mut text = format!(
             "{} added at {} (default branch {})",
@@ -197,7 +229,7 @@ impl Op for Add {
     }
 }
 
-/// Change a repository's mount, access, default branch or policy.
+/// Change a repository's mount, access, default branch, policy or access token.
 #[derive(clap::Args, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Set {
@@ -212,6 +244,15 @@ pub struct Set {
     #[arg(long)]
     #[serde(default, deserialize_with = "opt_json_text")]
     pub policy: Option<String>,
+    /// Read a new access token (PAT) from stdin; the server keeps it sealed.
+    #[arg(long)]
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub token_stdin: bool,
+    /// Remove the repository's token.
+    #[arg(long, conflicts_with = "token_stdin")]
+    #[serde(default)]
+    pub clear_token: bool,
 }
 
 impl Op for Set {
@@ -219,10 +260,15 @@ impl Op for Set {
     const NAME: &'static str = "set";
     const NEED: Need = Need::Admin;
     async fn run(self, cx: &Cx) -> Result<Out, String> {
-        let body =
-            json!({ "mount": self.mount, "access": self.access, "defaultBranch": self.default_branch, "policy": policy(self.policy)? });
+        let token = match token_from_stdin(cx, self.token_stdin)? {
+            Some(t) => Some(t),
+            None => self.clear_token.then(String::new),
+        };
+        let body = json!({
+            "mount": self.mount, "access": self.access, "defaultBranch": self.default_branch, "policy": policy(self.policy)?, "token": token
+        });
         let v = cx.call("PATCH", &format!("/repos/{}", enc(&self.name)), Some(body)).await?;
-        Ok(Out::new(format!("{}: {} · {} · {}", s(&v, "name"), s(&v, "mount"), s(&v, "access"), v["policy"]), v))
+        Ok(Out::new(format!("{}: {} · {} · {}{}", s(&v, "name"), s(&v, "mount"), s(&v, "access"), v["policy"], token_note(&v)), v))
     }
 }
 

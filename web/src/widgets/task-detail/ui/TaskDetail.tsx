@@ -32,6 +32,7 @@ import { PersonAvatar, responsibleChoices, useMembers } from "@/entities/project
 import { useSession } from "@/entities/session";
 import type { Team } from "@/entities/team";
 import { SpendText, useTaskUsage } from "@/entities/usage";
+import { IDEA_TEMPLATE } from "@/features/shape-idea";
 import { OwnerDecision } from "@/features/owner-decision";
 import { SpawnTeamDialog } from "@/features/spawn-team";
 import { plural, timeAgo, useTick } from "@/shared/lib";
@@ -119,11 +120,17 @@ export function TaskDetail({ id, team, onClose }: { id: string; team?: Team; onC
           {t.id}
         </span>
         <span className="grow" />
-        {team && (
-          <Link to={`/team/${encodeURIComponent(team.id)}`} style={{ fontSize: 12 }}>
-            Команда {team.id}
-          </Link>
-        )}
+        {team &&
+          (team.template === IDEA_TEMPLATE && team.state === "active" && team.members[0] ? (
+            // An idea being shaped: back to the conversation with its planner.
+            <Link to={`/team/${encodeURIComponent(team.id)}/${encodeURIComponent(team.members[0].name)}`} style={{ fontSize: 12 }}>
+              Разговор о плане
+            </Link>
+          ) : (
+            <Link to={`/team/${encodeURIComponent(team.id)}`} style={{ fontSize: 12 }}>
+              Команда {team.id}
+            </Link>
+          ))}
         {canDelete && (
           <button type="button" className="icon-btn" onClick={() => setDeleting(true)} aria-label="Удалить задачу" title="Удалить задачу">
             <Icon.trash />
