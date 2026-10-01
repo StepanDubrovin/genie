@@ -143,10 +143,16 @@ pub fn automation_initiator(app: &App, run: &Run, task: Option<&str>) -> Option<
         .or_else(|| app.with_server(|db| db.automation(run.automation)).ok().map(|a| a.created_by))
 }
 
-/// The person the orchestrator answers in `mail`: the first person who wrote,
+/// Whether `login` is an enabled account of this server (`git-host`, which reports merges and
+/// checks as a human, is not).
+fn is_account(app: &App, login: &str) -> bool {
+    app.with_server(|db| db.user_by_login(login)).ok().flatten().is_some_and(|u| !u.disabled)
+}
+
+/// The person the orchestrator answers in `mail`: the first person with an account who wrote,
 /// else the initiator of the first team or task a message is about.
 pub fn mail_initiator(app: &App, project: &str, mail: &[Mail]) -> Option<String> {
-    if let Some(m) = mail.iter().find(|m| m.from_role == Role::Human.as_str()) {
+    if let Some(m) = mail.iter().find(|m| m.from_role == Role::Human.as_str() && is_account(app, &m.from)) {
         return Some(m.from.clone());
     }
     mail.iter().find_map(|m| {
